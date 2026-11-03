@@ -29,51 +29,98 @@
 
 export type PlanTierId = 'starter' | 'growth' | 'pro' | 'enterprise';
 export type BillingCycle = 'monthly' | 'annual';
+export type BillingInterval = 'monthly' | 'annual';
+export type BillingCurrency = 'USD' | 'INR';
 
 /**
- * Authoritative Founding 10 Customers Offer Specification
+ * Authoritative Founding Offer Specification
  */
 export interface FoundingOfferPlan {
   tier: 'starter' | 'growth' | 'pro';
   eligible: boolean;
+  standardMonthlyPriceUsd: number;
+  foundingMonthlyPriceUsd: number;
+  monthlySavingsUsd: number;
+  standardMonthlyPriceInr: number;
+  foundingMonthlyPriceInr: number;
+  monthlySavingsInr: number;
+  formattedFoundingUsd: string;
+  formattedFoundingInr: string;
+  formattedStandardUsd: string;
+  formattedStandardInr: string;
+  checkoutLabel: string;
+  checkoutLabelInr: string;
+  // Legacy aliases for backward compatibility
   standardMonthlyPrice: number;
   foundingMonthlyPrice: number;
   monthlySavings: number;
   formattedFounding: string;
   formattedStandard: string;
-  checkoutLabel: string;
 }
 
 export const FOUNDING_OFFER_CONFIG: Record<'starter' | 'growth' | 'pro', FoundingOfferPlan> = {
   starter: {
     tier: 'starter',
     eligible: true,
-    standardMonthlyPrice: 49,
+    standardMonthlyPriceUsd: 29,
+    foundingMonthlyPriceUsd: 29,
+    monthlySavingsUsd: 0,
+    standardMonthlyPriceInr: 2756,
+    foundingMonthlyPriceInr: 2756,
+    monthlySavingsInr: 0,
+    formattedFoundingUsd: '$29/month',
+    formattedFoundingInr: '₹2,756/month',
+    formattedStandardUsd: '$29/month',
+    formattedStandardInr: '₹2,756/month',
+    checkoutLabel: '$29 USD / month (Founding Price)',
+    checkoutLabelInr: '₹2,756 INR / month (Founding Price)',
+    standardMonthlyPrice: 29,
     foundingMonthlyPrice: 29,
-    monthlySavings: 20,
+    monthlySavings: 0,
     formattedFounding: '$29/month',
-    formattedStandard: '$49/month',
-    checkoutLabel: '$29 USD / month (Founding Customer Price)'
+    formattedStandard: '$29/month'
   },
   growth: {
     tier: 'growth',
     eligible: true,
-    standardMonthlyPrice: 149,
+    standardMonthlyPriceUsd: 79,
+    foundingMonthlyPriceUsd: 79,
+    monthlySavingsUsd: 0,
+    standardMonthlyPriceInr: 7508,
+    foundingMonthlyPriceInr: 7508,
+    monthlySavingsInr: 0,
+    formattedFoundingUsd: '$79/month',
+    formattedFoundingInr: '₹7,508/month',
+    formattedStandardUsd: '$79/month',
+    formattedStandardInr: '₹7,508/month',
+    checkoutLabel: '$79 USD / month (Founding Price)',
+    checkoutLabelInr: '₹7,508 INR / month (Founding Price)',
+    standardMonthlyPrice: 79,
     foundingMonthlyPrice: 79,
-    monthlySavings: 70,
+    monthlySavings: 0,
     formattedFounding: '$79/month',
-    formattedStandard: '$149/month',
-    checkoutLabel: '$79 USD / month (Founding Customer Price)'
+    formattedStandard: '$79/month'
   },
   pro: {
     tier: 'pro',
     eligible: false,
+    standardMonthlyPriceUsd: 349,
+    foundingMonthlyPriceUsd: 349,
+    monthlySavingsUsd: 0,
+    standardMonthlyPriceInr: 33169,
+    foundingMonthlyPriceInr: 33169,
+    monthlySavingsInr: 0,
+    formattedFoundingUsd: '$349/month',
+    formattedFoundingInr: '₹33,169/month',
+    formattedStandardUsd: '$349/month',
+    formattedStandardInr: '₹33,169/month',
+    checkoutLabel: '$349 USD / month (Custom Terms Available)',
+    checkoutLabelInr: '₹33,169 INR / month (Custom Terms Available)',
     standardMonthlyPrice: 349,
     foundingMonthlyPrice: 349,
     monthlySavings: 0,
     formattedFounding: '$349/month',
-    formattedStandard: '$349/month',
-    checkoutLabel: '$349 USD / month (Custom Terms Available)'
+    formattedStandard: '$349/month'
   }
 };
 
@@ -87,16 +134,26 @@ export interface PlanPricingDetails {
   monthly: {
     amountUsd: number;
     amountCents: number;
+    amountInr: number;
+    amountPaise: number;
     formatted: string;
+    formattedInr: string;
     checkoutLabel: string;
+    checkoutLabelInr: string;
   };
   annual: {
     totalAmountUsd: number;
     totalAmountCents: number;
+    totalAmountInr: number;
+    totalAmountPaise: number;
     monthlyEquivalentUsd: number;
+    monthlyEquivalentInr: number;
     formatted: string;
+    formattedInr: string;
     checkoutLabel: string;
+    checkoutLabelInr: string;
     savingsBadge: string;
+    savingsBadgeInr: string;
   };
 }
 
@@ -192,6 +249,11 @@ export const PLAN_LIMITS: Record<'starter' | 'growth' | 'pro', PlanLimits> = {
   }
 };
 
+/**
+ * AUTHORITATIVE SIX PRICING OPTIONS
+ * Annual billing represents 10 months of the monthly founding price, giving two months free.
+ * INR figures are initial indicative converted prices treated as fixed published prices.
+ */
 export const CENTRAL_PRICING: Record<'starter' | 'growth' | 'pro', PlanPricingDetails> = {
   starter: {
     id: 'starter',
@@ -211,18 +273,28 @@ export const CENTRAL_PRICING: Record<'starter' | 'growth' | 'pro', PlanPricingDe
       'Daily Retention Brief & basic reports'
     ],
     monthly: {
-      amountUsd: 49,
-      amountCents: 4900,
-      formatted: '$49/month',
-      checkoutLabel: '$49 USD / month'
+      amountUsd: 29,
+      amountCents: 2900,
+      amountInr: 2756,
+      amountPaise: 275600,
+      formatted: '$29/month',
+      formattedInr: '₹2,756/month',
+      checkoutLabel: '$29 USD / month',
+      checkoutLabelInr: '₹2,756 INR / month'
     },
     annual: {
-      totalAmountUsd: 468,
-      totalAmountCents: 46800,
-      monthlyEquivalentUsd: 39,
-      formatted: '$468/year ($39/mo)',
-      checkoutLabel: '$468 USD / year ($39/month equivalent)',
-      savingsBadge: 'Save $120/year (20% off)'
+      totalAmountUsd: 290,
+      totalAmountCents: 29000,
+      totalAmountInr: 27562,
+      totalAmountPaise: 2756200,
+      monthlyEquivalentUsd: 24,
+      monthlyEquivalentInr: 2297,
+      formatted: '$290/year',
+      formattedInr: '₹27,562/year',
+      checkoutLabel: '$290 USD / year (2 months free)',
+      checkoutLabelInr: '₹27,562 INR / year (2 months free)',
+      savingsBadge: '2 months free (Save $58/yr)',
+      savingsBadgeInr: '2 months free (Save ₹5,512/yr)'
     }
   },
   growth: {
@@ -246,18 +318,28 @@ export const CENTRAL_PRICING: Record<'starter' | 'growth' | 'pro', PlanPricingDe
       'Priority support'
     ],
     monthly: {
-      amountUsd: 149,
-      amountCents: 14900,
-      formatted: '$149/month',
-      checkoutLabel: '$149 USD / month'
+      amountUsd: 79,
+      amountCents: 7900,
+      amountInr: 7508,
+      amountPaise: 750800,
+      formatted: '$79/month',
+      formattedInr: '₹7,508/month',
+      checkoutLabel: '$79 USD / month',
+      checkoutLabelInr: '₹7,508 INR / month'
     },
     annual: {
-      totalAmountUsd: 1428,
-      totalAmountCents: 142800,
-      monthlyEquivalentUsd: 119,
-      formatted: '$1,428/year ($119/mo)',
-      checkoutLabel: '$1,428 USD / year ($119/month equivalent)',
-      savingsBadge: 'Save $360/year (20% off)'
+      totalAmountUsd: 790,
+      totalAmountCents: 79000,
+      totalAmountInr: 75082,
+      totalAmountPaise: 7508200,
+      monthlyEquivalentUsd: 66,
+      monthlyEquivalentInr: 6257,
+      formatted: '$790/year',
+      formattedInr: '₹75,082/year',
+      checkoutLabel: '$790 USD / year (2 months free)',
+      checkoutLabelInr: '₹75,082 INR / year (2 months free)',
+      savingsBadge: '2 months free (Save $158/yr)',
+      savingsBadgeInr: '2 months free (Save ₹15,016/yr)'
     }
   },
   pro: {
@@ -283,16 +365,26 @@ export const CENTRAL_PRICING: Record<'starter' | 'growth' | 'pro', PlanPricingDe
     monthly: {
       amountUsd: 349,
       amountCents: 34900,
+      amountInr: 33169,
+      amountPaise: 3316900,
       formatted: '$349/month',
-      checkoutLabel: '$349 USD / month'
+      formattedInr: '₹33,169/month',
+      checkoutLabel: '$349 USD / month',
+      checkoutLabelInr: '₹33,169 INR / month'
     },
     annual: {
-      totalAmountUsd: 3348,
-      totalAmountCents: 334800,
-      monthlyEquivalentUsd: 279,
-      formatted: '$3,348/year ($279/mo)',
-      checkoutLabel: '$3,348 USD / year ($279/month equivalent)',
-      savingsBadge: 'Save $840/year (20% off)'
+      totalAmountUsd: 3490,
+      totalAmountCents: 349000,
+      totalAmountInr: 331690,
+      totalAmountPaise: 33169000,
+      monthlyEquivalentUsd: 291,
+      monthlyEquivalentInr: 27641,
+      formatted: '$3,490/year',
+      formattedInr: '₹331,690/year',
+      checkoutLabel: '$3,490 USD / year (2 months free)',
+      checkoutLabelInr: '₹331,690 INR / year (2 months free)',
+      savingsBadge: '2 months free (Save $698/yr)',
+      savingsBadgeInr: '2 months free (Save ₹66,338/yr)'
     }
   }
 };
@@ -308,6 +400,14 @@ export function normalizePlanTier(rawTier?: string): 'starter' | 'growth' | 'pro
 }
 
 /**
+ * Normalizes input billing cycle / interval keys
+ */
+export function normalizeBillingInterval(rawCycle?: string): 'monthly' | 'annual' {
+  const clean = String(rawCycle || 'monthly').toLowerCase().trim();
+  return clean === 'annual' || clean === 'yearly' ? 'annual' : 'monthly';
+}
+
+/**
  * Get pricing details for a given plan tier
  */
 export function getPlanPricing(rawTier?: string): PlanPricingDetails {
@@ -317,67 +417,65 @@ export function getPlanPricing(rawTier?: string): PlanPricingDetails {
 
 /**
  * Authoritative lookup for expected charge amount and currency.
- * Used by backend to ignore any frontend-sent amounts.
+ * Used by backend to validate payments against published fixed prices.
  */
 export function getExpectedPlanAmount(
   rawTier?: string,
   rawCycle?: string,
-  isFoundingOffer?: boolean
+  _isFoundingOffer?: boolean,
+  rawCurrency?: string
 ): {
   tier: 'starter' | 'growth' | 'pro';
   billingCycle: 'monthly' | 'annual';
+  billingInterval: 'monthly' | 'annual';
   name: string;
   amountUsd: number;
   amountCents: number;
-  currency: 'USD';
+  amountInr: number;
+  amountPaise: number;
+  currency: 'USD' | 'INR';
   formatted: string;
+  formattedInr: string;
   checkoutLabel: string;
   isFoundingOffer: boolean;
 } {
   const tier = normalizePlanTier(rawTier);
-  const cycle: 'monthly' | 'annual' = String(rawCycle).toLowerCase().trim() === 'annual' ? 'annual' : 'monthly';
+  const cycle = normalizeBillingInterval(rawCycle);
   const plan = CENTRAL_PRICING[tier];
-  const founding = FOUNDING_OFFER_CONFIG[tier];
-
-  // Founding offer is available for Starter ($29/mo) and Growth ($79/mo) on monthly billing
-  if (isFoundingOffer && cycle === 'monthly' && founding.eligible) {
-    return {
-      tier,
-      billingCycle: 'monthly',
-      name: `${plan.displayName} (Founding Customer Offer)`,
-      amountUsd: founding.foundingMonthlyPrice,
-      amountCents: founding.foundingMonthlyPrice * 100,
-      currency: 'USD',
-      formatted: founding.formattedFounding,
-      checkoutLabel: founding.checkoutLabel,
-      isFoundingOffer: true
-    };
-  }
+  const currency: 'USD' | 'INR' = String(rawCurrency || 'USD').toUpperCase().trim() === 'INR' ? 'INR' : 'USD';
 
   if (cycle === 'annual') {
     return {
       tier,
       billingCycle: 'annual',
-      name: plan.displayName,
+      billingInterval: 'annual',
+      name: `${plan.displayName} Annual`,
       amountUsd: plan.annual.totalAmountUsd,
       amountCents: plan.annual.totalAmountCents,
-      currency: 'USD',
+      amountInr: plan.annual.totalAmountInr,
+      amountPaise: plan.annual.totalAmountPaise,
+      currency,
       formatted: plan.annual.formatted,
-      checkoutLabel: plan.annual.checkoutLabel,
-      isFoundingOffer: false
+      formattedInr: plan.annual.formattedInr,
+      checkoutLabel: currency === 'INR' ? plan.annual.checkoutLabelInr : plan.annual.checkoutLabel,
+      isFoundingOffer: true
     };
   }
 
   return {
     tier,
     billingCycle: 'monthly',
-    name: plan.displayName,
+    billingInterval: 'monthly',
+    name: `${plan.displayName} Monthly`,
     amountUsd: plan.monthly.amountUsd,
     amountCents: plan.monthly.amountCents,
-    currency: 'USD',
+    amountInr: plan.monthly.amountInr,
+    amountPaise: plan.monthly.amountPaise,
+    currency,
     formatted: plan.monthly.formatted,
-    checkoutLabel: plan.monthly.checkoutLabel,
-    isFoundingOffer: false
+    formattedInr: plan.monthly.formattedInr,
+    checkoutLabel: currency === 'INR' ? plan.monthly.checkoutLabelInr : plan.monthly.checkoutLabel,
+    isFoundingOffer: true
   };
 }
 
@@ -389,193 +487,171 @@ export interface AuthoritativeBillingPlanRecord {
   name: string;
   tier: 'starter' | 'growth' | 'pro';
   billing_cycle: 'monthly' | 'annual';
+  billing_interval: 'monthly' | 'annual';
   amount_usd: number;
   amount_cents: number;
+  amount_inr: number;
+  amount_paise: number;
   currency: 'USD';
+  currency_inr: 'INR';
   formatted: string;
+  formattedInr: string;
   checkout_label: string;
+  checkout_label_inr: string;
   razorpay_plan_id: string;
   is_active: boolean;
   is_founding_offer?: boolean;
   discountDescription: string;
   created_at: string;
   updated_at: string;
-  // Compatibility fields for legacy views
-  amount_paise: number;
-  amount_inr: number;
-  formattedInr: string;
 }
 
 export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord[] {
   const now = new Date().toISOString();
   return [
-    // Standard Starter Monthly
+    // 1. Starter Monthly: $29 USD / ₹2,756 INR
     {
       id: 'plan_tier_starter_monthly',
       name: 'Churnveda Starter — Monthly',
       tier: 'starter',
       billing_cycle: 'monthly',
-      amount_usd: 49,
-      amount_cents: 4900,
-      currency: 'USD',
-      formatted: '$49/month',
-      checkout_label: '$49 USD / month',
-      discountDescription: 'Standard monthly billing in USD',
-      razorpay_plan_id: process.env.RAZORPAY_STARTER_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_STARTER_MONTHLY || 'plan_TeZlsQOQaeAWAw',
-      is_active: true,
-      is_founding_offer: false,
-      created_at: now,
-      updated_at: now,
-      amount_paise: 4900,
-      amount_inr: 49,
-      formattedInr: '$49/month'
-    },
-    // Founding Offer Starter Monthly
-    {
-      id: 'plan_tier_starter_founding_monthly',
-      name: 'Churnveda Starter — Founding Offer Monthly',
-      tier: 'starter',
-      billing_cycle: 'monthly',
+      billing_interval: 'monthly',
       amount_usd: 29,
       amount_cents: 2900,
+      amount_inr: 2756,
+      amount_paise: 275600,
       currency: 'USD',
+      currency_inr: 'INR',
       formatted: '$29/month',
-      checkout_label: '$29 USD / month (Founding Customer Offer)',
-      discountDescription: 'Founding customer offer for first 10 paying customers ($20/mo savings)',
-      razorpay_plan_id: process.env.RAZORPAY_STARTER_FOUNDING_PLAN_ID || 'plan_TeZlsQOQaeAWAw_fnd',
+      formattedInr: '₹2,756/month',
+      checkout_label: '$29 USD / month',
+      checkout_label_inr: '₹2,756 INR / month',
+      discountDescription: 'Fixed monthly billing in USD (International) / INR (India)',
+      razorpay_plan_id: process.env.RAZORPAY_STARTER_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_STARTER_MONTHLY || 'plan_TeZlsQOQaeAWAw',
       is_active: true,
       is_founding_offer: true,
       created_at: now,
-      updated_at: now,
-      amount_paise: 2900,
-      amount_inr: 29,
-      formattedInr: '$29/month'
+      updated_at: now
     },
-    // Standard Starter Annual
+    // 2. Starter Annual: $290 USD / ₹27,562 INR (10 months price = 2 months free)
     {
       id: 'plan_tier_starter_annual',
       name: 'Churnveda Starter — Annual',
       tier: 'starter',
       billing_cycle: 'annual',
-      amount_usd: 468,
-      amount_cents: 46800,
+      billing_interval: 'annual',
+      amount_usd: 290,
+      amount_cents: 29000,
+      amount_inr: 27562,
+      amount_paise: 2756200,
       currency: 'USD',
-      formatted: '$468/year ($39/mo)',
-      checkout_label: '$468 USD / year ($39/month equivalent)',
-      discountDescription: 'Save $120/year (20% annual billing discount)',
+      currency_inr: 'INR',
+      formatted: '$290/year',
+      formattedInr: '₹27,562/year',
+      checkout_label: '$290 USD / year (2 months free)',
+      checkout_label_inr: '₹27,562 INR / year (2 months free)',
+      discountDescription: '2 months free — 10 months of monthly founding price',
       razorpay_plan_id: process.env.RAZORPAY_STARTER_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_STARTER_ANNUAL || 'plan_TeZMQYLVPEtQuj',
       is_active: true,
-      is_founding_offer: false,
+      is_founding_offer: true,
       created_at: now,
-      updated_at: now,
-      amount_paise: 46800,
-      amount_inr: 468,
-      formattedInr: '$468/year ($39/mo)'
+      updated_at: now
     },
-    // Standard Growth Monthly
+    // 3. Growth Monthly: $79 USD / ₹7,508 INR
     {
       id: 'plan_tier_growth_monthly',
       name: 'Churnveda Growth — Monthly',
       tier: 'growth',
       billing_cycle: 'monthly',
-      amount_usd: 149,
-      amount_cents: 14900,
-      currency: 'USD',
-      formatted: '$149/month',
-      checkout_label: '$149 USD / month',
-      discountDescription: 'Standard monthly billing in USD',
-      razorpay_plan_id: process.env.RAZORPAY_GROWTH_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_TeZQFjmJoxrnKM',
-      is_active: true,
-      is_founding_offer: false,
-      created_at: now,
-      updated_at: now,
-      amount_paise: 14900,
-      amount_inr: 149,
-      formattedInr: '$149/month'
-    },
-    // Founding Offer Growth Monthly
-    {
-      id: 'plan_tier_growth_founding_monthly',
-      name: 'Churnveda Growth — Founding Offer Monthly',
-      tier: 'growth',
-      billing_cycle: 'monthly',
+      billing_interval: 'monthly',
       amount_usd: 79,
       amount_cents: 7900,
+      amount_inr: 7508,
+      amount_paise: 750800,
       currency: 'USD',
+      currency_inr: 'INR',
       formatted: '$79/month',
-      checkout_label: '$79 USD / month (Founding Customer Offer)',
-      discountDescription: 'Founding customer offer for first 10 paying customers ($70/mo savings)',
-      razorpay_plan_id: process.env.RAZORPAY_GROWTH_FOUNDING_PLAN_ID || 'plan_TeZQFjmJoxrnKM_fnd',
+      formattedInr: '₹7,508/month',
+      checkout_label: '$79 USD / month',
+      checkout_label_inr: '₹7,508 INR / month',
+      discountDescription: 'Fixed monthly billing in USD (International) / INR (India)',
+      razorpay_plan_id: process.env.RAZORPAY_GROWTH_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_TeZQFjmJoxrnKM',
       is_active: true,
       is_founding_offer: true,
       created_at: now,
-      updated_at: now,
-      amount_paise: 7900,
-      amount_inr: 79,
-      formattedInr: '$79/month'
+      updated_at: now
     },
-    // Standard Growth Annual
+    // 4. Growth Annual: $790 USD / ₹75,082 INR (10 months price = 2 months free)
     {
       id: 'plan_tier_growth_annual',
       name: 'Churnveda Growth — Annual',
       tier: 'growth',
       billing_cycle: 'annual',
-      amount_usd: 1428,
-      amount_cents: 142800,
+      billing_interval: 'annual',
+      amount_usd: 790,
+      amount_cents: 79000,
+      amount_inr: 75082,
+      amount_paise: 7508200,
       currency: 'USD',
-      formatted: '$1,428/year ($119/mo)',
-      checkout_label: '$1,428 USD / year ($119/month equivalent)',
-      discountDescription: 'Save $360/year (20% annual billing discount)',
+      currency_inr: 'INR',
+      formatted: '$790/year',
+      formattedInr: '₹75,082/year',
+      checkout_label: '$790 USD / year (2 months free)',
+      checkout_label_inr: '₹75,082 INR / year (2 months free)',
+      discountDescription: '2 months free — 10 months of monthly founding price',
       razorpay_plan_id: process.env.RAZORPAY_GROWTH_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_ANNUAL || 'plan_TfXxPsAOqPYklF',
       is_active: true,
-      is_founding_offer: false,
+      is_founding_offer: true,
       created_at: now,
-      updated_at: now,
-      amount_paise: 142800,
-      amount_inr: 1428,
-      formattedInr: '$1,428/year ($119/mo)'
+      updated_at: now
     },
-    // Standard Enterprise Monthly
+    // 5. Enterprise Monthly: $349 USD / ₹33,169 INR
     {
       id: 'plan_tier_pro_monthly',
       name: 'Churnveda Enterprise — Monthly',
       tier: 'pro',
       billing_cycle: 'monthly',
+      billing_interval: 'monthly',
       amount_usd: 349,
       amount_cents: 34900,
+      amount_inr: 33169,
+      amount_paise: 3316900,
       currency: 'USD',
+      currency_inr: 'INR',
       formatted: '$349/month',
+      formattedInr: '₹33,169/month',
       checkout_label: '$349 USD / month',
-      discountDescription: 'Standard monthly billing in USD',
+      checkout_label_inr: '₹33,169 INR / month',
+      discountDescription: 'Fixed monthly billing in USD (International) / INR (India)',
       razorpay_plan_id: process.env.RAZORPAY_ENTERPRISE_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_PRO_MONTHLY || 'plan_TeZraPPrYthtEk',
       is_active: true,
-      is_founding_offer: false,
+      is_founding_offer: true,
       created_at: now,
-      updated_at: now,
-      amount_paise: 34900,
-      amount_inr: 349,
-      formattedInr: '$349/month'
+      updated_at: now
     },
-    // Standard Enterprise Annual
+    // 6. Enterprise Annual: $3,490 USD / ₹331,690 INR (10 months price = 2 months free)
     {
       id: 'plan_tier_pro_annual',
       name: 'Churnveda Enterprise — Annual',
       tier: 'pro',
       billing_cycle: 'annual',
-      amount_usd: 3348,
-      amount_cents: 334800,
+      billing_interval: 'annual',
+      amount_usd: 3490,
+      amount_cents: 349000,
+      amount_inr: 331690,
+      amount_paise: 33169000,
       currency: 'USD',
-      formatted: '$3,348/year ($279/mo)',
-      checkout_label: '$3,348 USD / year ($279/month equivalent)',
-      discountDescription: 'Save $840/year (20% annual billing discount)',
+      currency_inr: 'INR',
+      formatted: '$3,490/year',
+      formattedInr: '₹331,690/year',
+      checkout_label: '$3,490 USD / year (2 months free)',
+      checkout_label_inr: '₹331,690 INR / year (2 months free)',
+      discountDescription: '2 months free — 10 months of monthly founding price',
       razorpay_plan_id: process.env.RAZORPAY_ENTERPRISE_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_PRO_ANNUAL || 'plan_Tea17dB6H4EHdn',
       is_active: true,
-      is_founding_offer: false,
+      is_founding_offer: true,
       created_at: now,
-      updated_at: now,
-      amount_paise: 334800,
-      amount_inr: 3348,
-      formattedInr: '$3,348/year ($279/mo)'
+      updated_at: now
     }
   ];
 }
@@ -590,33 +666,35 @@ export function validatePaymentMatch(
   currency: string | undefined,
   isFoundingOffer?: boolean
 ): { isValid: boolean; error?: string; expected: ReturnType<typeof getExpectedPlanAmount> } {
-  const expected = getExpectedPlanAmount(planId, billingCycle, isFoundingOffer);
-
-  if (currency && currency.toUpperCase() !== 'USD') {
-    return {
-      isValid: false,
-      error: `Invalid currency: "${currency}". All Churnveda subscriptions are strictly USD ($). INR is rejected.`,
-      expected
-    };
-  }
+  const normCurrency = String(currency || 'USD').toUpperCase().trim();
+  const isINR = normCurrency === 'INR';
+  const expected = getExpectedPlanAmount(planId, billingCycle, isFoundingOffer, isINR ? 'INR' : 'USD');
 
   if (amount !== undefined && amount !== null && amount !== '') {
     const num = Number(amount);
-    const matchesCents = num === expected.amountCents;
-    const matchesUsd = num === expected.amountUsd;
-
-    // Check alternate (e.g. if user paid founding price without explicit flag, or vice versa)
-    const altExpected = getExpectedPlanAmount(planId, billingCycle, !isFoundingOffer);
-    const matchesAlt = num === altExpected.amountCents || num === altExpected.amountUsd;
-
-    if (!matchesCents && !matchesUsd && !matchesAlt) {
-      return {
-        isValid: false,
-        error: `Invalid amount: received ${num}, expected $${expected.amountUsd} USD (${expected.amountCents} cents) for ${expected.name} (${expected.billingCycle}).`,
-        expected
-      };
+    if (isINR) {
+      const matchesPaise = num === expected.amountPaise;
+      const matchesInr = num === expected.amountInr;
+      if (!matchesPaise && !matchesInr) {
+        return {
+          isValid: false,
+          error: `Invalid amount: received ${num}, expected ₹${expected.amountInr} INR (${expected.amountPaise} paise) for ${expected.name}.`,
+          expected
+        };
+      }
+    } else {
+      const matchesCents = num === expected.amountCents;
+      const matchesUsd = num === expected.amountUsd;
+      if (!matchesCents && !matchesUsd) {
+        return {
+          isValid: false,
+          error: `Invalid amount: received ${num}, expected $${expected.amountUsd} USD (${expected.amountCents} cents) for ${expected.name}.`,
+          expected
+        };
+      }
     }
   }
 
   return { isValid: true, expected };
 }
+

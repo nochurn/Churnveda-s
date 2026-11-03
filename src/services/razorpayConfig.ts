@@ -63,10 +63,16 @@ export const AUTHORITATIVE_PLANS: Record<
     monthlyPrice: number;
     annualPrice: number;
     annualTotalPrice: number;
+    monthlyPriceInr: number;
+    annualTotalPriceInr: number;
     formattedMonthly: string;
     formattedAnnual: string;
+    formattedMonthlyInr: string;
+    formattedAnnualInr: string;
     checkoutMonthlyLabel: string;
     checkoutAnnualLabel: string;
+    checkoutMonthlyLabelInr: string;
+    checkoutAnnualLabelInr: string;
   }
 > = {
   starter: {
@@ -74,40 +80,64 @@ export const AUTHORITATIVE_PLANS: Record<
     monthlyPrice: CENTRAL_PRICING.starter.monthly.amountUsd,
     annualPrice: CENTRAL_PRICING.starter.annual.monthlyEquivalentUsd,
     annualTotalPrice: CENTRAL_PRICING.starter.annual.totalAmountUsd,
+    monthlyPriceInr: CENTRAL_PRICING.starter.monthly.amountInr,
+    annualTotalPriceInr: CENTRAL_PRICING.starter.annual.totalAmountInr,
     formattedMonthly: CENTRAL_PRICING.starter.monthly.formatted,
     formattedAnnual: CENTRAL_PRICING.starter.annual.formatted,
+    formattedMonthlyInr: CENTRAL_PRICING.starter.monthly.formattedInr,
+    formattedAnnualInr: CENTRAL_PRICING.starter.annual.formattedInr,
     checkoutMonthlyLabel: CENTRAL_PRICING.starter.monthly.checkoutLabel,
-    checkoutAnnualLabel: CENTRAL_PRICING.starter.annual.checkoutLabel
+    checkoutAnnualLabel: CENTRAL_PRICING.starter.annual.checkoutLabel,
+    checkoutMonthlyLabelInr: CENTRAL_PRICING.starter.monthly.checkoutLabelInr,
+    checkoutAnnualLabelInr: CENTRAL_PRICING.starter.annual.checkoutLabelInr
   },
   growth: {
     name: CENTRAL_PRICING.growth.displayName,
     monthlyPrice: CENTRAL_PRICING.growth.monthly.amountUsd,
     annualPrice: CENTRAL_PRICING.growth.annual.monthlyEquivalentUsd,
     annualTotalPrice: CENTRAL_PRICING.growth.annual.totalAmountUsd,
+    monthlyPriceInr: CENTRAL_PRICING.growth.monthly.amountInr,
+    annualTotalPriceInr: CENTRAL_PRICING.growth.annual.totalAmountInr,
     formattedMonthly: CENTRAL_PRICING.growth.monthly.formatted,
     formattedAnnual: CENTRAL_PRICING.growth.annual.formatted,
+    formattedMonthlyInr: CENTRAL_PRICING.growth.monthly.formattedInr,
+    formattedAnnualInr: CENTRAL_PRICING.growth.annual.formattedInr,
     checkoutMonthlyLabel: CENTRAL_PRICING.growth.monthly.checkoutLabel,
-    checkoutAnnualLabel: CENTRAL_PRICING.growth.annual.checkoutLabel
+    checkoutAnnualLabel: CENTRAL_PRICING.growth.annual.checkoutLabel,
+    checkoutMonthlyLabelInr: CENTRAL_PRICING.growth.monthly.checkoutLabelInr,
+    checkoutAnnualLabelInr: CENTRAL_PRICING.growth.annual.checkoutLabelInr
   },
   pro: {
     name: CENTRAL_PRICING.pro.displayName,
     monthlyPrice: CENTRAL_PRICING.pro.monthly.amountUsd,
     annualPrice: CENTRAL_PRICING.pro.annual.monthlyEquivalentUsd,
     annualTotalPrice: CENTRAL_PRICING.pro.annual.totalAmountUsd,
+    monthlyPriceInr: CENTRAL_PRICING.pro.monthly.amountInr,
+    annualTotalPriceInr: CENTRAL_PRICING.pro.annual.totalAmountInr,
     formattedMonthly: CENTRAL_PRICING.pro.monthly.formatted,
     formattedAnnual: CENTRAL_PRICING.pro.annual.formatted,
+    formattedMonthlyInr: CENTRAL_PRICING.pro.monthly.formattedInr,
+    formattedAnnualInr: CENTRAL_PRICING.pro.annual.formattedInr,
     checkoutMonthlyLabel: CENTRAL_PRICING.pro.monthly.checkoutLabel,
-    checkoutAnnualLabel: CENTRAL_PRICING.pro.annual.checkoutLabel
+    checkoutAnnualLabel: CENTRAL_PRICING.pro.annual.checkoutLabel,
+    checkoutMonthlyLabelInr: CENTRAL_PRICING.pro.monthly.checkoutLabelInr,
+    checkoutAnnualLabelInr: CENTRAL_PRICING.pro.annual.checkoutLabelInr
   },
   enterprise: {
     name: CENTRAL_PRICING.pro.displayName,
     monthlyPrice: CENTRAL_PRICING.pro.monthly.amountUsd,
     annualPrice: CENTRAL_PRICING.pro.annual.monthlyEquivalentUsd,
     annualTotalPrice: CENTRAL_PRICING.pro.annual.totalAmountUsd,
+    monthlyPriceInr: CENTRAL_PRICING.pro.monthly.amountInr,
+    annualTotalPriceInr: CENTRAL_PRICING.pro.annual.totalAmountInr,
     formattedMonthly: CENTRAL_PRICING.pro.monthly.formatted,
     formattedAnnual: CENTRAL_PRICING.pro.annual.formatted,
+    formattedMonthlyInr: CENTRAL_PRICING.pro.monthly.formattedInr,
+    formattedAnnualInr: CENTRAL_PRICING.pro.annual.formattedInr,
     checkoutMonthlyLabel: CENTRAL_PRICING.pro.monthly.checkoutLabel,
-    checkoutAnnualLabel: CENTRAL_PRICING.pro.annual.checkoutLabel
+    checkoutAnnualLabel: CENTRAL_PRICING.pro.annual.checkoutLabel,
+    checkoutMonthlyLabelInr: CENTRAL_PRICING.pro.monthly.checkoutLabelInr,
+    checkoutAnnualLabelInr: CENTRAL_PRICING.pro.annual.checkoutLabelInr
   }
 };
 

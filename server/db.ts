@@ -107,6 +107,24 @@ export interface DbSubscription {
   updated_at: string;
 }
 
+export interface DbSubscriptionPayment {
+  id: string;
+  workspace_id: string;
+  user_id?: string;
+  subscription_id: string;
+  razorpay_payment_id: string;
+  currency: string;
+  amount_usd: number;
+  amount_cents: number;
+  converted_inr_amount?: number;
+  fee?: number;
+  tax?: number;
+  settlement_status: 'pending' | 'settled' | 'failed';
+  raw_event?: any;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DbWebhookEvent {
   event_id: string;
   event_type: string;
@@ -530,6 +548,27 @@ export async function runPostgresMigrations(pool: Pool) {
         status TEXT NOT NULL DEFAULT 'processed'
       );
 
+      CREATE TABLE IF NOT EXISTS subscription_payments (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        user_id TEXT,
+        subscription_id TEXT NOT NULL,
+        razorpay_payment_id TEXT UNIQUE NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        amount_usd NUMERIC(10, 2) NOT NULL,
+        amount_cents INTEGER NOT NULL,
+        converted_inr_amount NUMERIC(12, 2),
+        fee NUMERIC(10, 2),
+        tax NUMERIC(10, 2),
+        settlement_status TEXT NOT NULL DEFAULT 'pending',
+        raw_event JSONB,
+        created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+        updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sub_payments_workspace ON subscription_payments(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_sub_payments_sub ON subscription_payments(subscription_id);
+      CREATE INDEX IF NOT EXISTS idx_sub_payments_rzp_payment ON subscription_payments(razorpay_payment_id);
+
       CREATE TABLE IF NOT EXISTS audit_logs (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -562,6 +601,7 @@ export async function runPostgresMigrations(pool: Pool) {
       ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
       ALTER TABLE razorpay_orders ENABLE ROW LEVEL SECURITY;
       ALTER TABLE webhook_events ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE subscription_payments ENABLE ROW LEVEL SECURITY;
       ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
     `);
   } finally {
@@ -764,6 +804,24 @@ function runSqliteMigrations(db: DatabaseSync) {
       payload_json TEXT NOT NULL,
       processed_at TEXT NOT NULL,
       status TEXT DEFAULT 'processed' NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS subscription_payments (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      user_id TEXT,
+      subscription_id TEXT NOT NULL,
+      razorpay_payment_id TEXT UNIQUE NOT NULL,
+      currency TEXT DEFAULT 'USD' NOT NULL,
+      amount_usd REAL NOT NULL,
+      amount_cents INTEGER NOT NULL,
+      converted_inr_amount REAL,
+      fee REAL,
+      tax REAL,
+      settlement_status TEXT DEFAULT 'pending' NOT NULL,
+      raw_event TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -1773,6 +1831,112 @@ export const db = {
       return sqliteDb!.prepare(
         'SELECT * FROM audit_logs WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?'
       ).all(workspaceId, safeLimit) as unknown as DbAuditLog[];
+    }
+  },
+
+  // Subscription Payments Ledger (USD international recurring payments & INR settlements)
+  subscriptionPayments: {
+    async recordPayment(payment: DbSubscriptionPayment): Promise<DbSubscriptionPayment> {
+      if (!databaseInitialized) await initDatabase();
+      const rawJson = payment.raw_event ? (typeof payment.raw_event === 'string' ? payment.raw_event : JSON.stringify(payment.raw_event)) : null;
+
+      if (isPostgresActive && pgPool) {
+        await pgPool.query(`
+          INSERT INTO subscription_payments (
+            id, workspace_id, user_id, subscription_id, razorpay_payment_id,
+            currency, amount_usd, amount_cents, converted_inr_amount, fee, tax,
+            settlement_status, raw_event, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+          ON CONFLICT (razorpay_payment_id) DO UPDATE SET
+            settlement_status = EXCLUDED.settlement_status,
+            converted_inr_amount = COALESCE(EXCLUDED.converted_inr_amount, subscription_payments.converted_inr_amount),
+            fee = COALESCE(EXCLUDED.fee, subscription_payments.fee),
+            tax = COALESCE(EXCLUDED.tax, subscription_payments.tax),
+            raw_event = COALESCE(EXCLUDED.raw_event, subscription_payments.raw_event),
+            updated_at = EXCLUDED.updated_at;
+        `, [
+          payment.id, payment.workspace_id, payment.user_id || null, payment.subscription_id, payment.razorpay_payment_id,
+          payment.currency || 'USD', payment.amount_usd, payment.amount_cents, payment.converted_inr_amount || null,
+          payment.fee || null, payment.tax || null, payment.settlement_status || 'pending', rawJson,
+          payment.created_at, payment.updated_at
+        ]);
+        return payment;
+      }
+
+      sqliteDb!.prepare(`
+        INSERT INTO subscription_payments (
+          id, workspace_id, user_id, subscription_id, razorpay_payment_id,
+          currency, amount_usd, amount_cents, converted_inr_amount, fee, tax,
+          settlement_status, raw_event, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (razorpay_payment_id) DO UPDATE SET
+          settlement_status = excluded.settlement_status,
+          converted_inr_amount = COALESCE(excluded.converted_inr_amount, subscription_payments.converted_inr_amount),
+          fee = COALESCE(excluded.fee, subscription_payments.fee),
+          tax = COALESCE(excluded.tax, subscription_payments.tax),
+          raw_event = COALESCE(excluded.raw_event, subscription_payments.raw_event),
+          updated_at = excluded.updated_at;
+      `).run(
+        payment.id, payment.workspace_id, payment.user_id || null, payment.subscription_id, payment.razorpay_payment_id,
+        payment.currency || 'USD', payment.amount_usd, payment.amount_cents, payment.converted_inr_amount || null,
+        payment.fee || null, payment.tax || null, payment.settlement_status || 'pending', rawJson,
+        payment.created_at, payment.updated_at
+      );
+      return payment;
+    },
+
+    async getByWorkspace(workspaceId: string): Promise<DbSubscriptionPayment[]> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          'SELECT * FROM subscription_payments WHERE workspace_id = $1 ORDER BY created_at DESC',
+          [workspaceId]
+        );
+        return res.rows;
+      }
+      return sqliteDb!.prepare(
+        'SELECT * FROM subscription_payments WHERE workspace_id = ? ORDER BY created_at DESC'
+      ).all(workspaceId) as unknown as DbSubscriptionPayment[];
+    },
+
+    async getByPaymentId(paymentId: string): Promise<DbSubscriptionPayment | null> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          'SELECT * FROM subscription_payments WHERE razorpay_payment_id = $1',
+          [paymentId]
+        );
+        return res.rows[0] || null;
+      }
+      return (sqliteDb!.prepare(
+        'SELECT * FROM subscription_payments WHERE razorpay_payment_id = ?'
+      ).get(paymentId) as unknown as DbSubscriptionPayment) || null;
+    },
+
+    async updateSettlement(paymentId: string, updates: Partial<DbSubscriptionPayment>): Promise<void> {
+      if (!databaseInitialized) await initDatabase();
+      const now = new Date().toISOString();
+      if (isPostgresActive && pgPool) {
+        await pgPool.query(`
+          UPDATE subscription_payments SET
+            settlement_status = COALESCE($1, settlement_status),
+            converted_inr_amount = COALESCE($2, converted_inr_amount),
+            fee = COALESCE($3, fee),
+            tax = COALESCE($4, tax),
+            updated_at = $5
+          WHERE razorpay_payment_id = $6
+        `, [updates.settlement_status || null, updates.converted_inr_amount || null, updates.fee || null, updates.tax || null, now, paymentId]);
+        return;
+      }
+      sqliteDb!.prepare(`
+        UPDATE subscription_payments SET
+          settlement_status = COALESCE(?, settlement_status),
+          converted_inr_amount = COALESCE(?, converted_inr_amount),
+          fee = COALESCE(?, fee),
+          tax = COALESCE(?, tax),
+          updated_at = ?
+        WHERE razorpay_payment_id = ?
+      `).run(updates.settlement_status || null, updates.converted_inr_amount || null, updates.fee || null, updates.tax || null, now, paymentId);
     }
   },
 

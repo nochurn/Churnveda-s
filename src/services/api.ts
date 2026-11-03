@@ -540,6 +540,71 @@ export async function createRazorpaySubscription(payload: {
   return data;
 }
 
+export interface InternationalBillingStatusResponse {
+  success: boolean;
+  isConfigured: boolean;
+  internationalEnabled: boolean;
+  domesticInrEnabled: boolean;
+  liveVerified: boolean;
+  currency: 'USD';
+  settlementCurrency: 'INR';
+  purposeCode: string;
+  status: 'active_verified' | 'configured_pending_mandate_test' | 'merchant_activation_required';
+  plans: Array<{ tier: string; name: string; priceUsd: number; amountCents: number; billing: string }>;
+  settlementPolicy: {
+    destinationBank: string;
+    inrSettlementMode: string;
+    dailyExchangeRateFixedInUsd: boolean;
+    purposeCodeP0802Required: boolean;
+  };
+  checklist: {
+    keysConfigured: boolean;
+    webhookConfigured: boolean;
+    internationalCardsApproved: boolean;
+    purposeCodeP0802Configured: boolean;
+    testMandateVerified: boolean;
+  };
+}
+
+export interface BillingTransaction {
+  id: string;
+  workspace_id: string;
+  user_id?: string;
+  subscription_id: string;
+  razorpay_payment_id: string;
+  currency: string;
+  amount_usd: number;
+  amount_cents: number;
+  converted_inr_amount?: number;
+  fee?: number;
+  tax?: number;
+  settlement_status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchInternationalBillingStatus(): Promise<InternationalBillingStatusResponse> {
+  const res = await fetch('/api/razorpay/international-status');
+  return res.json();
+}
+
+export async function fetchBillingTransactions(): Promise<{
+  success: boolean;
+  workspaceId: string;
+  currency: string;
+  settlementCurrency: string;
+  count: number;
+  transactions: BillingTransaction[];
+}> {
+  const token = getStoredAuthToken();
+  const res = await fetch('/api/billing/transactions', {
+    headers: {
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    }
+  });
+  return res.json();
+}
+
 // Admin Billing Plans API Calls
 export async function fetchAdminBillingPlans(): Promise<{
   success: boolean;
@@ -1312,5 +1377,7 @@ export const apiService = {
   triggerDailyCronScan,
   fetchRetentionBriefs,
   fetchAdminAuditLogs,
-  exportCustomers
+  exportCustomers,
+  fetchInternationalBillingStatus,
+  fetchBillingTransactions
 };

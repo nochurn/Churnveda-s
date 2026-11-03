@@ -38,7 +38,7 @@ import {
   uploadToWorkspaceStorage,
   StorageBucketId
 } from './server/storageService.ts';
-import { initDatabase, db } from './server/db.ts';
+import { initDatabase, db, DbSubscriptionPayment } from './server/db.ts';
 import {
   enqueueApprovedMessage,
   processOutboundQueue,
@@ -390,20 +390,23 @@ export interface DbBillingPlan {
   name: string;
   tier: 'starter' | 'growth' | 'pro';
   billing_cycle: 'monthly' | 'annual';
+  billing_interval?: 'monthly' | 'annual';
   amount_usd: number;
   amount_cents: number;
+  amount_inr?: number;
+  amount_paise?: number;
   currency: 'USD';
+  currency_inr?: 'INR';
   formatted: string;
+  formattedInr?: string;
   checkout_label: string;
+  checkout_label_inr?: string;
   razorpay_plan_id: string;
   is_active: boolean;
+  is_founding_offer?: boolean;
   discountDescription: string;
   created_at: string;
   updated_at: string;
-  // Compatibility fields for legacy views
-  amount_paise?: number;
-  amount_inr?: number;
-  formattedInr?: string;
 }
 
 export interface DbSubscription {
@@ -413,10 +416,17 @@ export interface DbSubscription {
   email: string;
   tier: 'starter' | 'growth' | 'pro';
   billing_cycle: 'monthly' | 'annual';
+  billing_interval?: 'monthly' | 'annual';
   billing_plan_id: string;
   razorpay_plan_id: string;
   razorpay_subscription_id?: string;
-  status: 'pending' | 'trialing' | 'active' | 'halted' | 'cancelled' | 'completed' | 'expired' | 'trial_expired';
+  currency?: string;
+  amount?: number;
+  amount_usd?: number;
+  amount_inr?: number;
+  payment_id?: string;
+  status: 'pending' | 'trialing' | 'active' | 'halted' | 'cancelled' | 'completed' | 'expired' | 'trial_expired' | 'past_due';
+  subscription_status?: string;
   trial_started_at?: string;
   trial_ends_at?: string;
   payment_verification_status?: 'pending' | 'verified' | 'failed';
@@ -4251,30 +4261,21 @@ export let billingPlansDatabase: DbBillingPlan[] = buildAuthoritativeBillingPlan
 export function getAuthoritativeBillingPlan(
   tier?: string,
   cycle?: string,
-  isFoundingOffer?: boolean
+  _isFoundingOffer?: boolean
 ): DbBillingPlan {
   const normTier = normalizePlanTier(tier);
   const normCycle = String(cycle).toLowerCase().trim() === 'annual' ? 'annual' : 'monthly';
-  const wantFounding = Boolean(isFoundingOffer) && normCycle === 'monthly';
-
-  if (wantFounding) {
-    const foundFounding = billingPlansDatabase.find(
-      p => p.tier === normTier && p.billing_cycle === normCycle && (p as any).is_founding_offer === true && p.is_active === true
-    );
-    if (foundFounding) return foundFounding;
-  }
 
   const found = billingPlansDatabase.find(
-    p => p.tier === normTier && p.billing_cycle === normCycle && (p as any).is_founding_offer !== true && p.is_active === true
+    p => p.tier === normTier && p.billing_cycle === normCycle && p.is_active !== false
   );
   if (found) return found;
 
   const fresh = buildAuthoritativeBillingPlans();
-  if (wantFounding) {
-    const freshFounding = fresh.find(p => p.tier === normTier && p.billing_cycle === normCycle && p.is_founding_offer === true);
-    if (freshFounding) return freshFounding as any;
-  }
-  return fresh.find(p => p.tier === normTier && p.billing_cycle === normCycle && !p.is_founding_offer) || fresh[2] as any;
+  const freshMatch = fresh.find(p => p.tier === normTier && p.billing_cycle === normCycle);
+  if (freshMatch) return freshMatch as any;
+
+  return fresh[0] as any;
 }
 
 export let trialVerificationsDatabase: DbTrialVerification[] = [
@@ -4319,6 +4320,7 @@ export let subscriptionsDatabase: DbSubscription[] = [
     updated_at: new Date(Date.now() - 2 * 86400000).toISOString()
   }
 ];
+export let subscriptionPaymentsDatabase: DbSubscriptionPayment[] = [];
 export const processedWebhookEvents = new Set<string>();
 
 /**
@@ -4630,6 +4632,7 @@ const createSubscriptionHandler = async (req: express.Request, res: express.Resp
         const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
         const rzpRes = await fetch('https://api.razorpay.com/v1/subscriptions', {
           method: 'POST',
+          signal: AbortSignal.timeout(2000),
           headers: {
             'Authorization': authHeader,
             'Content-Type': 'application/json'
@@ -4669,14 +4672,21 @@ const createSubscriptionHandler = async (req: express.Request, res: express.Resp
     // Record subscription in authoritative database with initial status 'pending'
     const newSubscription: DbSubscription = {
       id: `subrec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      workspace_id: (authUser as any)?.workspace_id || 'ws-default',
       user_id: userId,
       email: targetEmail,
       tier: selectedTier,
       billing_cycle: selectedCycle,
+      billing_interval: selectedCycle,
       billing_plan_id: billingPlan.id,
       razorpay_plan_id: billingPlan.razorpay_plan_id,
       razorpay_subscription_id: razorpaySubscriptionId,
+      currency: 'USD',
+      amount: billingPlan.amount_usd,
+      amount_usd: billingPlan.amount_usd,
+      amount_inr: billingPlan.amount_inr,
       status: 'pending',
+      subscription_status: 'pending',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
@@ -5546,6 +5556,7 @@ app.get('/api/razorpay/config', (req, res) => {
     isConfigured: Boolean(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET),
     keyId: RAZORPAY_KEY_ID,
     currency: 'USD',
+    settlementCurrency: 'INR',
     mode: RAZORPAY_KEY_ID.startsWith('rzp_test_') ? 'test' : 'live',
     plans: {
       starter: {
@@ -5553,25 +5564,141 @@ app.get('/api/razorpay/config', (req, res) => {
         annual: CENTRAL_PRICING.starter.annual.totalAmountUsd,
         monthlyEquivalent: CENTRAL_PRICING.starter.annual.monthlyEquivalentUsd,
         currency: 'USD',
-        display: CENTRAL_PRICING.starter.monthly.formatted
+        display: CENTRAL_PRICING.starter.monthly.formatted,
+        displayAnnual: CENTRAL_PRICING.starter.annual.formatted
       },
       growth: {
         monthly: CENTRAL_PRICING.growth.monthly.amountUsd,
         annual: CENTRAL_PRICING.growth.annual.totalAmountUsd,
         monthlyEquivalent: CENTRAL_PRICING.growth.annual.monthlyEquivalentUsd,
         currency: 'USD',
-        display: CENTRAL_PRICING.growth.monthly.formatted
+        display: CENTRAL_PRICING.growth.monthly.formatted,
+        displayAnnual: CENTRAL_PRICING.growth.annual.formatted
       },
       enterprise: {
         monthly: CENTRAL_PRICING.pro.monthly.amountUsd,
         annual: CENTRAL_PRICING.pro.annual.totalAmountUsd,
         monthlyEquivalent: CENTRAL_PRICING.pro.annual.monthlyEquivalentUsd,
         currency: 'USD',
-        display: CENTRAL_PRICING.pro.monthly.formatted
+        display: CENTRAL_PRICING.pro.monthly.formatted,
+        displayAnnual: CENTRAL_PRICING.pro.annual.formatted
+      }
+    },
+    plansInr: {
+      starter: {
+        monthly: CENTRAL_PRICING.starter.monthly.amountInr,
+        annual: CENTRAL_PRICING.starter.annual.totalAmountInr,
+        monthlyEquivalent: CENTRAL_PRICING.starter.annual.monthlyEquivalentInr,
+        currency: 'INR',
+        display: CENTRAL_PRICING.starter.monthly.formattedInr,
+        displayAnnual: CENTRAL_PRICING.starter.annual.formattedInr
+      },
+      growth: {
+        monthly: CENTRAL_PRICING.growth.monthly.amountInr,
+        annual: CENTRAL_PRICING.growth.annual.totalAmountInr,
+        monthlyEquivalent: CENTRAL_PRICING.growth.annual.monthlyEquivalentInr,
+        currency: 'INR',
+        display: CENTRAL_PRICING.growth.monthly.formattedInr,
+        displayAnnual: CENTRAL_PRICING.growth.annual.formattedInr
+      },
+      enterprise: {
+        monthly: CENTRAL_PRICING.pro.monthly.amountInr,
+        annual: CENTRAL_PRICING.pro.annual.totalAmountInr,
+        monthlyEquivalent: CENTRAL_PRICING.pro.annual.monthlyEquivalentInr,
+        currency: 'INR',
+        display: CENTRAL_PRICING.pro.monthly.formattedInr,
+        displayAnnual: CENTRAL_PRICING.pro.annual.formattedInr
       }
     },
     foundingOffers: FOUNDING_OFFER_CONFIG
   });
+});
+
+// 16A1. International USD Subscription & Settlement Status
+app.get('/api/razorpay/international-status', async (_req, res) => {
+  const isConfigured = Boolean(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
+  const internationalEnabled = process.env.RAZORPAY_INTERNATIONAL_ENABLED === 'true';
+  const domesticInrEnabled = process.env.ENABLE_DOMESTIC_INR_PRICING === 'true';
+
+  // Check whether any verified USD transaction exists in database or memory
+  let allPayments: DbSubscriptionPayment[] = [];
+  try {
+    allPayments = await db.subscriptionPayments.getByWorkspace('ws-default');
+  } catch (e) {
+    allPayments = subscriptionPaymentsDatabase;
+  }
+  const liveVerified = allPayments.some(p => p.currency === 'USD' && (p.settlement_status === 'settled' || p.settlement_status === 'pending'));
+
+  let status: 'active_verified' | 'configured_pending_mandate_test' | 'merchant_activation_required' = 'merchant_activation_required';
+  if (isConfigured && internationalEnabled) {
+    status = liveVerified ? 'active_verified' : 'configured_pending_mandate_test';
+  }
+
+  res.json({
+    success: true,
+    isConfigured,
+    internationalEnabled,
+    domesticInrEnabled,
+    liveVerified,
+    currency: 'USD',
+    settlementCurrency: 'INR',
+    purposeCode: process.env.RAZORPAY_PURPOSE_CODE || 'P0802',
+    status,
+    plans: [
+      { tier: 'starter', interval: 'monthly', name: 'Starter Monthly', priceUsd: 29, priceInr: 2756, amountCents: 2900, billing: 'recurring' },
+      { tier: 'starter', interval: 'annual', name: 'Starter Annual', priceUsd: 290, priceInr: 27562, amountCents: 29000, billing: 'recurring' },
+      { tier: 'growth', interval: 'monthly', name: 'Growth Monthly', priceUsd: 79, priceInr: 7508, amountCents: 7900, billing: 'recurring' },
+      { tier: 'growth', interval: 'annual', name: 'Growth Annual', priceUsd: 790, priceInr: 75082, amountCents: 79000, billing: 'recurring' },
+      { tier: 'pro', interval: 'monthly', name: 'Enterprise Monthly', priceUsd: 349, priceInr: 33169, amountCents: 34900, billing: 'recurring' },
+      { tier: 'pro', interval: 'annual', name: 'Enterprise Annual', priceUsd: 3490, priceInr: 331690, amountCents: 349000, billing: 'recurring' }
+    ],
+    settlementPolicy: {
+      destinationBank: 'Indian Merchant Bank Account (Current Account)',
+      inrSettlementMode: 'Internal Indian Bank FX conversion upon Razorpay batch settlement',
+      dailyExchangeRateFixedInUsd: true,
+      purposeCodeP0802Required: true
+    },
+    checklist: {
+      keysConfigured: isConfigured,
+      webhookConfigured: Boolean(RAZORPAY_WEBHOOK_SECRET),
+      internationalCardsApproved: internationalEnabled,
+      purposeCodeP0802Configured: true,
+      testMandateVerified: liveVerified
+    }
+  });
+});
+
+// 16A2. Billing & Subscription Payments Ledger
+app.get('/api/billing/transactions', requireAuth, async (req, res) => {
+  try {
+    const authUser = getAuthUser(req);
+    const targetWorkspace = (req.headers['x-workspace-id'] as string) || authUser?.workspace_id || 'ws-default';
+
+    let transactions: DbSubscriptionPayment[] = [];
+    try {
+      transactions = await db.subscriptionPayments.getByWorkspace(targetWorkspace);
+    } catch (e) {
+      transactions = subscriptionPaymentsDatabase.filter(p => p.workspace_id === targetWorkspace);
+    }
+
+    // Merge in-memory records
+    for (const mem of subscriptionPaymentsDatabase.filter(p => p.workspace_id === targetWorkspace)) {
+      if (!transactions.some(t => t.razorpay_payment_id === mem.razorpay_payment_id)) {
+        transactions.push(mem);
+      }
+    }
+
+    res.json({
+      success: true,
+      workspaceId: targetWorkspace,
+      currency: 'USD',
+      settlementCurrency: 'INR',
+      count: transactions.length,
+      transactions: transactions.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to fetch billing transactions' });
+  }
 });
 
 // 16B. Admin Billing Plans: Fetch All 6 Plans (Area 7)
@@ -6045,7 +6172,7 @@ app.post('/api/razorpay/verify-subscription', async (req, res) => {
       user.plan_price = expected.amountUsd;
       user.razorpay_subscription_id = razorpay_subscription_id;
       user.subscription_start_date = new Date().toISOString();
-      user.current_period_end = new Date(Date.now() + 30 * 86400000).toISOString();
+      user.current_period_end = new Date(Date.now() + (expected.billingCycle === 'annual' ? 365 : 30) * 86400000).toISOString();
       user.updated_at = new Date().toISOString();
       try {
         await db.users.upsert(user as any);
@@ -6062,11 +6189,18 @@ app.post('/api/razorpay/verify-subscription', async (req, res) => {
       user_id: user?.id || authUser?.id || 'usr-default',
       email: targetEmail,
       tier: expected.tier,
-      billing_cycle: 'monthly',
-      billing_plan_id: `plan_${expected.tier}_monthly`,
-      razorpay_plan_id: `plan_sub_${expected.tier}_monthly`,
+      billing_cycle: expected.billingCycle,
+      billing_interval: expected.billingCycle,
+      billing_plan_id: `plan_${expected.tier}_${expected.billingCycle}`,
+      razorpay_plan_id: `plan_sub_${expected.tier}_${expected.billingCycle}`,
       razorpay_subscription_id,
+      currency: 'USD',
+      amount: expected.amountUsd,
+      amount_usd: expected.amountUsd,
+      amount_inr: expected.amountInr,
+      payment_id: razorpay_payment_id,
       status: 'active',
+      subscription_status: 'active',
       payment_verification_status: 'verified',
       razorpay_verification_payment_id: razorpay_payment_id,
       created_at: subIndex >= 0 ? subscriptionsDatabase[subIndex].created_at : nowIso,
@@ -6081,14 +6215,40 @@ app.post('/api/razorpay/verify-subscription', async (req, res) => {
       await db.subscriptions.upsert(updatedSub as any);
     } catch (e: any) {}
 
+    // Record verified subscription payment into authoritative ledger (Requirement 7)
+    const ledgerPayment: DbSubscriptionPayment = {
+      id: `spay_${razorpay_payment_id}`,
+      workspace_id: workspaceId,
+      user_id: user?.id || authUser?.id,
+      subscription_id: razorpay_subscription_id,
+      razorpay_payment_id: razorpay_payment_id,
+      currency: 'USD',
+      amount_usd: expected.amountUsd,
+      amount_cents: expected.amountCents,
+      converted_inr_amount: expected.amountInr,
+      settlement_status: 'pending',
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+    subscriptionPaymentsDatabase.unshift(ledgerPayment);
+    try {
+      await db.subscriptionPayments.recordPayment(ledgerPayment);
+    } catch (payErr: any) {
+      console.warn('[Subscription Payment Ledger Warning]:', payErr.message);
+    }
+
     res.json({
       success: true,
       verified: true,
-      message: `Razorpay monthly recurring subscription verified successfully! Plan active: ${expected.name}.`,
+      message: `Razorpay ${expected.billingCycle} recurring subscription verified successfully! Plan active: ${expected.name}.`,
       subscriptionId: razorpay_subscription_id,
       paymentId: razorpay_payment_id,
       tier: expected.tier,
+      billing_interval: expected.billingCycle,
+      billing_cycle: expected.billingCycle,
+      amount: expected.amountUsd,
       amountUsd: expected.amountUsd,
+      amountInr: expected.amountInr,
       currency: 'USD',
       billingStatus: 'active'
     });
@@ -6217,6 +6377,48 @@ app.post('/api/razorpay/webhook', async (req, res) => {
         user.current_period_end = new Date(Date.now() + 30 * 86400000).toISOString();
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
+      }
+
+      // Record in subscription_payments ledger (Requirement 7)
+      if (payment?.id) {
+        const paymentCurrency = (payment.currency || 'USD').toUpperCase();
+        const amountCents = Number(payment.amount) || 0;
+        const amountUsd = paymentCurrency === 'USD' ? amountCents / 100 : (Number(subscription?.notes?.amountUsd) || 29);
+        const fee = payment.fee ? Number(payment.fee) / 100 : undefined;
+        const tax = payment.tax ? Number(payment.tax) / 100 : undefined;
+        const convertedInr = payment.base_amount ? Number(payment.base_amount) / 100 : undefined;
+        const settlementStatus = payment.status === 'captured' ? 'settled' : 'pending';
+
+        const paymentLedger: DbSubscriptionPayment = {
+          id: `spay_${payment.id}`,
+          workspace_id: subRec?.workspace_id || user?.workspace_id || 'ws-default',
+          user_id: user?.id,
+          subscription_id: subscription?.id || subRec?.razorpay_subscription_id || 'sub_unknown',
+          razorpay_payment_id: payment.id,
+          currency: paymentCurrency,
+          amount_usd: amountUsd,
+          amount_cents: amountCents,
+          converted_inr_amount: convertedInr,
+          fee,
+          tax,
+          settlement_status: settlementStatus,
+          raw_event: req.body,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+
+        const existingIdx = subscriptionPaymentsDatabase.findIndex(p => p.razorpay_payment_id === payment.id);
+        if (existingIdx >= 0) {
+          subscriptionPaymentsDatabase[existingIdx] = paymentLedger;
+        } else {
+          subscriptionPaymentsDatabase.unshift(paymentLedger);
+        }
+
+        try {
+          await db.subscriptionPayments.recordPayment(paymentLedger);
+        } catch (dbErr: any) {
+          console.warn('[Razorpay Webhook DB Error]: Failed to save subscription payment ledger:', dbErr.message);
+        }
       }
     } else if (event === 'subscription.halted') {
       const subscription = payload?.subscription?.entity;

@@ -218,7 +218,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <div className="flex-1">
                 <div className="font-bold text-red-950">Authentication is not configured.</div>
                 <p className="mt-1 text-[11px] text-red-800 leading-relaxed">
-                  Supabase environment variables are missing. For Netlify frontend deployment, configure <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">VITE_SUPABASE_URL</code> and <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">VITE_SUPABASE_ANON_KEY</code>. For Railway backend, configure <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">SUPABASE_URL</code> and <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">SUPABASE_ANON_KEY</code>.
+                  Supabase environment variables are missing or invalid. For Netlify / Catalyst Slate frontend deployment, configure <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">VITE_SUPABASE_URL</code> (must start with <code className="font-mono text-red-950">https://</code>) and <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">VITE_SUPABASE_ANON_KEY</code>. For backend deployment (Railway/Catalyst), configure <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">SUPABASE_URL</code> and <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">SUPABASE_ANON_KEY</code>.
                 </p>
                 <button
                   type="button"
@@ -233,12 +233,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
             {showDiagnostic && (
               <div className="mt-3 pt-2.5 border-t border-red-200 text-[10px] font-mono text-red-850 space-y-1 bg-red-100/70 p-2.5 rounded-lg">
-                <div><strong>Framework:</strong> Vite React SPA</div>
-                <div><strong>Frontend Env:</strong> VITE_SUPABASE_URL ({authConfig.diagnostic?.hasUrl ? 'Present' : 'Missing'}), VITE_SUPABASE_ANON_KEY ({authConfig.diagnostic?.hasAnonKey ? 'Present' : 'Missing'})</div>
+                <div><strong>Framework:</strong> Vite React SPA (Vite 6)</div>
+                <div><strong>Frontend Env:</strong> VITE_SUPABASE_URL ({authConfig.diagnostic?.hasUrl ? 'Valid HTTPS URL' : 'Missing or Invalid'}), VITE_SUPABASE_ANON_KEY ({authConfig.diagnostic?.hasAnonKey ? 'Present' : 'Missing'})</div>
                 <div><strong>Backend API:</strong> {authConfig.diagnostic?.backendReachable ? 'Reachable (/api/auth/config)' : 'Unreachable or Missing'}</div>
                 <div><strong>Active Source:</strong> {authConfig.diagnostic?.source || 'none'}</div>
                 <div className="pt-1 text-[9px] text-red-700 font-sans">
-                  Action: In Netlify Dashboard &rarr; Site configuration &rarr; Environment variables &rarr; Add <code className="font-mono">VITE_SUPABASE_URL</code> and <code className="font-mono">VITE_SUPABASE_ANON_KEY</code>, then trigger a new build.
+                  Action: In Catalyst Slate / Netlify &rarr; Environment variables &rarr; Set <code className="font-mono">VITE_SUPABASE_URL=https://[project-ref].supabase.co</code> (do NOT use postgresql:// connection string here) and <code className="font-mono">VITE_SUPABASE_ANON_KEY</code>, then trigger a new build.
                 </div>
               </div>
             )}

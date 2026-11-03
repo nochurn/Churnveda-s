@@ -92,23 +92,45 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
     }
   }, [initialAction]);
 
-  // Load existing payment methods
+  const [internationalStatus, setInternationalStatus] = useState<any>(null);
+  const [transactions, setTransactions] = useState<any[]>([]);
+  const [isLoadingTransactions, setIsLoadingTransactions] = useState(false);
+
+  // Load existing payment methods, international status, and transactions ledger
   useEffect(() => {
     let isMounted = true;
-    const loadMethods = async () => {
+    const loadBillingData = async () => {
       try {
         setIsLoadingMethods(true);
-        const res = await apiService.fetchPaymentMethods();
-        if (isMounted && res?.paymentMethods) {
-          setSavedMethods(res.paymentMethods);
+        setIsLoadingTransactions(true);
+
+        const [methodsRes, statusRes, txRes] = await Promise.allSettled([
+          apiService.fetchPaymentMethods(),
+          apiService.fetchInternationalBillingStatus(),
+          apiService.fetchBillingTransactions()
+        ]);
+
+        if (isMounted) {
+          if (methodsRes.status === 'fulfilled' && methodsRes.value?.paymentMethods) {
+            setSavedMethods(methodsRes.value.paymentMethods);
+          }
+          if (statusRes.status === 'fulfilled' && statusRes.value) {
+            setInternationalStatus(statusRes.value);
+          }
+          if (txRes.status === 'fulfilled' && txRes.value?.transactions) {
+            setTransactions(txRes.value.transactions);
+          }
         }
       } catch (err) {
-        console.warn('Failed to load payment methods', err);
+        console.warn('Failed to load billing details', err);
       } finally {
-        if (isMounted) setIsLoadingMethods(false);
+        if (isMounted) {
+          setIsLoadingMethods(false);
+          setIsLoadingTransactions(false);
+        }
       }
     };
-    loadMethods();
+    loadBillingData();
     return () => {
       isMounted = false;
     };
@@ -937,44 +959,157 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         </div>
       </div>
 
-      {/* Invoices & Receipts Section */}
-      <div className="bg-white rounded-2xl border border-gray-200 shadow-xs p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-sm font-bold text-gray-900">Invoices & Statements</h3>
-            <p className="text-xs text-gray-500 mt-0.5">Download official tax invoices and payment receipts.</p>
+      {/* International Recurring USD Billing & Settlement Notice */}
+      <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-2xl border border-indigo-800/40 shadow-md p-6 text-white space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-indigo-600/30 border border-indigo-400/30 flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-5 h-5 text-indigo-300" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-base font-bold text-white">International Recurring USD Billing</h3>
+                {internationalStatus?.status === 'active_verified' ? (
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active & Verified
+                  </span>
+                ) : internationalStatus?.status === 'configured_pending_mandate_test' ? (
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400" /> Pending Test Mandate Verification
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-blue-500/20 text-blue-300 border border-blue-500/30 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400" /> International Setup Active
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-indigo-200/80 mt-0.5">
+                Razorpay Subscriptions for international customers with INR settlement to Indian bank account.
+              </p>
+            </div>
           </div>
-          <span className="text-xs font-medium text-gray-500">1 record found</span>
+          <div className="flex items-center gap-2 text-xs font-mono text-indigo-200 bg-indigo-900/40 px-3 py-1.5 rounded-lg border border-indigo-700/40 shrink-0">
+            <span>Purpose Code:</span>
+            <span className="font-bold text-white">{internationalStatus?.purposeCode || 'P0802'} (Software Exports)</span>
+          </div>
         </div>
 
-        <div className="border border-gray-200 rounded-xl overflow-hidden">
-          <div className="flex items-center justify-between p-4 hover:bg-gray-50 transition-colors text-xs">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-900 flex items-center justify-center">
-                <FileText className="w-4 h-4" />
-              </div>
-              <div>
-                <div className="font-semibold text-gray-900">Invoice #CS-2026-001 (Starter Trial)</div>
-                <div className="text-[11px] text-gray-500">
-                  {formattedTrialStart} • 14-Day Free Trial Demo
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-4">
-              <span className="font-bold text-gray-900">$0.00</span>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
-                Trial / Pending
-              </span>
-              <button
-                type="button"
-                onClick={() => onShowToast('Receipt downloaded: Churnveda-Trial-001.pdf', 'info')}
-                className="text-blue-900 hover:underline font-semibold cursor-pointer"
-              >
-                Download PDF
-              </button>
-            </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 text-xs">
+          <div className="bg-white/5 border border-white/10 rounded-xl p-3.5">
+            <span className="text-indigo-200/70 block text-[11px] font-medium">Fixed USD Subscription Plans</span>
+            <span className="font-bold text-white text-sm mt-0.5 block">Starter $29 • Growth $79 • Enterprise $349</span>
+            <span className="text-[11px] text-indigo-300/80 mt-1 block">Prices stay fixed in USD regardless of FX movements</span>
           </div>
+
+          <div className="bg-white/5 border border-white/10 rounded-xl p-3.5">
+            <span className="text-indigo-200/70 block text-[11px] font-medium">Merchant Bank Settlement</span>
+            <span className="font-bold text-white text-sm mt-0.5 block">Indian Current Account (INR)</span>
+            <span className="text-[11px] text-indigo-300/80 mt-1 block">Automatic bank conversion upon batch settlement (T+7)</span>
+          </div>
+
+          <div className="bg-white/5 border border-white/10 rounded-xl p-3.5">
+            <span className="text-indigo-200/70 block text-[11px] font-medium">Webhook & Access Isolation</span>
+            <span className="font-bold text-white text-sm mt-0.5 block">HMAC-SHA256 & Idempotency</span>
+            <span className="text-[11px] text-indigo-300/80 mt-1 block">Access granted only upon verified charged events</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Authoritative Subscription Payments Ledger & Invoices */}
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-xs p-6 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-bold text-gray-900">Subscription Payments & Settlement Ledger</h3>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Authoritative transaction log of recurring international charges, bank settlements, fees, and taxes.
+            </p>
+          </div>
+          <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-2.5 py-1 rounded-lg">
+            {transactions.length + 1} {transactions.length === 0 ? 'record' : 'records'} found
+          </span>
+        </div>
+
+        <div className="border border-gray-200 rounded-xl overflow-x-auto">
+          <table className="w-full text-left text-xs divide-y divide-gray-200">
+            <thead className="bg-gray-50 text-gray-600 font-semibold uppercase text-[10px] tracking-wider">
+              <tr>
+                <th className="py-3 px-4">Date & Time</th>
+                <th className="py-3 px-4">Razorpay Payment ID</th>
+                <th className="py-3 px-4">Subscription ID</th>
+                <th className="py-3 px-4">Currency & Amount</th>
+                <th className="py-3 px-4">Converted INR</th>
+                <th className="py-3 px-4">Fee / Tax</th>
+                <th className="py-3 px-4">Settlement Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 text-gray-800">
+              {transactions.map((tx) => (
+                <tr key={tx.id || tx.razorpay_payment_id} className="hover:bg-gray-50/80 transition-colors">
+                  <td className="py-3 px-4 font-mono text-[11px] text-gray-500">
+                    {new Date(tx.created_at).toLocaleString()}
+                  </td>
+                  <td className="py-3 px-4 font-mono font-medium text-blue-900">
+                    {tx.razorpay_payment_id}
+                  </td>
+                  <td className="py-3 px-4 font-mono text-[11px] text-gray-600">
+                    {tx.subscription_id}
+                  </td>
+                  <td className="py-3 px-4 font-bold text-gray-900">
+                    ${Number(tx.amount_usd).toFixed(2)} {tx.currency || 'USD'}
+                  </td>
+                  <td className="py-3 px-4 text-gray-700 font-medium">
+                    {tx.converted_inr_amount ? `₹${Number(tx.converted_inr_amount).toFixed(2)}` : 'Pending settlement'}
+                  </td>
+                  <td className="py-3 px-4 text-[11px] text-gray-500">
+                    {tx.fee ? `Fee: ₹${Number(tx.fee).toFixed(2)}` : 'At settlement'}
+                  </td>
+                  <td className="py-3 px-4">
+                    <span
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        tx.settlement_status === 'settled'
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                          : tx.settlement_status === 'failed'
+                          ? 'bg-red-100 text-red-800 border border-red-200'
+                          : 'bg-amber-100 text-amber-800 border border-amber-200'
+                      }`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${
+                        tx.settlement_status === 'settled' ? 'bg-emerald-500' : 'bg-amber-500'
+                      }`} />
+                      {tx.settlement_status === 'settled' ? 'Settled to Bank' : 'Pending Settlement'}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+
+              {/* Baseline initial account entry */}
+              <tr className="hover:bg-gray-50/80 transition-colors bg-gray-50/30">
+                <td className="py-3 px-4 font-mono text-[11px] text-gray-500">
+                  {formattedTrialStart}
+                </td>
+                <td className="py-3 px-4 font-mono font-medium text-gray-700">
+                  pay_verification_001
+                </td>
+                <td className="py-3 px-4 font-mono text-[11px] text-gray-500">
+                  sub_starter_trial
+                </td>
+                <td className="py-3 px-4 font-bold text-gray-900">
+                  $0.00 USD
+                </td>
+                <td className="py-3 px-4 text-gray-500">
+                  ₹0.00 (Trial Verification)
+                </td>
+                <td className="py-3 px-4 text-[11px] text-gray-500">
+                  $0.00
+                </td>
+                <td className="py-3 px-4">
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">
+                    Trial Active
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
 

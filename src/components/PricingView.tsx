@@ -38,7 +38,11 @@ interface PricingTierConfig {
   monthlyPrice: number;
   annualPrice: number;
   annualTotalPrice: number;
+  monthlyPriceInr: number;
+  annualPriceInr: number;
+  annualTotalPriceInr: number;
   annualSavingsBadge: string;
+  annualSavingsBadgeInr: string;
   customersIncluded: string;
   description: string;
   isPopular?: boolean;
@@ -53,7 +57,11 @@ const PRICING_TIERS_CONFIG: PricingTierConfig[] = [
     monthlyPrice: CENTRAL_PRICING.starter.monthly.amountUsd,
     annualPrice: CENTRAL_PRICING.starter.annual.monthlyEquivalentUsd,
     annualTotalPrice: CENTRAL_PRICING.starter.annual.totalAmountUsd,
+    monthlyPriceInr: CENTRAL_PRICING.starter.monthly.amountInr,
+    annualPriceInr: CENTRAL_PRICING.starter.annual.monthlyEquivalentInr,
+    annualTotalPriceInr: CENTRAL_PRICING.starter.annual.totalAmountInr,
     annualSavingsBadge: CENTRAL_PRICING.starter.annual.savingsBadge,
+    annualSavingsBadgeInr: CENTRAL_PRICING.starter.annual.savingsBadgeInr,
     customersIncluded: CENTRAL_PRICING.starter.customersIncluded,
     description: CENTRAL_PRICING.starter.description,
     features: CENTRAL_PRICING.starter.features,
@@ -65,7 +73,11 @@ const PRICING_TIERS_CONFIG: PricingTierConfig[] = [
     monthlyPrice: CENTRAL_PRICING.growth.monthly.amountUsd,
     annualPrice: CENTRAL_PRICING.growth.annual.monthlyEquivalentUsd,
     annualTotalPrice: CENTRAL_PRICING.growth.annual.totalAmountUsd,
+    monthlyPriceInr: CENTRAL_PRICING.growth.monthly.amountInr,
+    annualPriceInr: CENTRAL_PRICING.growth.annual.monthlyEquivalentInr,
+    annualTotalPriceInr: CENTRAL_PRICING.growth.annual.totalAmountInr,
     annualSavingsBadge: CENTRAL_PRICING.growth.annual.savingsBadge,
+    annualSavingsBadgeInr: CENTRAL_PRICING.growth.annual.savingsBadgeInr,
     customersIncluded: CENTRAL_PRICING.growth.customersIncluded,
     description: CENTRAL_PRICING.growth.description,
     isPopular: true,
@@ -78,7 +90,11 @@ const PRICING_TIERS_CONFIG: PricingTierConfig[] = [
     monthlyPrice: CENTRAL_PRICING.pro.monthly.amountUsd,
     annualPrice: CENTRAL_PRICING.pro.annual.monthlyEquivalentUsd,
     annualTotalPrice: CENTRAL_PRICING.pro.annual.totalAmountUsd,
+    monthlyPriceInr: CENTRAL_PRICING.pro.monthly.amountInr,
+    annualPriceInr: CENTRAL_PRICING.pro.annual.monthlyEquivalentInr,
+    annualTotalPriceInr: CENTRAL_PRICING.pro.annual.totalAmountInr,
     annualSavingsBadge: CENTRAL_PRICING.pro.annual.savingsBadge,
+    annualSavingsBadgeInr: CENTRAL_PRICING.pro.annual.savingsBadgeInr,
     customersIncluded: CENTRAL_PRICING.pro.customersIncluded,
     description: CENTRAL_PRICING.pro.description,
     features: CENTRAL_PRICING.pro.features,
@@ -107,8 +123,24 @@ export const PricingView: React.FC<PricingViewProps> = ({
     currentUser?.billingStatus === 'trial_expired' ||
     Boolean(currentUser?.trialEndDate && new Date(currentUser.trialEndDate).getTime() <= Date.now() && currentUser.billingStatus !== 'active');
 
-  // Annual toggle: false = Monthly, true = Annual (save 17-20%)
+  // Annual toggle: false = Monthly, true = Annual (10 months price, 2 months free)
   const [isAnnual, setIsAnnual] = useState<boolean>(false);
+  // Currency toggle: USD (International billing currency) vs INR (Indian display/billing currency)
+  const [currency, setCurrency] = useState<'USD' | 'INR'>(() => {
+    try {
+      const stored = localStorage.getItem('churnveda_billing_currency');
+      if (stored === 'INR' || stored === 'USD') return stored;
+    } catch {}
+    return 'USD';
+  });
+
+  const handleCurrencyToggle = (curr: 'USD' | 'INR') => {
+    setCurrency(curr);
+    try {
+      localStorage.setItem('churnveda_billing_currency', curr);
+    } catch {}
+  };
+
   // Offer mode: 'founding' (First 10 Customers Offer) or 'standard' (Standard Pricing)
   const [offerMode, setOfferMode] = useState<'founding' | 'standard'>('founding');
   // Pre-selected plan persists after toggle
@@ -485,37 +517,73 @@ export const PricingView: React.FC<PricingViewProps> = ({
           All plans include an automated <strong>14-day free trial</strong> with instant Razorpay, Mixpanel, and Intercom telemetry synchronization.
         </p>
 
-        {/* Annual Billing Toggle Switch */}
-        <div className="flex items-center justify-center gap-3 pt-3">
-          <span className={`text-xs font-semibold ${!isAnnual ? 'text-gray-900' : 'text-gray-500'}`}>
-            Monthly
-          </span>
-
-          <button
-            type="button"
-            role="switch"
-            aria-checked={isAnnual}
-            onClick={() => setIsAnnual(!isAnnual)}
-            className={`relative inline-flex h-7 w-14 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-900 focus:ring-offset-2 ${
-              isAnnual ? 'bg-[#1E3A8A]' : 'bg-gray-300'
-            }`}
-          >
-            <span
-              className={`pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                isAnnual ? 'translate-x-7' : 'translate-x-0'
+        {/* Billing Interval & Currency Switchers */}
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
+          {/* Monthly vs Annual Toggle (2 months free) */}
+          <div className="flex items-center gap-2.5 p-1.5 bg-gray-100 rounded-xl border border-gray-200 shadow-2xs">
+            <button
+              type="button"
+              onClick={() => setIsAnnual(false)}
+              className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                !isAnnual
+                  ? 'bg-white text-gray-900 shadow-xs ring-1 ring-gray-200'
+                  : 'text-gray-600 hover:text-gray-900'
               }`}
-            />
-          </button>
+            >
+              Monthly
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsAnnual(true)}
+              className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
+                isAnnual
+                  ? 'bg-[#1E3A8A] text-white shadow-xs'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              <span>Annual</span>
+              <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded-full ${
+                isAnnual ? 'bg-emerald-400 text-slate-950' : 'bg-emerald-100 text-emerald-800'
+              }`}>
+                2 months free
+              </span>
+            </button>
+          </div>
 
-          <div className="flex items-center gap-1.5">
-            <span className={`text-xs font-semibold ${isAnnual ? 'text-gray-900' : 'text-gray-500'}`}>
-              Annual (save up to 20%)
-            </span>
-            <span className="text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full shadow-2xs">
-              Save up to 20%
-            </span>
+          {/* USD ($) International vs INR (₹) India Currency Selector */}
+          <div className="flex items-center gap-2.5 p-1.5 bg-blue-50 rounded-xl border border-blue-200 shadow-2xs">
+            <button
+              type="button"
+              onClick={() => handleCurrencyToggle('USD')}
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1 ${
+                currency === 'USD'
+                  ? 'bg-[#1E3A8A] text-white shadow-xs'
+                  : 'text-blue-900 hover:text-blue-950'
+              }`}
+            >
+              <span>$ USD</span>
+              <span className="text-[10px] opacity-80">(International)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleCurrencyToggle('INR')}
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1 ${
+                currency === 'INR'
+                  ? 'bg-[#1E3A8A] text-white shadow-xs'
+                  : 'text-blue-900 hover:text-blue-950'
+              }`}
+            >
+              <span>₹ INR</span>
+              <span className="text-[10px] opacity-80">(India · Fixed)</span>
+            </button>
           </div>
         </div>
+
+        <p className="text-[11px] text-gray-500 max-w-lg mx-auto">
+          {currency === 'INR'
+            ? 'Fixed published INR rates for Indian customers via Razorpay. Annual billing gives 2 months free.'
+            : 'Fixed published USD rates for international customers. Annual billing gives 2 months free (pay for 10 months).'}
+        </p>
       </div>
 
       {/* FOUNDING CUSTOMER OFFER BANNER (Requirement 2) */}
@@ -617,54 +685,60 @@ export const PricingView: React.FC<PricingViewProps> = ({
                   {tier.description}
                 </p>
 
-                {/* Price Display with Founding Comparison (Requirement 1 & 2) */}
+                {/* Price Display with Exact Published USD & INR Rates */}
                 <div className="price mt-4">
-                  {isAnnual ? (
-                    <div>
-                      <div className="flex items-baseline gap-1.5">
-                        <span className="text-4xl font-black text-gray-900 tracking-tight">
-                          ${tier.annualTotalPrice.toLocaleString('en-US')}
-                        </span>
-                        <span className="text-xs text-gray-500 font-semibold">/year</span>
+                  {currency === 'INR' ? (
+                    isAnnual ? (
+                      <div>
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="text-4xl font-black text-gray-900 tracking-tight">
+                            ₹{tier.annualTotalPriceInr.toLocaleString('en-IN')}
+                          </span>
+                          <span className="text-xs text-gray-500 font-semibold">/year</span>
+                        </div>
+                        <div className="text-[11px] text-gray-500 font-medium mt-0.5">
+                          ₹{tier.annualPriceInr.toLocaleString('en-IN')}/mo billed annually (10 months price, 2 months free)
+                        </div>
                       </div>
-                      <div className="text-[11px] text-gray-500 font-medium mt-0.5">
-                        ${tier.annualPrice}/mo billed annually (${tier.annualTotalPrice}/yr)
+                    ) : (
+                      <div>
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="text-4xl font-black text-gray-900 tracking-tight">
+                            ₹{tier.monthlyPriceInr.toLocaleString('en-IN')}
+                          </span>
+                          <span className="text-xs text-gray-500 font-semibold">/month</span>
+                        </div>
+                        <div className="text-[11px] text-gray-500 font-medium mt-0.5">
+                          Fixed published price in INR · Annual: ₹{tier.annualTotalPriceInr.toLocaleString('en-IN')}/yr
+                        </div>
                       </div>
-                    </div>
-                  ) : isFoundingEligible ? (
-                    <div>
-                      <div className="flex items-baseline gap-2.5">
-                        <span className="line-through text-gray-400 font-bold text-xl sm:text-2xl">
-                          ${standardMonthly}
-                        </span>
-                        <span className="text-4xl sm:text-5xl font-black text-gray-900 tracking-tight">
-                          ${foundingPrice}
-                        </span>
-                        <span className="text-xs text-gray-500 font-semibold">/month</span>
-                      </div>
-                      <div className="text-[11px] text-blue-900 font-bold mt-1 flex items-center gap-1.5">
-                        <span>Founding Customer Price</span>
-                        <span className="text-gray-300">·</span>
-                        <span className="text-emerald-700 font-semibold">Save ${tier.foundingOffer.monthlySavings}/mo</span>
-                      </div>
-                      <div className="text-[10px] text-gray-400 mt-0.5">
-                        Regular price: ${standardMonthly}/month after promotional period
-                      </div>
-                    </div>
+                    )
                   ) : (
-                    <div>
-                      <div className="flex items-baseline gap-1.5">
-                        <span className="text-4xl font-black text-gray-900 tracking-tight">
-                          ${tier.monthlyPrice.toLocaleString('en-US')}
-                        </span>
-                        <span className="text-xs text-gray-500 font-semibold">/month</span>
+                    isAnnual ? (
+                      <div>
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="text-4xl font-black text-gray-900 tracking-tight">
+                            ${tier.annualTotalPrice.toLocaleString('en-US')}
+                          </span>
+                          <span className="text-xs text-gray-500 font-semibold">/year</span>
+                        </div>
+                        <div className="text-[11px] text-gray-500 font-medium mt-0.5">
+                          ${tier.annualPrice}/mo billed annually (10 months price, 2 months free)
+                        </div>
                       </div>
-                      <div className="text-[11px] text-gray-500 font-medium mt-0.5">
-                        {tier.id === 'pro'
-                          ? 'Custom pricing on approval · Dedicated scale & SLA'
-                          : `Annual billing: $${tier.annualTotalPrice.toLocaleString('en-US')}/year`}
+                    ) : (
+                      <div>
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="text-4xl font-black text-gray-900 tracking-tight">
+                            ${tier.monthlyPrice.toLocaleString('en-US')}
+                          </span>
+                          <span className="text-xs text-gray-500 font-semibold">/month</span>
+                        </div>
+                        <div className="text-[11px] text-gray-500 font-medium mt-0.5">
+                          Fixed published price in USD · Annual: ${tier.annualTotalPrice.toLocaleString('en-US')}/yr
+                        </div>
                       </div>
-                    </div>
+                    )
                   )}
                 </div>
 
@@ -677,15 +751,11 @@ export const PricingView: React.FC<PricingViewProps> = ({
                 <div className="min-h-[26px] mt-1.5">
                   {isAnnual ? (
                     <span className="savings-badge inline-flex items-center text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
-                      {tier.annualSavingsBadge}
-                    </span>
-                  ) : isFoundingEligible ? (
-                    <span className="inline-flex items-center text-[11px] font-bold text-blue-900 bg-blue-50 border border-blue-200 px-2.5 py-0.5 rounded-full">
-                      Founding 10 Offer (${tier.foundingOffer.monthlySavings}/mo discount)
+                      {currency === 'INR' ? tier.annualSavingsBadgeInr : tier.annualSavingsBadge}
                     </span>
                   ) : (
-                    <span className="text-[11px] text-gray-400">
-                      {tier.id === 'pro' ? 'Custom enterprise terms' : 'Standard monthly billing'}
+                    <span className="inline-flex items-center text-[11px] font-bold text-blue-900 bg-blue-50 border border-blue-200 px-2.5 py-0.5 rounded-full">
+                      Founding Customer Rate ({currency === 'INR' ? `₹${tier.monthlyPriceInr.toLocaleString('en-IN')}/mo` : `$${tier.monthlyPrice}/mo`})
                     </span>
                   )}
                 </div>

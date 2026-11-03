@@ -98,12 +98,12 @@ async function migrate() {
     const plansToSeed = [
       {
         id: 'plan_tier_starter_monthly',
-        name: 'Churnveda Starter',
+        name: 'Churnveda Starter — Monthly',
         tier: 'starter',
         billing_cycle: 'monthly',
-        amount_paise: 499900,
-        amount_inr: 4999,
-        currency: 'INR',
+        amount_paise: 275600,
+        amount_inr: 2756,
+        currency: 'USD',
         razorpay_plan_id: process.env.RAZORPAY_PLAN_STARTER_MONTHLY || 'plan_TeZlsQOQaeAWAw'
       },
       {
@@ -111,49 +111,49 @@ async function migrate() {
         name: 'Churnveda Starter — Annual',
         tier: 'starter',
         billing_cycle: 'annual',
-        amount_paise: 4919016,
-        amount_inr: 49190.16,
-        currency: 'INR',
+        amount_paise: 2756200,
+        amount_inr: 27562,
+        currency: 'USD',
         razorpay_plan_id: process.env.RAZORPAY_PLAN_STARTER_ANNUAL || 'plan_TeZMQYLVPEtQuj'
       },
       {
         id: 'plan_tier_growth_monthly',
-        name: 'Churnveda Growth - Monthly',
+        name: 'Churnveda Growth — Monthly',
         tier: 'growth',
         billing_cycle: 'monthly',
-        amount_paise: 1299900,
-        amount_inr: 12999,
-        currency: 'INR',
+        amount_paise: 750800,
+        amount_inr: 7508,
+        currency: 'USD',
         razorpay_plan_id: process.env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_TeZQFjmJoxrnKM'
       },
       {
         id: 'plan_tier_growth_annual',
-        name: 'Churnveda Growth - Annual',
+        name: 'Churnveda Growth — Annual',
         tier: 'growth',
         billing_cycle: 'annual',
-        amount_paise: 12791016,
-        amount_inr: 127910.16,
-        currency: 'INR',
+        amount_paise: 7508200,
+        amount_inr: 75082,
+        currency: 'USD',
         razorpay_plan_id: process.env.RAZORPAY_PLAN_GROWTH_ANNUAL || 'plan_TfXxPsAOqPYklF'
       },
       {
         id: 'plan_tier_pro_monthly',
-        name: 'Churnveda Pro - Monthly',
+        name: 'Churnveda Enterprise — Monthly',
         tier: 'pro',
         billing_cycle: 'monthly',
-        amount_paise: 2999900,
-        amount_inr: 29999,
-        currency: 'INR',
+        amount_paise: 3316900,
+        amount_inr: 33169,
+        currency: 'USD',
         razorpay_plan_id: process.env.RAZORPAY_PLAN_PRO_MONTHLY || 'plan_TeZraPPrYthtEk'
       },
       {
         id: 'plan_tier_pro_annual',
-        name: 'Churnveda Pro - Annual',
+        name: 'Churnveda Enterprise — Annual',
         tier: 'pro',
         billing_cycle: 'annual',
-        amount_paise: 29519016,
-        amount_inr: 295190.16,
-        currency: 'INR',
+        amount_paise: 33169000,
+        amount_inr: 331690,
+        currency: 'USD',
         razorpay_plan_id: process.env.RAZORPAY_PLAN_PRO_ANNUAL || 'plan_Tea17dB6H4EHdn'
       }
     ];

@@ -223,10 +223,10 @@ export const AdminBillingPlansView: React.FC<AdminBillingPlansViewProps> = ({
                     Billing Cycle
                   </th>
                   <th scope="col" className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                    Amount (USD)
+                    USD Price
                   </th>
                   <th scope="col" className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                    Amount (Cents)
+                    Fixed INR Display
                   </th>
                   <th scope="col" className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
                     Razorpay Plan ID
@@ -264,19 +264,24 @@ export const AdminBillingPlansView: React.FC<AdminBillingPlansViewProps> = ({
                         <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
                           isAnnual ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-700'
                         }`}>
-                          {isAnnual ? 'Annual (20% Off)' : 'Monthly'}
+                          {isAnnual ? 'Annual (2 Months Free)' : 'Monthly'}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap font-semibold text-gray-900">
-                        {p.formatted || (p.amount_usd ? `$${p.amount_usd}${isAnnual ? '/yr' : '/mo'}` : `$${p.amount_inr}`)}
+                        {p.formatted || `$${p.amount_usd || 0}${isAnnual ? '/yr' : '/mo'}`}
                         {isAnnual && (
                           <span className="block text-[11px] font-normal text-emerald-600">
-                            Effective ${Math.round((p.amount_usd || p.amount_inr || 0) / 12)}/mo
+                            Effective ${Math.round((p.amount_usd || 0) / 12)}/mo
                           </span>
                         )}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-xs font-mono text-gray-600">
-                        {(p.amount_cents || p.amount_paise || 0).toLocaleString('en-US')}
+                      <td className="px-6 py-4 whitespace-nowrap font-semibold text-blue-900">
+                        {p.formattedInr || (p.amount_inr ? `₹${p.amount_inr.toLocaleString('en-IN')}${isAnnual ? '/yr' : '/mo'}` : '—')}
+                        {isAnnual && p.amount_inr && (
+                          <span className="block text-[11px] font-normal text-emerald-600">
+                            Effective ₹{Math.round(p.amount_inr / 12).toLocaleString('en-IN')}/mo
+                          </span>
+                        )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         {p.razorpay_plan_id ? (

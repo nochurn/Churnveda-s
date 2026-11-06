@@ -71,8 +71,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const hasShownToastRef = useRef(false);
 
   useEffect(() => {
+    let active = true;
     // Fetch auth configuration for OAuth provider availability & developer checks
     apiService.getAuthConfig().then((cfg) => {
+      if (!active) return;
       setAuthConfig({
         isConfigured: !!cfg.isConfigured,
         oauthProviders: cfg.oauthProviders || { google: false, microsoft: false },
@@ -82,6 +84,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }).catch((e) => {
       console.warn('Failed to load auth config:', e);
     });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -109,8 +114,22 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
 
     if (!authConfig.isConfigured) {
-      setErrorMessage('Authentication is not configured.');
-      return;
+      try {
+        const latestCfg = await apiService.getAuthConfig();
+        setAuthConfig({
+          isConfigured: !!latestCfg.isConfigured,
+          oauthProviders: latestCfg.oauthProviders || { google: false, microsoft: false },
+          developerError: latestCfg.developerError || null,
+          diagnostic: latestCfg.diagnostic
+        });
+        if (!latestCfg.isConfigured) {
+          setErrorMessage('Authentication is not configured.');
+          return;
+        }
+      } catch {
+        setErrorMessage('Authentication is not configured.');
+        return;
+      }
     }
 
     if (isMagicLinkMode) {
@@ -190,17 +209,29 @@ export const LoginView: React.FC<LoginViewProps> = ({
   };
 
   const handleOAuth = async (provider: 'google' | 'microsoft') => {
+    setErrorMessage(null);
     setIsLoading(true);
     try {
+      if (!authConfig.isConfigured) {
+        const latestCfg = await apiService.getAuthConfig();
+        setAuthConfig({
+          isConfigured: !!latestCfg.isConfigured,
+          oauthProviders: latestCfg.oauthProviders || { google: false, microsoft: false },
+          developerError: latestCfg.developerError || null,
+          diagnostic: latestCfg.diagnostic
+        });
+      }
       const res = await authService.loginWithOAuth(provider);
       setIsLoading(false);
       if (res.success) {
         onShowToast(res.message, 'success');
       } else {
+        setErrorMessage(res.message || 'OAuth authentication failed');
         onShowToast(res.message || 'OAuth authentication failed', 'error');
       }
     } catch (e: any) {
       setIsLoading(false);
+      setErrorMessage(e.message || 'OAuth authentication failed');
       onShowToast(e.message || 'OAuth authentication failed', 'error');
     }
   };

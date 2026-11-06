@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { apiFetch } from '../services/api';
 
 // Safe placeholder URL and key for unconfigured or initializing states
 const PLACEHOLDER_URL = 'https://placeholder.supabase.co';
@@ -31,16 +32,24 @@ function deriveUrlFromJwt(jwt?: string): string {
 }
 
 /**
- * Validates whether a given string is a valid HTTP or HTTPS URL
+ * Validates whether a given string is a valid HTTP or HTTPS Supabase Project URL.
+ * Explicitly rejects PostgreSQL connection strings and database pooler hostnames.
  */
 export function isValidSupabaseUrl(url?: string): boolean {
   if (!url || typeof url !== 'string') return false;
   const trimmed = url.trim();
+  if (!trimmed || /^postgres(ql)?:\/\//i.test(trimmed) || /postgres(ql)?:\/\//i.test(trimmed)) {
+    return false;
+  }
   if (!trimmed.match(/^https?:\/\//i)) return false;
   if (trimmed.includes('placeholder')) return false;
   try {
     const parsed = new URL(trimmed);
-    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && Boolean(parsed.hostname);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    if (!parsed.hostname) return false;
+    if (/^db\.[a-z0-9_-]+\.supabase\.co$/i.test(parsed.hostname)) return false;
+    if (/\.pooler\.supabase\.com$/i.test(parsed.hostname)) return false;
+    return true;
   } catch {
     return false;
   }
@@ -52,8 +61,8 @@ export function isValidSupabaseUrl(url?: string): boolean {
  * 2. Handles literal "undefined", "null", "false", "[object Object]"
  * 3. Extracts project ref from PostgreSQL database connection strings (postgresql://... or postgres://...)
  * 4. Adds https:// if protocol is omitted (e.g. xyz.supabase.co)
- * 5. Strips trailing /rest/v1 and slashes
- * 6. Infers from JWT anon key if URL is missing
+ * 5. Strips trailing /rest/v1, /auth/v1, and slashes
+ * 6. Infers from JWT anon key if URL is missing or invalid
  */
 export function normalizeSupabaseUrl(rawUrl?: string, fallbackAnonKey?: string): string {
   if (!rawUrl || typeof rawUrl !== 'string') {
@@ -100,10 +109,10 @@ export function normalizeSupabaseUrl(rawUrl?: string, fallbackAnonKey?: string):
   url = url.replace(/\/rest\/v1\/?$/, '').replace(/\/auth\/v1\/?$/, '');
   url = url.replace(/\/+$/, '');
 
-  // Validate format with URL parser
+  // Validate format with URL parser and ensure it is not a DB host
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || !isValidSupabaseUrl(url)) {
       return deriveUrlFromJwt(fallbackAnonKey) || '';
     }
     return url;
@@ -192,6 +201,9 @@ const envUrl = normalizeSupabaseUrl(rawClientUrl, envAnonKey);
 const envSiteUrl = rawClientSiteUrl.replace(/^["'`]+/, '').replace(/["'`]+$/, '').trim();
 
 let supabaseInstance: SupabaseClient | null = null;
+let currentClientUrl = '';
+let currentClientKey = '';
+let inFlightAuthConfig: Promise<AuthConfig> | null = null;
 let configCache: {
   url: string;
   anonKey: string;
@@ -216,6 +228,12 @@ export interface AuthConfig {
   };
 }
 
+function isValidAnonKey(anonKey?: string): boolean {
+  if (!anonKey || typeof anonKey !== 'string') return false;
+  const trimmed = anonKey.trim();
+  return Boolean(trimmed && !trimmed.includes('placeholder') && trimmed.length > 20);
+}
+
 /**
  * Validates public Supabase credentials and returns whether the client is ready
  */
@@ -223,7 +241,7 @@ export function validateSupabaseConfig(url?: string, anonKey?: string): { valid:
   const checkKey = (anonKey || configCache?.anonKey || envAnonKey || '').trim();
   const checkUrl = normalizeSupabaseUrl(url || configCache?.url || envUrl || '', checkKey);
   const hasValidUrl = isValidSupabaseUrl(checkUrl);
-  const hasValidKey = Boolean(checkKey && !checkKey.includes('placeholder') && checkKey.length > 20);
+  const hasValidKey = isValidAnonKey(checkKey);
 
   if (!hasValidUrl || !hasValidKey) {
     const missing: string[] = [];
@@ -248,7 +266,11 @@ export function validateSupabaseConfig(url?: string, anonKey?: string): { valid:
  * Fetch authoritative runtime public auth configuration from server or client bundle
  */
 export async function fetchAuthConfig(): Promise<AuthConfig> {
-  if (configCache && isValidSupabaseUrl(configCache.url)) {
+  if (configCache && isValidSupabaseUrl(configCache.url) && isValidAnonKey(configCache.anonKey)) {
+    updateSupabaseClient(configCache.url, configCache.anonKey, {
+      siteUrl: configCache.siteUrl,
+      oauthProviders: configCache.oauthProviders
+    });
     return {
       configured: true,
       url: configCache.url,
@@ -263,80 +285,97 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
     };
   }
 
-  // 1. Try server-side runtime endpoint first (/api/auth/config)
-  try {
-    const res = await fetch('/api/auth/config');
-    if (res.ok) {
-      const data = await res.json();
-      const normalizedServerUrl = normalizeSupabaseUrl(data.url, data.anonKey);
-      if (data.configured && isValidSupabaseUrl(normalizedServerUrl) && data.anonKey) {
-        configCache = {
-          url: normalizedServerUrl,
-          anonKey: data.anonKey,
-          siteUrl: data.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000'),
-          oauthProviders: data.oauthProviders || { google: false, microsoft: false }
-        };
-        updateSupabaseClient(configCache.url, configCache.anonKey);
-        return {
-          ...data,
-          url: configCache.url,
-          diagnostic: {
-            hasUrl: true,
-            hasAnonKey: true,
-            source: 'backend_api'
-          }
-        };
-      }
-    }
-  } catch {
-    // server endpoint optional or offline
+  if (inFlightAuthConfig) {
+    return inFlightAuthConfig;
   }
 
-  // 2. Fall back to client build-time environment variables
-  const siteUrl = envSiteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
-  const valid = validateSupabaseConfig();
+  inFlightAuthConfig = (async (): Promise<AuthConfig> => {
+    const defaultSiteUrl = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
 
-  if (valid.valid && isValidSupabaseUrl(envUrl) && envAnonKey) {
-    configCache = {
-      url: envUrl,
-      anonKey: envAnonKey,
-      siteUrl,
-      oauthProviders: { google: false, microsoft: false }
-    };
-    updateSupabaseClient(configCache.url, configCache.anonKey);
+    // 1. Try server-side runtime endpoint first (/api/auth/config)
+    try {
+      const res = await apiFetch('/api/auth/config');
+      if (res.ok) {
+        const data = await res.json();
+        const normalizedServerUrl = normalizeSupabaseUrl(data.url, data.anonKey);
+        if (data.configured && isValidSupabaseUrl(normalizedServerUrl) && isValidAnonKey(data.anonKey)) {
+          const resolvedSiteUrl = data.siteUrl || configCache?.siteUrl || envSiteUrl || defaultSiteUrl;
+          const resolvedProviders = data.oauthProviders || configCache?.oauthProviders || { google: false, microsoft: false };
+
+          updateSupabaseClient(normalizedServerUrl, data.anonKey, {
+            siteUrl: resolvedSiteUrl,
+            oauthProviders: resolvedProviders
+          });
+
+          return {
+            ...data,
+            configured: true,
+            url: normalizedServerUrl,
+            anonKey: data.anonKey.trim(),
+            siteUrl: configCache?.siteUrl || resolvedSiteUrl,
+            oauthProviders: configCache?.oauthProviders || resolvedProviders,
+            diagnostic: {
+              hasUrl: true,
+              hasAnonKey: true,
+              source: 'backend_api'
+            }
+          };
+        }
+      }
+    } catch {
+      // server endpoint optional or offline
+    }
+
+    // 2. Fall back to client build-time environment variables
+    const siteUrl = configCache?.siteUrl || envSiteUrl || defaultSiteUrl;
+    const oauthProviders = configCache?.oauthProviders || { google: false, microsoft: false };
+    const valid = validateSupabaseConfig();
+
+    if (valid.valid && isValidSupabaseUrl(envUrl) && isValidAnonKey(envAnonKey)) {
+      updateSupabaseClient(envUrl, envAnonKey, {
+        siteUrl,
+        oauthProviders
+      });
+      return {
+        configured: true,
+        url: envUrl,
+        anonKey: envAnonKey,
+        siteUrl: configCache?.siteUrl || siteUrl,
+        oauthProviders: configCache?.oauthProviders || oauthProviders,
+        diagnostic: {
+          hasUrl: true,
+          hasAnonKey: true,
+          source: 'client_bundle'
+        }
+      };
+    }
+
     return {
-      configured: true,
-      url: configCache.url,
-      anonKey: configCache.anonKey,
+      configured: false,
+      url: isValidSupabaseUrl(envUrl) ? envUrl : '',
+      anonKey: envAnonKey || '',
       siteUrl,
-      oauthProviders: configCache.oauthProviders,
+      oauthProviders,
+      error: valid.error,
       diagnostic: {
-        hasUrl: true,
-        hasAnonKey: true,
-        source: 'client_bundle'
+        hasUrl: isValidSupabaseUrl(envUrl),
+        hasAnonKey: isValidAnonKey(envAnonKey),
+        source: 'none'
       }
     };
-  }
+  })();
 
-  return {
-    configured: false,
-    url: isValidSupabaseUrl(envUrl) ? envUrl : '',
-    anonKey: envAnonKey || '',
-    siteUrl,
-    oauthProviders: { google: false, microsoft: false },
-    error: valid.error,
-    diagnostic: {
-      hasUrl: isValidSupabaseUrl(envUrl),
-      hasAnonKey: Boolean(envAnonKey && !envAnonKey.includes('placeholder')),
-      source: 'none'
-    }
-  };
+  try {
+    return await inFlightAuthConfig;
+  } finally {
+    inFlightAuthConfig = null;
+  }
 }
 
 export function isSupabaseConfigured(): boolean {
   const url = normalizeSupabaseUrl(configCache?.url || envUrl || '', configCache?.anonKey || envAnonKey);
   const anonKey = configCache?.anonKey || envAnonKey || '';
-  return isValidSupabaseUrl(url) && Boolean(anonKey && !anonKey.includes('placeholder') && anonKey.length > 20);
+  return isValidSupabaseUrl(url) && isValidAnonKey(anonKey);
 }
 
 /**
@@ -344,32 +383,44 @@ export function isSupabaseConfigured(): boolean {
  * Guarantees zero uncaught exceptions by validating the URL and falling back safely.
  */
 export function getSupabase(): SupabaseClient {
-  if (supabaseInstance) {
-    return supabaseInstance;
-  }
-
   const configured = isSupabaseConfigured();
   let targetUrl = PLACEHOLDER_URL;
   let targetKey = PLACEHOLDER_KEY;
 
   if (configured) {
     const candidateUrl = normalizeSupabaseUrl(configCache?.url || envUrl || '', configCache?.anonKey || envAnonKey);
-    if (isValidSupabaseUrl(candidateUrl)) {
+    const candidateKey = (configCache?.anonKey || envAnonKey || '').trim();
+    if (isValidSupabaseUrl(candidateUrl) && isValidAnonKey(candidateKey)) {
       targetUrl = candidateUrl;
-      targetKey = configCache?.anonKey || envAnonKey || PLACEHOLDER_KEY;
+      targetKey = candidateKey;
     }
   }
 
+  if (supabaseInstance && currentClientUrl === targetUrl && currentClientKey === targetKey) {
+    return supabaseInstance;
+  }
+
+  // Never downgrade an already-configured singleton client to placeholder
+  if (supabaseInstance && isValidSupabaseUrl(currentClientUrl) && targetUrl === PLACEHOLDER_URL) {
+    return supabaseInstance;
+  }
+
+  const safeUrl = isValidSupabaseUrl(targetUrl) ? targetUrl : PLACEHOLDER_URL;
+  const safeKey = isValidAnonKey(targetKey) ? targetKey : PLACEHOLDER_KEY;
+  const isReal = safeUrl !== PLACEHOLDER_URL && safeKey !== PLACEHOLDER_KEY;
+
   try {
-    supabaseInstance = createClient(targetUrl, targetKey, {
+    supabaseInstance = createClient(safeUrl, safeKey, {
       auth: {
-        persistSession: configured,
-        autoRefreshToken: configured,
-        detectSessionInUrl: configured,
+        persistSession: isReal,
+        autoRefreshToken: isReal,
+        detectSessionInUrl: isReal,
         storage: typeof window !== 'undefined' ? window.localStorage : undefined,
         flowType: 'pkce'
       }
     });
+    currentClientUrl = safeUrl;
+    currentClientKey = safeKey;
   } catch (err) {
     console.warn('[Churnveda] Safe Supabase fallback initialized due to invalid configuration.');
     supabaseInstance = createClient(PLACEHOLDER_URL, PLACEHOLDER_KEY, {
@@ -379,34 +430,75 @@ export function getSupabase(): SupabaseClient {
         detectSessionInUrl: false
       }
     });
+    currentClientUrl = PLACEHOLDER_URL;
+    currentClientKey = PLACEHOLDER_KEY;
   }
 
   return supabaseInstance;
 }
 
-export function updateSupabaseClient(url: string, anonKey: string): SupabaseClient {
+export function updateSupabaseClient(
+  url: string,
+  anonKey: string,
+  metadata?: {
+    siteUrl?: string;
+    oauthProviders?: { google: boolean; microsoft: boolean };
+  }
+): SupabaseClient {
   const cleanUrl = normalizeSupabaseUrl(url, anonKey);
-  const valid = isValidSupabaseUrl(cleanUrl);
-  const targetUrl = valid ? cleanUrl : PLACEHOLDER_URL;
-  const targetKey = (anonKey && !anonKey.includes('placeholder')) ? anonKey : PLACEHOLDER_KEY;
+  const validUrl = isValidSupabaseUrl(cleanUrl);
+  const cleanKey = typeof anonKey === 'string' ? anonKey.replace(/^["'`]+/, '').replace(/["'`]+$/, '').trim() : '';
+  const validKey = isValidAnonKey(cleanKey);
+  const valid = validUrl && validKey;
+  const defaultSiteUrl = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+
+  if (!valid) {
+    if (configCache && metadata) {
+      configCache = {
+        ...configCache,
+        siteUrl: metadata.siteUrl || configCache.siteUrl,
+        oauthProviders: metadata.oauthProviders || configCache.oauthProviders
+      };
+    }
+    if (supabaseInstance) {
+      return supabaseInstance;
+    }
+    supabaseInstance = createClient(PLACEHOLDER_URL, PLACEHOLDER_KEY, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false
+      }
+    });
+    currentClientUrl = PLACEHOLDER_URL;
+    currentClientKey = PLACEHOLDER_KEY;
+    return supabaseInstance;
+  }
 
   configCache = {
     url: cleanUrl,
-    anonKey,
-    siteUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
-    oauthProviders: { google: false, microsoft: false }
+    anonKey: cleanKey,
+    siteUrl: metadata?.siteUrl || configCache?.siteUrl || envSiteUrl || defaultSiteUrl,
+    oauthProviders: metadata?.oauthProviders || configCache?.oauthProviders || { google: false, microsoft: false }
   };
 
+  // Reuse existing singleton client if URL and key are already active
+  if (supabaseInstance && currentClientUrl === cleanUrl && currentClientKey === cleanKey) {
+    return supabaseInstance;
+  }
+
   try {
-    supabaseInstance = createClient(targetUrl, targetKey, {
+    supabaseInstance = createClient(cleanUrl, cleanKey, {
       auth: {
-        persistSession: valid,
-        autoRefreshToken: valid,
-        detectSessionInUrl: valid,
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
         storage: typeof window !== 'undefined' ? window.localStorage : undefined,
         flowType: 'pkce'
       }
     });
+    currentClientUrl = cleanUrl;
+    currentClientKey = cleanKey;
   } catch (err) {
     console.warn('[Churnveda] updateSupabaseClient safe fallback initialized.');
     supabaseInstance = createClient(PLACEHOLDER_URL, PLACEHOLDER_KEY, {
@@ -416,6 +508,8 @@ export function updateSupabaseClient(url: string, anonKey: string): SupabaseClie
         detectSessionInUrl: false
       }
     });
+    currentClientUrl = PLACEHOLDER_URL;
+    currentClientKey = PLACEHOLDER_KEY;
   }
 
   return supabaseInstance;

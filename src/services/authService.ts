@@ -113,9 +113,10 @@ class AuthService {
   private pendingResets: Map<string, PendingReset> = new Map();
   private loginAttempts: Map<string, LoginAttemptRecord> = new Map();
   private listeners: Set<(user: UserProfile | null) => void> = new Set();
+  private initPromise: Promise<void>;
 
   constructor() {
-    this.initFromStorage();
+    this.initPromise = this.initFromStorage();
     this.initSupabaseAuthListener();
   }
 
@@ -135,30 +136,64 @@ class AuthService {
     });
   }
 
-  private initFromStorage() {
+  private async initFromStorage(): Promise<void> {
     try {
-      // Validate that an active token exists before loading cached user
-      const storedToken = localStorage.getItem('cs_auth_token') || localStorage.getItem('churnshield_auth_token');
-      const storedCurrentUser = localStorage.getItem(CURRENT_USER_STORAGE_KEY);
+      const hasStorage = typeof localStorage !== 'undefined';
+      const storedToken = hasStorage
+        ? (localStorage.getItem('cs_auth_token') || localStorage.getItem('churnshield_auth_token'))
+        : null;
+      const storedCurrentUser = hasStorage
+        ? localStorage.getItem(CURRENT_USER_STORAGE_KEY)
+        : null;
 
-      if (storedToken && storedCurrentUser && isSupabaseConfigured()) {
+      // Restore cached user optimistically when a session token is present;
+      // do not wipe before runtime /api/auth/config completes.
+      if (storedToken && storedCurrentUser) {
         try {
           this.currentUser = JSON.parse(storedCurrentUser);
         } catch {
           this.currentUser = null;
+          if (hasStorage) {
+            localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
+          }
         }
       } else {
-        // No valid authenticated session or Supabase not configured: unauthenticated
         this.currentUser = null;
-        localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
+        if (hasStorage) {
+          localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
+        }
       }
 
       // Load sessions
-      const storedSessions = localStorage.getItem(SESSIONS_STORAGE_KEY);
+      const storedSessions = hasStorage ? localStorage.getItem(SESSIONS_STORAGE_KEY) : null;
       if (storedSessions) {
         this.sessions = JSON.parse(storedSessions);
       } else {
         this.sessions = [];
+      }
+
+      // Wait for runtime configuration before checking isSupabaseConfigured()
+      try {
+        await fetchAuthConfig();
+      } catch (e) {
+        // Ignore fetch errors; handled below via isSupabaseConfigured()
+      }
+
+      if (!isSupabaseConfigured()) {
+        this.currentUser = null;
+        if (hasStorage) {
+          localStorage.removeItem('cs_auth_token');
+          localStorage.removeItem('churnshield_auth_token');
+          localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
+        }
+        this.notifyListeners();
+      } else if (storedToken && storedCurrentUser && !this.currentUser) {
+        try {
+          this.currentUser = JSON.parse(storedCurrentUser);
+          this.notifyListeners();
+        } catch {
+          this.currentUser = null;
+        }
       }
     } catch (e) {
       console.error('Failed initializing auth storage:', e);
@@ -171,18 +206,12 @@ class AuthService {
     if (typeof window === 'undefined') return;
 
     try {
-      await fetchAuthConfig();
+      await this.initPromise;
     } catch (e) {
       // ignore
     }
 
     if (!isSupabaseConfigured()) {
-      // Supabase is not configured - wipe any stale local credentials
-      this.currentUser = null;
-      localStorage.removeItem('cs_auth_token');
-      localStorage.removeItem('churnshield_auth_token');
-      localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
-      this.notifyListeners();
       return;
     }
 
@@ -205,7 +234,21 @@ class AuthService {
             console.warn('Failed verifying Supabase token on startup:', e);
           }
         } else {
-          // No active session in Supabase: securely invalidate any stale session state
+          const fallbackToken = localStorage.getItem('cs_auth_token') || localStorage.getItem('churnshield_auth_token');
+          if (fallbackToken) {
+            try {
+              const me = await fetchCurrentUser(fallbackToken);
+              if (me?.user) {
+                this.currentUser = me.user;
+                this.persistCurrentUser();
+                this.notifyListeners();
+                return;
+              }
+            } catch (e) {
+              // Fall through to clear unverified session state
+            }
+          }
+          // No active session in Supabase or backend: securely invalidate any stale session state
           this.currentUser = null;
           localStorage.removeItem('cs_auth_token');
           localStorage.removeItem('churnshield_auth_token');
@@ -322,16 +365,16 @@ class AuthService {
     const rawPlan = (data.plan || 'growth').toLowerCase();
     const billingCycle = data.billingCycle || 'monthly';
 
-    // 1. Try Supabase Auth first
-    if (!isSupabaseConfigured()) {
-      try {
-        await fetchAuthConfig();
-      } catch (e) {}
-    }
+    // 1. Try Supabase Auth first (ensure runtime config is synchronized before accessing client)
+    let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
+    try {
+      authConfig = await fetchAuthConfig();
+    } catch (e) {}
+
     if (isSupabaseConfigured()) {
       try {
         const supabase = getSupabase();
-        const authConfig = await fetchAuthConfig();
+        const resolvedSiteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
         const { data: sbData, error: sbError } = await supabase.auth.signUp({
           email: emailNorm,
           password: data.password,
@@ -342,7 +385,7 @@ class AuthService {
               selected_plan: rawPlan,
               billing_cycle: billingCycle
             },
-            emailRedirectTo: `${authConfig.siteUrl || window.location.origin}/auth/callback`
+            emailRedirectTo: `${resolvedSiteUrl}/auth/callback`
           }
         });
 
@@ -446,19 +489,18 @@ class AuthService {
       return { success: false, message: 'Please enter a valid email address.' };
     }
 
-    if (!isSupabaseConfigured()) {
-      try {
-        await fetchAuthConfig();
-      } catch (e) {}
-    }
+    let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
+    try {
+      authConfig = await fetchAuthConfig();
+    } catch (e) {}
+
     if (!isSupabaseConfigured()) {
       return { success: false, message: 'Authentication is not configured.' };
     }
 
     try {
       const supabase = getSupabase();
-      const authConfig = await fetchAuthConfig();
-      const siteUrl = authConfig.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
+      const siteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
       const { error } = await supabase.auth.resend({
         type: 'signup',
         email: emailNorm,
@@ -529,12 +571,10 @@ class AuthService {
       };
     }
 
-    // 2. Enforce configured authentication provider
-    if (!isSupabaseConfigured()) {
-      try {
-        await fetchAuthConfig();
-      } catch (e) {}
-    }
+    // 2. Enforce configured authentication provider (ensure runtime config is synchronized first)
+    try {
+      await fetchAuthConfig();
+    } catch (e) {}
     if (!isSupabaseConfigured()) {
       return {
         success: false,
@@ -653,16 +693,20 @@ class AuthService {
     if (!email || !email.trim()) {
       return { success: false, message: 'Please enter your email address.' };
     }
+    let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
+    try {
+      authConfig = await fetchAuthConfig();
+    } catch (e) {}
     if (!isSupabaseConfigured()) {
       return { success: false, message: 'Authentication is not configured.' };
     }
     try {
       const supabase = getSupabase();
-      const authConfig = await fetchAuthConfig();
+      const siteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
       const { error } = await supabase.auth.signInWithOtp({
         email: email.trim().toLowerCase(),
         options: {
-          emailRedirectTo: `${authConfig.siteUrl || window.location.origin}/auth/callback`
+          emailRedirectTo: `${siteUrl}/auth/callback`
         }
       });
       if (error) {
@@ -681,11 +725,10 @@ class AuthService {
     message: string;
   }> {
     try {
-      if (!isSupabaseConfigured()) {
-        try {
-          await fetchAuthConfig();
-        } catch (e) {}
-      }
+      let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
+      try {
+        authConfig = await fetchAuthConfig();
+      } catch (e) {}
       if (!isSupabaseConfigured()) {
         return {
           success: false,
@@ -693,9 +736,8 @@ class AuthService {
         };
       }
 
-      const authConfig = await fetchAuthConfig();
       const supabase = getSupabase();
-      const siteUrl = authConfig.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
+      const siteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: (provider === 'microsoft' ? 'azure' : provider) as any,
         options: {
@@ -784,12 +826,17 @@ class AuthService {
     const emailNorm = email.trim().toLowerCase();
 
     // 1. Try Supabase Auth password reset
+    let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
+    try {
+      authConfig = await fetchAuthConfig();
+    } catch (e) {}
+
     if (isSupabaseConfigured()) {
       try {
         const supabase = getSupabase();
-        const authConfig = await fetchAuthConfig();
+        const siteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
         const { error } = await supabase.auth.resetPasswordForEmail(emailNorm, {
-          redirectTo: `${authConfig.siteUrl || window.location.origin}/reset-password`
+          redirectTo: `${siteUrl}/reset-password`
         });
         if (!error) {
           return {
@@ -841,7 +888,10 @@ class AuthService {
       };
     }
 
-    // 1. If user is in an active Supabase recovery session
+    // 1. Try Supabase Auth password reset (ensure runtime config is synchronized first)
+    try {
+      await fetchAuthConfig();
+    } catch (e) {}
     if (isSupabaseConfigured()) {
       try {
         const supabase = getSupabase();
@@ -1024,6 +1074,9 @@ class AuthService {
   }
 
   public async logout(): Promise<void> {
+    try {
+      await fetchAuthConfig();
+    } catch (e) {}
     if (isSupabaseConfigured()) {
       try {
         const supabase = getSupabase();

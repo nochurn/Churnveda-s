@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../services/api';
 import {
   Database,
   CheckCircle2,
@@ -39,7 +40,7 @@ export const AdminDatabaseTestView: React.FC = () => {
 
   const fetchHealth = async () => {
     try {
-      const res = await fetch('/api/health');
+      const res = await apiFetch('/api/health');
       if (res.ok) {
         const json = await res.json();
         setHealthData(json);
@@ -52,7 +53,7 @@ export const AdminDatabaseTestView: React.FC = () => {
   const runTests = async () => {
     setIsRunning(true);
     try {
-      const res = await fetch('/api/admin/db-test', { method: 'POST' });
+      const res = await apiFetch('/api/admin/db-test', { method: 'POST' });
       const json = await res.json();
       setTestResults(json);
       setLastRunTime(new Date().toLocaleTimeString());

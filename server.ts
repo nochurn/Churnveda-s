@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import http from 'http';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import path from 'path';
@@ -61,7 +62,27 @@ import {
 import { verifyCaptchaToken } from './server/captchaService.ts';
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+
+function resolveServerPort(): number {
+  const args = process.argv;
+  const portFlagIdx = args.findIndex(arg => arg === '--port' || arg === '-p');
+  if (portFlagIdx !== -1 && args[portFlagIdx + 1]) {
+    const parsed = parseInt(args[portFlagIdx + 1], 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  if (process.env.APP_PORT) {
+    const parsed = parseInt(process.env.APP_PORT, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  // Port 8080 is reserved by internal Nginx reverse-proxy in AI Studio container;
+  // Express must bind to port 3000 so Nginx can proxy to it.
+  if (process.env.PORT && process.env.PORT !== '8080') {
+    const parsed = parseInt(process.env.PORT, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 3000;
+}
+const PORT = resolveServerPort();
 
 // Remove server fingerprinting header (Area 14, 18)
 app.disable('x-powered-by');
@@ -162,6 +183,24 @@ app.use((req, res, next) => {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
   }
 
+  next();
+});
+
+let resolveBootReady!: () => void;
+const bootReadyPromise = new Promise<void>(resolve => {
+  resolveBootReady = resolve;
+});
+let isBootComplete = false;
+
+app.use(async (req, _res, next) => {
+  if (isBootComplete || req.path === '/health' || req.path === '/api/health' || req.path === '/api/auth/config') {
+    return next();
+  }
+  try {
+    await bootReadyPromise;
+  } catch {
+    // Non-fatal
+  }
   next();
 });
 
@@ -651,94 +690,100 @@ async function syncDatabaseOnBoot() {
   const dbStatus = await initDatabase();
   console.log(`[NoChurn Database] Storage initialized using ${dbStatus.target}`);
 
-  // 1. Seed default workspace if not present
-  try {
-    const ws = await db.workspaces.getById('ws-default');
-    if (!ws) {
-      await db.workspaces.upsert({
-        id: 'ws-default',
-        name: 'AcquiredSaaS Inc',
-        owner_id: 'usr-admin-001',
-        created_at: '2026-01-15T09:00:00.000Z',
-        updated_at: new Date().toISOString()
-      });
-    }
-  } catch (e: any) {
-    console.warn('[Churnveda DB Boot Warning] Workspace seed:', e.message);
-  }
-
-  // 2. Seed default user if not present
-  try {
-    const u = await db.users.getById('usr-admin-001');
-    if (!u) {
-      await db.users.upsert(usersDatabase[0] as any);
-    }
-  } catch (e: any) {
-    console.warn('[Churnveda DB Boot Warning] User seed:', e.message);
-  }
-
-  // 3. Seed default session
-  try {
-    await db.sessions.set({
-      token: 'sess_admin_default',
-      user_id: 'usr-admin-001',
-      email: 'nageshsharat@gmail.com',
-      workspace_id: 'ws-default',
-      expires_at: Date.now() + 30 * 86400000,
-      created_at: new Date().toISOString()
-    });
-  } catch (e: any) {
-    console.warn('[Churnveda DB Boot Warning] Session seed:', e.message);
-  }
-
-  // 4. Seed authoritative billing plans
-  try {
-    for (const plan of billingPlansDatabase) {
-      await db.billingPlans.upsert(plan as any);
-    }
-  } catch (e: any) {
-    console.warn('[Churnveda DB Boot Warning] Billing plans seed:', e.message);
-  }
-
-  // 5. Safe demo customer migration:
-  // If database has 0 customers for ws-default, seed the initial SAMPLE_CUSTOMERS
-  try {
-    const custCount = await db.customers.count('ws-default');
-    if (custCount === 0) {
-      console.log('[Churnveda DB] Migrating initial sample demo customer records to persistent database...');
-      for (const sample of SAMPLE_CUSTOMERS) {
-        await db.customers.upsert('ws-default', sample as any);
-      }
-      console.log(`[Churnveda DB] Successfully migrated ${SAMPLE_CUSTOMERS.length} demo customers.`);
-    } else {
-      console.log(`[Churnveda DB] Found ${custCount} persisted customers in database.`);
-    }
-
-    // Hydrate memory cache with DB records
-    const persisted = await db.customers.listByWorkspace('ws-default');
-    if (persisted && persisted.length > 0) {
-      customersDatabase = persisted;
-    }
-  } catch (e: any) {
-    console.warn('[Churnveda DB Boot Warning] Customer sync:', e.message);
-  }
-
-  // 6. Hydrate users from DB
-  try {
-    const dbUsers = await db.users.listAll();
-    if (dbUsers && dbUsers.length > 0) {
-      for (const du of dbUsers) {
-        const idx = usersDatabase.findIndex(u => u.id === du.id);
-        if (idx >= 0) {
-          usersDatabase[idx] = { ...usersDatabase[idx], ...du } as any;
-        } else {
-          usersDatabase.push(du as any);
+  // 1 & 2 & 4. Ensure default workspace, default admin user, and authoritative billing plans in parallel
+  await Promise.all([
+    (async () => {
+      try {
+        const ws = await db.workspaces.getById('ws-default');
+        if (!ws) {
+          await db.workspaces.upsert({
+            id: 'ws-default',
+            name: 'AcquiredSaaS Inc',
+            owner_id: 'usr-admin-001',
+            created_at: '2026-01-15T09:00:00.000Z',
+            updated_at: new Date().toISOString()
+          });
         }
+      } catch (e: any) {
+        console.warn('[Churnveda DB Boot Warning] Workspace seed:', e.message);
       }
-    }
-  } catch (e: any) {
-    console.warn('[Churnveda DB Boot Warning] Users sync:', e.message);
-  }
+
+      try {
+        const u = await db.users.getById('usr-admin-001');
+        if (!u) {
+          await db.users.upsert(usersDatabase[0] as any);
+        }
+      } catch (e: any) {
+        console.warn('[Churnveda DB Boot Warning] User seed:', e.message);
+      }
+    })(),
+    Promise.all(
+      billingPlansDatabase.map(plan =>
+        db.billingPlans.upsert(plan as any).catch((e: any) => {
+          console.warn('[Churnveda DB Boot Warning] Billing plan seed:', e.message);
+        })
+      )
+    )
+  ]);
+
+  // 3, 5 & 6. Seed default session, migrate/hydrate customers, and hydrate users concurrently
+  await Promise.all([
+    db.sessions
+      .set({
+        token: 'sess_admin_default',
+        user_id: 'usr-admin-001',
+        email: 'nageshsharat@gmail.com',
+        workspace_id: 'ws-default',
+        expires_at: Date.now() + 30 * 86400000,
+        created_at: new Date().toISOString()
+      })
+      .catch((e: any) => {
+        console.warn('[Churnveda DB Boot Warning] Session seed:', e.message);
+      }),
+
+    (async () => {
+      try {
+        const custCount = await db.customers.count('ws-default');
+        if (custCount === 0) {
+          console.log('[Churnveda DB] Migrating initial sample demo customer records to persistent database...');
+          const chunkSize = 10;
+          for (let i = 0; i < SAMPLE_CUSTOMERS.length; i += chunkSize) {
+            const chunk = SAMPLE_CUSTOMERS.slice(i, i + chunkSize);
+            await Promise.all(chunk.map(sample => db.customers.upsert('ws-default', sample as any)));
+          }
+          console.log(`[Churnveda DB] Successfully migrated ${SAMPLE_CUSTOMERS.length} demo customers.`);
+        } else {
+          console.log(`[Churnveda DB] Found ${custCount} persisted customers in database.`);
+        }
+
+        // Hydrate memory cache with DB records
+        const persisted = await db.customers.listByWorkspace('ws-default');
+        if (persisted && persisted.length > 0) {
+          customersDatabase = persisted;
+        }
+      } catch (e: any) {
+        console.warn('[Churnveda DB Boot Warning] Customer sync:', e.message);
+      }
+    })(),
+
+    (async () => {
+      try {
+        const dbUsers = await db.users.listAll();
+        if (dbUsers && dbUsers.length > 0) {
+          for (const du of dbUsers) {
+            const idx = usersDatabase.findIndex(u => u.id === du.id);
+            if (idx >= 0) {
+              usersDatabase[idx] = { ...usersDatabase[idx], ...du } as any;
+            } else {
+              usersDatabase.push(du as any);
+            }
+          }
+        }
+      } catch (e: any) {
+        console.warn('[Churnveda DB Boot Warning] Users sync:', e.message);
+      }
+    })()
+  ]);
 }
 
 /**
@@ -7448,18 +7493,171 @@ app.use((err: any, req: express.Request, res: express.Response, _next: express.N
 });
 
 
+// Global process-level guards so transient network/pooler events never terminate the server
+process.on('unhandledRejection', (reason: any) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.error('[Churnveda Process] Unhandled Promise Rejection:', msg);
+});
+
+process.on('uncaughtException', (err: any) => {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (
+    err?.code === 'ECONNRESET' ||
+    err?.code === 'EPIPE' ||
+    err?.code === 'ETIMEDOUT' ||
+    err?.code === 'ECONNREFUSED' ||
+    err?.code === 'EAI_AGAIN' ||
+    msg.includes('Connection terminated unexpectedly')
+  ) {
+    console.warn('[Churnveda Process] Transient socket/network error handled:', msg);
+    return;
+  }
+  console.error('[Churnveda Process] Uncaught Exception:', err);
+});
+
+/**
+ * Signals any lingering orphaned server.ts child process from an interrupted wrapper
+ * so it can run graceful shutdown and release the port.
+ */
+function signalOrphanedServerProcesses(targetPort: number): void {
+  try {
+    const entries = fs.readdirSync('/proc', { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+      const pid = parseInt(entry.name, 10);
+      if (pid <= 1 || pid === process.pid || pid === process.ppid) continue;
+      try {
+        const cmdlineRaw = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+        if (!cmdlineRaw) continue;
+        const args = cmdlineRaw.split('\0').filter(Boolean);
+        const isNodeProc = args[0] && (args[0] === 'node' || args[0].endsWith('/node'));
+        const runsServerTs = args.some(a => a === 'server.ts' || a.endsWith('/server.ts') || a.endsWith('/dist/server.cjs'));
+        if (!isNodeProc || !runsServerTs) continue;
+        const portIdx = args.findIndex(a => a === '--port' || a === '-p');
+        const otherPort = portIdx !== -1 && args[portIdx + 1] ? parseInt(args[portIdx + 1], 10) : targetPort;
+        if (otherPort === targetPort) {
+          console.warn(`[Server] Sending SIGTERM to orphaned server process (PID ${pid}) holding port ${targetPort}...`);
+          process.kill(pid, 'SIGTERM');
+        }
+      } catch {
+        // Process already exited or inaccessible
+      }
+    }
+  } catch {
+    // /proc unavailable on non-Linux hosts
+  }
+}
+
 // ----------------------------------------------------
 // SERVER START & VITE MIDDLEWARE
 // ----------------------------------------------------
 async function startServer() {
-  await syncDatabaseOnBoot();
+  const server = http.createServer(app);
+  server.keepAliveTimeout = 5000;
+  server.headersTimeout = 10000;
 
-  // Storage bucket verification
+  let isShuttingDown = false;
+  const MAX_PORT_RETRIES = 12;
+  const PORT_RETRY_DELAY_MS = 500;
+  let portRetryCount = 0;
+
+  const startListening = () => {
+    if (isShuttingDown) return;
+    server.listen(PORT, '0.0.0.0', () => {
+      portRetryCount = 0;
+      console.log(`Churnveda Server running on http://0.0.0.0:${PORT}`);
+    });
+  };
+
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE' && !isShuttingDown) {
+      portRetryCount++;
+      if (portRetryCount === 1) {
+        signalOrphanedServerProcesses(PORT);
+      }
+      if (portRetryCount <= MAX_PORT_RETRIES) {
+        console.warn(
+          `[Server] Port ${PORT} is currently in use (attempt ${portRetryCount}/${MAX_PORT_RETRIES}). Retrying in ${PORT_RETRY_DELAY_MS}ms...`
+        );
+        try {
+          server.close();
+        } catch {}
+        setTimeout(startListening, PORT_RETRY_DELAY_MS);
+        return;
+      }
+      console.error(`[Server] Port ${PORT} remained in use after ${MAX_PORT_RETRIES} retries. Exiting.`);
+      process.exit(1);
+    } else if (err.code !== 'ERR_SERVER_NOT_RUNNING') {
+      console.error('[Server] Server error:', err);
+    }
+  });
+
+  const gracefulShutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`[Server] Received ${signal}. Draining connections and shutting down gracefully...`);
+
+    const forceExitTimer = setTimeout(() => {
+      try {
+        (server as any).closeAllConnections?.();
+      } catch {}
+      process.exit(0);
+    }, 1200);
+    if (forceExitTimer.unref) forceExitTimer.unref();
+
+    try {
+      (server as any).closeIdleConnections?.();
+    } catch {}
+
+    server.close(async () => {
+      try {
+        await db.closePool();
+        console.log('[Server] Database pool closed successfully.');
+      } catch (err: any) {
+        console.error('[Server] Error closing database pool:', err?.message || err);
+      }
+      clearTimeout(forceExitTimer);
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+  // Bind HTTP port immediately so pre-warming/health probes succeed without waiting for remote DB/Vite warm-up
+  startListening();
+
+  // Run database initialization/sync concurrently with Vite/static middleware setup
   try {
-    await ensureStorageBuckets();
-  } catch (bucketErr: any) {
-    console.warn('[Storage] Notice initializing storage buckets:', bucketErr?.message || bucketErr);
+    await Promise.all([
+      syncDatabaseOnBoot().catch((err: any) => {
+        console.warn('[NoChurn Database] Boot sync warning:', err?.message || err);
+      }),
+      (async () => {
+        if (process.env.NODE_ENV !== 'production') {
+          const vite = await createViteServer({
+            server: { middlewareMode: true, hmr: false, ws: false },
+            appType: 'spa'
+          });
+          app.use(vite.middlewares);
+        } else {
+          const distPath = path.join(process.cwd(), 'dist');
+          app.use(express.static(distPath));
+          app.get('*', (req, res) => {
+            res.sendFile(path.join(distPath, 'index.html'));
+          });
+        }
+      })()
+    ]);
+  } finally {
+    isBootComplete = true;
+    resolveBootReady();
   }
+
+  // Verify storage buckets asynchronously without delaying port readiness
+  void ensureStorageBuckets().catch((bucketErr: any) => {
+    console.warn('[Storage] Notice initializing storage buckets:', bucketErr?.message || bucketErr);
+  });
 
   // Start background Outbound Queue Runner & Scheduler Runner
   startOutboundQueueRunner();
@@ -7468,54 +7666,6 @@ async function startServer() {
       c => c.workspaceId === workspaceId
     );
   });
-
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
-      appType: 'spa'
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  }
-
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Churnveda Server running on http://0.0.0.0:${PORT}`);
-  });
-
-  server.on('error', (err: any) => {
-    if (err.code === 'EADDRINUSE') {
-      console.warn(`[Server] Port ${PORT} is temporarily in use. Waiting for previous process to release...`);
-      setTimeout(() => {
-        try {
-          server.close();
-        } catch (_) {}
-        server.listen(PORT, '0.0.0.0');
-      }, 1000);
-    } else {
-      console.error('[Server] Server error:', err);
-    }
-  });
-
-  const gracefulShutdown = async (signal: string) => {
-    console.log(`[Server] Received ${signal}. Draining connections and shutting down gracefully...`);
-    server.close(async () => {
-      try {
-        await db.closePool();
-        console.log('[Server] Database pool closed successfully.');
-      } catch (err: any) {
-        console.error('[Server] Error closing database pool:', err?.message || err);
-      }
-      process.exit(0);
-    });
-  };
-
-  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 startServer().catch((err) => {

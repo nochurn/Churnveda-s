@@ -114,8 +114,9 @@ export default defineConfig(({ mode }) => {
       'import.meta.env.VITE_RAZORPAY_KEY_ID': JSON.stringify(razorpayKey)
     },
     server: {
-      // HMR is disabled in AI Studio
+      // HMR and WebSocket servers are disabled in AI Studio
       hmr: false,
+      ws: false,
       watch: null,
     },
   };

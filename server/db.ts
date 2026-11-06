@@ -164,6 +164,7 @@ let pgPool: Pool | null = null;
 let sqliteDb: DatabaseSync | null = null;
 let isPostgresActive = false;
 let databaseInitialized = false;
+let initDatabasePromise: Promise<{ isPostgres: boolean; target: string }> | null = null;
 
 // Ensure persistent data directory exists
 const dataDir = path.resolve(process.cwd(), 'data');
@@ -190,94 +191,112 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
     };
   }
 
-  const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT);
-
-  // 1. Check for PostgreSQL credentials
-  // A PostgreSQL connection string must start with postgresql:// or postgres://.
-  // If an HTTP REST URL (e.g. Supabase REST endpoint) was passed into DATABASE_URL, ignore it for pg.Pool.
-  const rawDbUrl = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
-  const isPostgresUrl = rawDbUrl.startsWith('postgresql://') || rawDbUrl.startsWith('postgres://');
-  if (rawDbUrl && !isPostgresUrl) {
-    console.log('[Churnveda DB] Non-PostgreSQL URL detected in DATABASE_URL (expected postgresql:// or postgres://). Skipping pg.Pool.');
+  if (initDatabasePromise) {
+    return initDatabasePromise;
   }
 
-  const dbUrl = isPostgresUrl ? rawDbUrl : undefined;
-  const pgHost = process.env.PGHOST;
+  initDatabasePromise = (async () => {
+    const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT);
 
-  if (dbUrl || pgHost) {
-    let pool: Pool | null = null;
-    try {
-      const poolConfig = dbUrl
-        ? {
-            connectionString: dbUrl,
-            ssl: (dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('.railway.internal')) ? false : { rejectUnauthorized: false },
-            max: 10,
-            idleTimeoutMillis: 30000,
-            connectionTimeoutMillis: 4000
-          }
-        : {
-            host: pgHost,
-            port: Number(process.env.PGPORT || 5432),
-            user: process.env.PGUSER || 'postgres',
-            password: process.env.PGPASSWORD,
-            database: process.env.PGDATABASE || 'railway',
-            ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
-            max: 10,
-            idleTimeoutMillis: 30000,
-            connectionTimeoutMillis: 4000
-          };
-
-      pool = new Pool(poolConfig);
-      pool.on('error', (err) => {
-        console.error('[Churnveda DB Pool Warning] Idle client error:', err.message);
-      });
-
-      // Probe connection once with short timeout
-      const client = await pool.connect();
-      await client.query('SELECT 1 as connected');
-      client.release();
-
-      pgPool = pool;
-      isPostgresActive = true;
-      console.log('[Churnveda DB] Successfully connected to PostgreSQL pool.');
-      await runPostgresMigrations(pgPool);
-      await migrateSqliteToPostgresIfEmpty(pgPool);
-      databaseInitialized = true;
-      return { isPostgres: true, target: 'PostgreSQL' };
-    } catch (err: any) {
-      if (pool) {
-        await pool.end().catch(() => {});
-      }
-      pgPool = null;
-      isPostgresActive = false;
-      if (isProduction) {
-        console.error('[Churnveda DB Error] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + ').');
-        databaseInitialized = true;
-        console.error('[Churnveda DB Error] Refusing to fall back to SQLite when NODE_ENV=production.');
-        return { isPostgres: false, target: 'PostgreSQL Connection Failed' };
-      }
-      console.warn('[Churnveda DB Notice] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + '). Using local SQLite storage for development.');
+    // 1. Check for PostgreSQL credentials
+    // A PostgreSQL connection string must start with postgresql:// or postgres://.
+    // If an HTTP REST URL (e.g. Supabase REST endpoint) was passed into DATABASE_URL, ignore it for pg.Pool.
+    const rawDbUrl = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
+    const isPostgresUrl = rawDbUrl.startsWith('postgresql://') || rawDbUrl.startsWith('postgres://');
+    if (rawDbUrl && !isPostgresUrl) {
+      console.log('[Churnveda DB] Non-PostgreSQL URL detected in DATABASE_URL (expected postgresql:// or postgres://). Skipping pg.Pool.');
     }
-  } else if (isProduction) {
-    console.error('[Churnveda DB Error] NODE_ENV=production detected, but DATABASE_URL is not configured. SQLite fallback is prohibited in production.');
-    databaseInitialized = true;
-    isPostgresActive = false;
-    return { isPostgres: false, target: 'Unconfigured (PostgreSQL Required in Production)' };
-  }
 
-  // 2. Initialize persistent SQLite WAL storage for local development ONLY
-  const dbFilePath = path.join(dataDir, 'nochurn.db');
-  sqliteDb = new DatabaseSync(dbFilePath);
-  // Enable WAL (Write-Ahead Logging) mode and foreign keys for high-performance concurrent writes
-  sqliteDb.exec('PRAGMA journal_mode = WAL;');
-  sqliteDb.exec('PRAGMA foreign_keys = ON;');
-  sqliteDb.exec('PRAGMA synchronous = NORMAL;');
-  
-  runSqliteMigrations(sqliteDb);
-  isPostgresActive = false;
-  databaseInitialized = true;
-  console.log(`[Churnveda DB] Local development SQLite database active at: ${dbFilePath}`);
-  return { isPostgres: false, target: 'SQLite WAL (Local Development Only)' };
+    const dbUrl = isPostgresUrl ? rawDbUrl : undefined;
+    const pgHost = process.env.PGHOST;
+
+    if (dbUrl || pgHost) {
+      let pool: Pool | null = null;
+      try {
+        const poolConfig = dbUrl
+          ? {
+              connectionString: dbUrl,
+              ssl: (dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('.railway.internal')) ? false : { rejectUnauthorized: false },
+              max: 10,
+              idleTimeoutMillis: 30000,
+              connectionTimeoutMillis: 6000
+            }
+          : {
+              host: pgHost,
+              port: Number(process.env.PGPORT || 5432),
+              user: process.env.PGUSER || 'postgres',
+              password: process.env.PGPASSWORD,
+              database: process.env.PGDATABASE || 'railway',
+              ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
+              max: 10,
+              idleTimeoutMillis: 30000,
+              connectionTimeoutMillis: 6000
+            };
+
+        pool = new Pool(poolConfig);
+        pool.on('error', (err) => {
+          console.error('[Churnveda DB Pool Warning] Idle client error:', err.message);
+        });
+
+        // Probe connection once with short timeout
+        const client = await pool.connect();
+        const clientErrHandler = (err: Error) => {
+          console.warn('[Churnveda DB Client Warning]:', err?.message || err);
+        };
+        client.on('error', clientErrHandler);
+        try {
+          await client.query('SELECT 1 as connected');
+        } finally {
+          client.removeListener('error', clientErrHandler);
+          client.release();
+        }
+
+        pgPool = pool;
+        isPostgresActive = true;
+        console.log('[Churnveda DB] Successfully connected to PostgreSQL pool.');
+        await runPostgresMigrations(pgPool);
+        await migrateSqliteToPostgresIfEmpty(pgPool);
+        databaseInitialized = true;
+        return { isPostgres: true, target: 'PostgreSQL' };
+      } catch (err: any) {
+        if (pool) {
+          await pool.end().catch(() => {});
+        }
+        pgPool = null;
+        isPostgresActive = false;
+        if (isProduction) {
+          console.error('[Churnveda DB Error] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + ').');
+          databaseInitialized = true;
+          console.error('[Churnveda DB Error] Refusing to fall back to SQLite when NODE_ENV=production.');
+          return { isPostgres: false, target: 'PostgreSQL Connection Failed' };
+        }
+        console.warn('[Churnveda DB Notice] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + '). Using local SQLite storage for development.');
+      }
+    } else if (isProduction) {
+      console.error('[Churnveda DB Error] NODE_ENV=production detected, but DATABASE_URL is not configured. SQLite fallback is prohibited in production.');
+      databaseInitialized = true;
+      isPostgresActive = false;
+      return { isPostgres: false, target: 'Unconfigured (PostgreSQL Required in Production)' };
+    }
+
+    // 2. Initialize persistent SQLite WAL storage for local development ONLY
+    const dbFilePath = path.join(dataDir, 'nochurn.db');
+    sqliteDb = new DatabaseSync(dbFilePath);
+    // Enable WAL (Write-Ahead Logging) mode and foreign keys for high-performance concurrent writes
+    sqliteDb.exec('PRAGMA journal_mode = WAL;');
+    sqliteDb.exec('PRAGMA foreign_keys = ON;');
+    sqliteDb.exec('PRAGMA synchronous = NORMAL;');
+    
+    runSqliteMigrations(sqliteDb);
+    isPostgresActive = false;
+    databaseInitialized = true;
+    console.log(`[Churnveda DB] Local development SQLite database active at: ${dbFilePath}`);
+    return { isPostgres: false, target: 'SQLite WAL (Local Development Only)' };
+  })().finally(() => {
+    initDatabasePromise = null;
+  });
+
+  return initDatabasePromise;
 }
 
 /**
@@ -285,60 +304,73 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
  */
 async function migrateSqliteToPostgresIfEmpty(pool: Pool) {
   try {
+    if (!sqliteDb) return;
     const client = await pool.connect();
+    const clientErrHandler = (err: Error) => {
+      console.warn('[Churnveda DB Migration Client Warning]:', err?.message || err);
+    };
+    client.on('error', clientErrHandler);
     try {
       const res = await client.query('SELECT COUNT(*) as count FROM customers');
       const count = parseInt(res.rows[0]?.count || '0', 10);
-      if (count === 0 && sqliteDb) {
+      if (count === 0) {
         console.log('[Churnveda DB Migration] PostgreSQL database is empty. Migrating local records to PostgreSQL...');
-        const workspaces = sqliteDb.prepare('SELECT * FROM workspaces').all() as any[];
-        for (const ws of workspaces) {
-          await client.query(
-            'INSERT INTO workspaces (id, name, owner_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING',
-            [ws.id, ws.name, ws.owner_id, ws.created_at, ws.updated_at]
-          );
+        await client.query('BEGIN');
+        try {
+          const workspaces = sqliteDb.prepare('SELECT * FROM workspaces').all() as any[];
+          for (const ws of workspaces) {
+            await client.query(
+              'INSERT INTO workspaces (id, name, owner_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING',
+              [ws.id, ws.name, ws.owner_id, ws.created_at, ws.updated_at]
+            );
+          }
+          const users = sqliteDb.prepare('SELECT * FROM users').all() as any[];
+          for (const u of users) {
+            await client.query(
+              `INSERT INTO users (
+                id, full_name, company_name, email, password_hash, phone, email_verified,
+                selected_plan, billing_status, workspace_id, role, razorpay_subscription_id,
+                razorpay_plan_id, billing_plan_id, trial_ends_at, created_at, updated_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+              ON CONFLICT (email) DO NOTHING`,
+              [
+                u.id, u.full_name, u.company_name, u.email, u.password_hash, u.phone || null,
+                Boolean(u.email_verified), u.selected_plan, u.billing_status, u.workspace_id,
+                u.role || 'Admin', u.razorpay_subscription_id || null, u.razorpay_plan_id || null,
+                u.billing_plan_id || null, u.trial_ends_at || null, u.created_at, u.updated_at
+              ]
+            );
+          }
+          const customers = sqliteDb.prepare('SELECT * FROM customers').all() as any[];
+          for (const c of customers) {
+            await client.query(
+              `INSERT INTO customers (
+                id, workspace_id, customer_id, name, domain, plan, mrr, status,
+                risk_score, risk_category, last_login_days, usage_drop_percent,
+                open_tickets_count, payment_status, contract_renewal_days,
+                primary_contact_name, primary_contact_role, primary_contact_email,
+                data_json, created_at, updated_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+              ON CONFLICT (workspace_id, customer_id) DO NOTHING`,
+              [
+                c.id, c.workspace_id, c.customer_id, c.name, c.domain || null, c.plan,
+                c.mrr, c.status, c.risk_score, c.risk_category, c.last_login_days,
+                c.usage_drop_percent, c.open_tickets_count, c.payment_status,
+                c.contract_renewal_days, c.primary_contact_name || null,
+                c.primary_contact_role || null, c.primary_contact_email || null,
+                c.data_json, c.created_at, c.updated_at
+              ]
+            );
+          }
+          await client.query('COMMIT');
+          console.log(`[Churnveda DB Migration] Successfully migrated ${customers.length} customer records to PostgreSQL.`);
+        } catch (txErr) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw txErr;
         }
-        const users = sqliteDb.prepare('SELECT * FROM users').all() as any[];
-        for (const u of users) {
-          await client.query(
-            `INSERT INTO users (
-              id, full_name, company_name, email, password_hash, phone, email_verified,
-              selected_plan, billing_status, workspace_id, role, razorpay_subscription_id,
-              razorpay_plan_id, billing_plan_id, trial_ends_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-            ON CONFLICT (email) DO NOTHING`,
-            [
-              u.id, u.full_name, u.company_name, u.email, u.password_hash, u.phone || null,
-              Boolean(u.email_verified), u.selected_plan, u.billing_status, u.workspace_id,
-              u.role || 'Admin', u.razorpay_subscription_id || null, u.razorpay_plan_id || null,
-              u.billing_plan_id || null, u.trial_ends_at || null, u.created_at, u.updated_at
-            ]
-          );
-        }
-        const customers = sqliteDb.prepare('SELECT * FROM customers').all() as any[];
-        for (const c of customers) {
-          await client.query(
-            `INSERT INTO customers (
-              id, workspace_id, customer_id, name, domain, plan, mrr, status,
-              risk_score, risk_category, last_login_days, usage_drop_percent,
-              open_tickets_count, payment_status, contract_renewal_days,
-              primary_contact_name, primary_contact_role, primary_contact_email,
-              data_json, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-            ON CONFLICT (workspace_id, customer_id) DO NOTHING`,
-            [
-              c.id, c.workspace_id, c.customer_id, c.name, c.domain || null, c.plan,
-              c.mrr, c.status, c.risk_score, c.risk_category, c.last_login_days,
-              c.usage_drop_percent, c.open_tickets_count, c.payment_status,
-              c.contract_renewal_days, c.primary_contact_name || null,
-              c.primary_contact_role || null, c.primary_contact_email || null,
-              c.data_json, c.created_at, c.updated_at
-            ]
-          );
-        }
-        console.log(`[Churnveda DB Migration] Successfully migrated ${customers.length} customer records to PostgreSQL.`);
       }
     } finally {
+      client.removeListener('error', clientErrHandler);
       client.release();
     }
   } catch (err: any) {
@@ -351,6 +383,10 @@ async function migrateSqliteToPostgresIfEmpty(pool: Pool) {
 // ----------------------------------------------------------------------------
 export async function runPostgresMigrations(pool: Pool) {
   const client = await pool.connect();
+  const clientErrHandler = (err: Error) => {
+    console.warn('[Churnveda DB Migration Client Warning]:', err?.message || err);
+  };
+  client.on('error', clientErrHandler);
   try {
     await client.query(`
       CREATE TABLE IF NOT EXISTS workspaces (
@@ -586,25 +622,30 @@ export async function runPostgresMigrations(pool: Pool) {
       CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
 
-      -- Enable Row-Level Security (RLS) across all private tables
-      ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE users ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE password_reset_tokens ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE workspace_members ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE pending_signups ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE billing_plans ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE csv_imports ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE retention_actions ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE trial_verifications ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE razorpay_orders ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE webhook_events ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE subscription_payments ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+      -- Enable Row-Level Security (RLS) across all private tables if not already enabled
+      DO $$
+      DECLARE tbl text;
+      BEGIN
+        FOR tbl IN
+          SELECT c.relname
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public'
+            AND c.relkind = 'r'
+            AND c.relrowsecurity = false
+            AND c.relname = ANY(ARRAY[
+              'workspaces', 'users', 'sessions', 'password_reset_tokens',
+              'workspace_members', 'pending_signups', 'billing_plans', 'customers',
+              'csv_imports', 'retention_actions', 'trial_verifications', 'subscriptions',
+              'razorpay_orders', 'webhook_events', 'subscription_payments', 'audit_logs'
+            ])
+        LOOP
+          EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', tbl);
+        END LOOP;
+      END $$;
     `);
   } finally {
+    client.removeListener('error', clientErrHandler);
     client.release();
   }
 }

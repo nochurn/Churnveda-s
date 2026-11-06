@@ -237,20 +237,35 @@ export async function ensureStorageBuckets(): Promise<void> {
   const client = getAdminClient();
   if (!client) return;
 
-  for (const [bucketId, config] of Object.entries(STORAGE_BUCKET_CONFIG)) {
-    try {
-      const { data: buckets } = await client.storage.listBuckets();
-      const exists = buckets?.some(b => b.id === bucketId || b.name === bucketId);
-      if (!exists) {
-        await client.storage.createBucket(bucketId, {
-          public: false,
-          fileSizeLimit: config.maxSizeBytes,
-          allowedMimeTypes: config.allowedMimeTypes as any
-        });
-        console.log(`[Churnveda Storage] Created private bucket: "${bucketId}"`);
-      }
-    } catch (e: any) {
-      // If storage.createBucket fails due to insufficient privilege, SQL migration provides idempotent creation
-    }
+  try {
+    const { data: buckets, error } = await client.storage.listBuckets();
+    if (error) return;
+
+    const existingNames = new Set(
+      (buckets || []).flatMap(b => [b.id, b.name].filter(Boolean) as string[])
+    );
+
+    const missingEntries = Object.entries(STORAGE_BUCKET_CONFIG).filter(
+      ([bucketId]) => !existingNames.has(bucketId)
+    );
+
+    if (missingEntries.length === 0) return;
+
+    await Promise.allSettled(
+      missingEntries.map(async ([bucketId, config]) => {
+        try {
+          await client.storage.createBucket(bucketId, {
+            public: false,
+            fileSizeLimit: config.maxSizeBytes,
+            allowedMimeTypes: config.allowedMimeTypes as any
+          });
+          console.log(`[Churnveda Storage] Created private bucket: "${bucketId}"`);
+        } catch {
+          // SQL migration provides idempotent fallback creation if privilege is restricted
+        }
+      })
+    );
+  } catch {
+    // Non-fatal background bucket verification
   }
 }

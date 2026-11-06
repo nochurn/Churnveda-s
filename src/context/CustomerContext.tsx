@@ -160,6 +160,18 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   // Load customer data & import history from authoritative backend API
   const refreshCustomerData = useCallback(async () => {
+    const hasToken =
+      typeof localStorage !== 'undefined' &&
+      Boolean(
+        localStorage.getItem('churnveda_auth_token') ||
+        localStorage.getItem('cs_auth_token') ||
+        localStorage.getItem('churnshield_auth_token')
+      );
+    if (!authService.getCurrentUser() && !hasToken) {
+      setLoading(false);
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);

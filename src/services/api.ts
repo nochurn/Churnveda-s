@@ -1,32 +1,58 @@
 import { Customer, IntegrationStatus, DailyAlert, RetentionRecommendation } from '../types';
 
 const metaEnv = typeof import.meta !== 'undefined' ? (import.meta as any).env : undefined;
-export const API_BASE_URL: string = (
+const rawEnvApiUrl: string = (
   metaEnv && typeof metaEnv.VITE_API_URL === 'string'
 ) ? metaEnv.VITE_API_URL.replace(/\/+$/, '') : '';
 
 export function getApiBaseUrl(): string {
-  return API_BASE_URL;
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    // In AI Studio preview (.run.app) or local full-stack hosts, use same-origin Express backend
+    if (
+      host.endsWith('.run.app') ||
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0'
+    ) {
+      return '';
+    }
+  }
+  return rawEnvApiUrl;
 }
+
+export const API_BASE_URL: string = getApiBaseUrl();
 
 export function apiUrl(path: string): string {
-  if (!API_BASE_URL) return path;
+  const baseUrl = getApiBaseUrl();
+  if (!baseUrl) return path;
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
-  return `${API_BASE_URL}${cleanPath}`;
+  return `${baseUrl}${cleanPath}`;
 }
 
-// When frontend is hosted separately on Netlify and VITE_API_URL points to Railway,
-// transparently route /api requests to the Railway backend domain with credentials.
-if (typeof window !== 'undefined' && API_BASE_URL && !(window as any).__churnveda_fetch_routed) {
-  (window as any).__churnveda_fetch_routed = true;
-  const nativeFetch = window.fetch.bind(window);
-  window.fetch = function(input: RequestInfo | URL, init?: RequestInit) {
-    if (typeof input === 'string' && input.startsWith('/api')) {
-      input = `${API_BASE_URL}${input}`;
-      init = { ...init, credentials: init?.credentials || 'include' };
+// When frontend is hosted separately (e.g. Catalyst Slate / Netlify) and VITE_API_URL points to the backend,
+// transparently route /api requests to the backend domain with credentials without mutating window.fetch.
+export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  const baseUrl = getApiBaseUrl();
+  if (typeof input === 'string' && input.startsWith('/api')) {
+    const targetUrl = apiUrl(input);
+    const requestInit: RequestInit = {
+      ...init,
+      ...(baseUrl ? { credentials: init?.credentials || 'include' } : {})
+    };
+    try {
+      return await nativeFetch(targetUrl, requestInit);
+    } catch (err) {
+      if (baseUrl) {
+        // Retry once after brief delay for cross-origin backend cold-start / transient network hiccups
+        await new Promise(resolve => setTimeout(resolve, 1200));
+        return nativeFetch(targetUrl, requestInit);
+      }
+      throw err;
     }
-    return nativeFetch(input, init);
-  };
+  }
+  return nativeFetch(input, init);
 }
 
 export function getStoredAuthToken(): string | null {
@@ -47,7 +73,7 @@ export function getAuthHeaders(extraHeaders: Record<string, string> = {}): Recor
 }
 
 export async function fetchHealth(): Promise<{ status: string; geminiConfigured: boolean; model: string; totalCustomers: number }> {
-  const res = await fetch('/api/health');
+  const res = await apiFetch('/api/health');
   return res.json();
 }
 
@@ -79,14 +105,17 @@ export async function fetchCustomers(params?: {
   if (params?.page) query.set('page', params.page.toString());
   if (params?.limit) query.set('limit', params.limit.toString());
 
-  const res = await fetch(`/api/customers?${query.toString()}`, {
+  const res = await apiFetch(`/api/customers?${query.toString()}`, {
     headers: getAuthHeaders()
   });
+  if (!res.ok) {
+    return { customers: [], total: 0, page: params?.page || 1, limit: params?.limit || 25, totalPages: 1 };
+  }
   return res.json();
 }
 
 export async function fetchCustomerById(id: string): Promise<Customer> {
-  const res = await fetch(`/api/customers/${id}`, {
+  const res = await apiFetch(`/api/customers/${id}`, {
     headers: getAuthHeaders()
   });
   return res.json();
@@ -101,7 +130,7 @@ export async function updateCustomerStatus(
     retentionRecommendation?: RetentionRecommendation;
   }
 ): Promise<Customer> {
-  const res = await fetch(`/api/customers/${id}`, {
+  const res = await apiFetch(`/api/customers/${id}`, {
     method: 'PATCH',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
@@ -115,7 +144,7 @@ export async function predictCustomerChurn(customerId: string): Promise<{
   source: string;
   warning?: string;
 }> {
-  const res = await fetch('/api/churn/predict', {
+  const res = await apiFetch('/api/churn/predict', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ customerId })
@@ -128,7 +157,7 @@ export async function recommendCustomerRetention(customerId: string): Promise<{
   recommendation: RetentionRecommendation;
   source: string;
 }> {
-  const res = await fetch('/api/churn/recommend', {
+  const res = await apiFetch('/api/churn/recommend', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ customerId })
@@ -141,7 +170,7 @@ export async function batchPredictChurn(customerIds?: string[]): Promise<{
   analyzedCount: number;
   message: string;
 }> {
-  const res = await fetch('/api/churn/batch-predict', {
+  const res = await apiFetch('/api/churn/batch-predict', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ customerIds })
@@ -150,14 +179,18 @@ export async function batchPredictChurn(customerIds?: string[]): Promise<{
 }
 
 export async function fetchIntegrations(): Promise<IntegrationStatus[]> {
-  const res = await fetch('/api/integrations', {
+  const res = await apiFetch('/api/integrations', {
     headers: getAuthHeaders()
   });
-  return res.json();
+  if (!res.ok) {
+    return [];
+  }
+  const data = await res.json();
+  return Array.isArray(data) ? data : (Array.isArray(data?.integrations) ? data.integrations : []);
 }
 
 export async function syncIntegration(integrationId?: string): Promise<{ success: boolean; integrations: IntegrationStatus[] }> {
-  const res = await fetch('/api/integrations/sync', {
+  const res = await apiFetch('/api/integrations/sync', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ integrationId })
@@ -166,7 +199,7 @@ export async function syncIntegration(integrationId?: string): Promise<{ success
 }
 
 export async function toggleIntegration(integrationId: string, isConnected: boolean): Promise<{ success: boolean; integrations: IntegrationStatus[] }> {
-  const res = await fetch('/api/integrations/toggle', {
+  const res = await apiFetch('/api/integrations/toggle', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ integrationId, isConnected })
@@ -175,7 +208,7 @@ export async function toggleIntegration(integrationId: string, isConnected: bool
 }
 
 export async function importCustomers(customers: any[]): Promise<{ success: boolean; importedCount: number; totalCount: number }> {
-  const res = await fetch('/api/customers/import', {
+  const res = await apiFetch('/api/customers/import', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ customers })
@@ -184,14 +217,18 @@ export async function importCustomers(customers: any[]): Promise<{ success: bool
 }
 
 export async function fetchAlerts(): Promise<DailyAlert[]> {
-  const res = await fetch('/api/alerts', {
+  const res = await apiFetch('/api/alerts', {
     headers: getAuthHeaders()
   });
-  return res.json();
+  if (!res.ok) {
+    return [];
+  }
+  const data = await res.json();
+  return Array.isArray(data) ? data : (Array.isArray(data?.alerts) ? data.alerts : []);
 }
 
 export async function triggerDailyAlert(): Promise<{ success: boolean; alert: DailyAlert }> {
-  const res = await fetch('/api/alerts/trigger-daily', {
+  const res = await apiFetch('/api/alerts/trigger-daily', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
   });
@@ -199,7 +236,7 @@ export async function triggerDailyAlert(): Promise<{ success: boolean; alert: Da
 }
 
 export async function testSlackAlert(channel?: string): Promise<{ success: boolean; message: string; payload: any }> {
-  const res = await fetch('/api/alerts/test-slack', {
+  const res = await apiFetch('/api/alerts/test-slack', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ channel })
@@ -215,14 +252,14 @@ export async function fetchRoiMetrics(): Promise<{
   roiMultiplier: number;
   summaryText: string;
 }> {
-  const res = await fetch('/api/roi', {
+  const res = await apiFetch('/api/roi', {
     headers: getAuthHeaders()
   });
   return res.json();
 }
 
 export async function requestAccountDeletion(): Promise<{ success: boolean; message: string; scheduledDeletionDate: string }> {
-  const res = await fetch('/api/auth/delete-account', {
+  const res = await apiFetch('/api/auth/delete-account', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
   });
@@ -242,7 +279,7 @@ export async function signupUser(payload: {
   billingCycle?: 'monthly' | 'annual';
   isFreeTrial?: boolean;
 }) {
-  const res = await fetch('/api/auth/signup', {
+  const res = await apiFetch('/api/auth/signup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -258,7 +295,7 @@ export async function signupUser(payload: {
 }
 
 export async function cancelTrial(email?: string) {
-  const res = await fetch('/api/billing/cancel-trial', {
+  const res = await apiFetch('/api/billing/cancel-trial', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ email })
@@ -267,7 +304,7 @@ export async function cancelTrial(email?: string) {
 }
 
 export async function upgradePlan(plan: string, email?: string) {
-  const res = await fetch('/api/billing/upgrade', {
+  const res = await apiFetch('/api/billing/upgrade', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ plan, email })
@@ -290,7 +327,7 @@ export async function addPaymentMethod(payload: {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch('/api/billing/payment-method', {
+  const res = await apiFetch('/api/billing/payment-method', {
     method: 'POST',
     headers,
     body: JSON.stringify(payload)
@@ -308,7 +345,7 @@ export async function fetchPaymentMethods() {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch('/api/billing/payment-methods', { headers });
+  const res = await apiFetch('/api/billing/payment-methods', { headers });
   return res.json();
 }
 
@@ -318,7 +355,7 @@ export async function deletePaymentMethod(id: string) {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch(`/api/billing/payment-method/${id}`, {
+  const res = await apiFetch(`/api/billing/payment-method/${id}`, {
     method: 'DELETE',
     headers
   });
@@ -331,7 +368,7 @@ export async function setDefaultPaymentMethod(id: string) {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch(`/api/billing/payment-method/${id}/default`, {
+  const res = await apiFetch(`/api/billing/payment-method/${id}/default`, {
     method: 'POST',
     headers
   });
@@ -343,7 +380,7 @@ export async function loginUser(payload: {
   password: string;
   rememberMe?: boolean;
 }) {
-  const res = await fetch('/api/auth/login', {
+  const res = await apiFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -360,7 +397,7 @@ export async function fetchCurrentUser(token?: string) {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch('/api/auth/me', { headers });
+  const res = await apiFetch('/api/auth/me', { headers });
   if (!res.ok) return null;
   return res.json();
 }
@@ -370,12 +407,12 @@ export async function logoutUser(token?: string) {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch('/api/auth/logout', { method: 'POST', headers });
+  const res = await apiFetch('/api/auth/logout', { method: 'POST', headers });
   return res.json();
 }
 
 export async function forgotPassword(email: string) {
-  const res = await fetch('/api/auth/forgot-password', {
+  const res = await apiFetch('/api/auth/forgot-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email })
@@ -384,7 +421,7 @@ export async function forgotPassword(email: string) {
 }
 
 export async function resetPassword(token: string, newPassword: string) {
-  const res = await fetch('/api/auth/reset-password', {
+  const res = await apiFetch('/api/auth/reset-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token, newPassword })
@@ -407,7 +444,7 @@ export async function setupWorkspace(payload: {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch('/api/auth/setup-workspace', {
+  const res = await apiFetch('/api/auth/setup-workspace', {
     method: 'POST',
     headers,
     body: JSON.stringify(payload)
@@ -424,7 +461,7 @@ export async function setPendingPlan(payload: {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch('/api/auth/pending-plan', {
+  const res = await apiFetch('/api/auth/pending-plan', {
     method: 'POST',
     headers,
     body: JSON.stringify(payload)
@@ -442,7 +479,7 @@ export async function resolvePostLoginRedirect(next?: string): Promise<{
     headers['Authorization'] = `Bearer ${token}`;
   }
   const query = next ? `?next=${encodeURIComponent(next)}` : '';
-  const res = await fetch(`/api/auth/resolve-redirect${query}`, { headers });
+  const res = await apiFetch(`/api/auth/resolve-redirect${query}`, { headers });
   if (!res.ok) {
     return { redirectTo: '/dashboard' };
   }
@@ -464,7 +501,7 @@ export async function getAuthConfig(): Promise<{
 }> {
   let backendData: any = null;
   try {
-    const res = await fetch('/api/auth/config');
+    const res = await apiFetch('/api/auth/config');
     if (res.ok) {
       backendData = await res.json();
     }
@@ -472,7 +509,23 @@ export async function getAuthConfig(): Promise<{
     // backend offline or unconfigured
   }
 
-  if (backendData && backendData.configured) {
+  if (backendData && backendData.configured === true) {
+    const hasAnonKey = typeof backendData.anonKey === 'string' && backendData.anonKey.trim().length > 0;
+    if (backendData.url && hasAnonKey) {
+      try {
+        const { isValidSupabaseUrl, normalizeSupabaseUrl, updateSupabaseClient } = await import('../lib/supabaseClient');
+        const resolvedUrl = normalizeSupabaseUrl(backendData.url, backendData.anonKey);
+        if (isValidSupabaseUrl(resolvedUrl)) {
+          updateSupabaseClient(resolvedUrl, backendData.anonKey, {
+            siteUrl: backendData.siteUrl,
+            oauthProviders: backendData.oauthProviders
+          });
+        }
+      } catch {
+        // Ignore dynamic import errors in non-browser environments
+      }
+    }
+
     return {
       isConfigured: true,
       oauthProviders: backendData.oauthProviders || { google: false, microsoft: false },
@@ -525,7 +578,7 @@ export async function createRazorpaySubscription(payload: {
   error?: string;
 }> {
   const token = getStoredAuthToken();
-  const res = await fetch('/api/razorpay/create-subscription', {
+  const res = await apiFetch('/api/razorpay/create-subscription', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -584,7 +637,7 @@ export interface BillingTransaction {
 }
 
 export async function fetchInternationalBillingStatus(): Promise<InternationalBillingStatusResponse> {
-  const res = await fetch('/api/razorpay/international-status');
+  const res = await apiFetch('/api/razorpay/international-status');
   return res.json();
 }
 
@@ -597,7 +650,7 @@ export async function fetchBillingTransactions(): Promise<{
   transactions: BillingTransaction[];
 }> {
   const token = getStoredAuthToken();
-  const res = await fetch('/api/billing/transactions', {
+  const res = await apiFetch('/api/billing/transactions', {
     headers: {
       ...(token ? { 'Authorization': `Bearer ${token}` } : {})
     }
@@ -613,7 +666,7 @@ export async function fetchAdminBillingPlans(): Promise<{
   mode: string;
 }> {
   const token = getStoredAuthToken();
-  const res = await fetch('/api/admin/billing/plans', {
+  const res = await apiFetch('/api/admin/billing/plans', {
     headers: {
       ...(token ? { 'Authorization': `Bearer ${token}` } : {})
     }
@@ -629,7 +682,7 @@ export async function createMissingRazorpayTestPlans(confirmationText: string): 
   error?: string;
 }> {
   const token = getStoredAuthToken();
-  const res = await fetch('/api/admin/billing/plans/create-missing', {
+  const res = await apiFetch('/api/admin/billing/plans/create-missing', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -646,14 +699,17 @@ export async function createMissingRazorpayTestPlans(confirmationText: string): 
 
 // CSV & Manual Data Ingestion Calls
 export async function fetchImportHistory() {
-  const res = await fetch('/api/imports/history', {
+  const res = await apiFetch('/api/imports/history', {
     headers: getAuthHeaders()
   });
+  if (!res.ok) {
+    return { history: [] };
+  }
   return res.json();
 }
 
 export async function clearImportHistory(): Promise<{ success: boolean; message: string }> {
-  const res = await fetch('/api/imports/history', {
+  const res = await apiFetch('/api/imports/history', {
     method: 'DELETE',
     headers: getAuthHeaders()
   });
@@ -661,7 +717,7 @@ export async function clearImportHistory(): Promise<{ success: boolean; message:
 }
 
 export async function deleteCustomer(id: string): Promise<{ success: boolean; message: string; deletedCustomer?: Customer }> {
-  const res = await fetch(`/api/customers/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`/api/customers/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     headers: getAuthHeaders()
   });
@@ -673,7 +729,7 @@ export async function deleteCustomer(id: string): Promise<{ success: boolean; me
 }
 
 export async function deleteCustomers(ids: string[]): Promise<{ success: boolean; deletedCount: number; message: string; deletedCustomers?: Customer[] }> {
-  const res = await fetch('/api/customers/bulk-delete', {
+  const res = await apiFetch('/api/customers/bulk-delete', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ ids })
@@ -686,7 +742,7 @@ export async function deleteCustomers(ids: string[]): Promise<{ success: boolean
 }
 
 export async function clearDemoData(): Promise<{ success: boolean; removedCount: number; message: string }> {
-  const res = await fetch('/api/customers/clear-demo', {
+  const res = await apiFetch('/api/customers/clear-demo', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
   });
@@ -698,7 +754,7 @@ export async function clearDemoData(): Promise<{ success: boolean; removedCount:
 }
 
 export async function loadDemoData(): Promise<{ success: boolean; count: number; message: string }> {
-  const res = await fetch('/api/customers/load-demo', {
+  const res = await apiFetch('/api/customers/load-demo', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
   });
@@ -710,7 +766,7 @@ export async function loadDemoData(): Promise<{ success: boolean; count: number;
 }
 
 export async function restoreDeletedCustomers(customers: Customer[]): Promise<{ success: boolean; restoredCount: number; message: string; restored?: Customer[] }> {
-  const res = await fetch('/api/customers/restore', {
+  const res = await apiFetch('/api/customers/restore', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ customers })
@@ -732,7 +788,7 @@ export async function importCustomersData(payload: {
   validateOnly?: boolean;
   importValidOnly?: boolean;
 }) {
-  const res = await fetch('/api/customers/import', {
+  const res = await apiFetch('/api/customers/import', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
@@ -762,7 +818,7 @@ export async function addCustomerManual(payload: {
   satisfactionScore?: number;
   emailOpenRate?: number;
 }) {
-  const res = await fetch('/api/customers/manual', {
+  const res = await apiFetch('/api/customers/manual', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
@@ -782,7 +838,7 @@ export async function fetchRazorpayConfig(): Promise<{
   mode: string;
   plans: Record<string, { monthly: number; annual: number; currency: string; display: string }>;
 }> {
-  const res = await fetch('/api/razorpay/config');
+  const res = await apiFetch('/api/razorpay/config');
   return res.json();
 }
 
@@ -797,7 +853,7 @@ export async function fetchExchangeRate(): Promise<{
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/billing/exchange-rate');
+    const res = await apiFetch('/api/billing/exchange-rate');
     return res.json();
   } catch (err: any) {
     return {
@@ -837,7 +893,7 @@ export async function createRazorpayOrder(payload: {
   formattedUsd?: string;
   error?: string;
 }> {
-  const res = await fetch('/api/razorpay/create-order', {
+  const res = await apiFetch('/api/razorpay/create-order', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -869,7 +925,7 @@ export async function verifyRazorpayPayment(payload: {
   billingStatus?: string;
   error?: string;
 }> {
-  const res = await fetch('/api/razorpay/verify-payment', {
+  const res = await apiFetch('/api/razorpay/verify-payment', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -899,7 +955,7 @@ export async function verifyRazorpaySubscription(payload: {
   billingStatus?: string;
   error?: string;
 }> {
-  const res = await fetch('/api/razorpay/verify-subscription', {
+  const res = await apiFetch('/api/razorpay/verify-subscription', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -929,7 +985,7 @@ export async function createTrialVerificationOrder(payload: {
   error?: string;
 }> {
   const token = getStoredAuthToken();
-  const res = await fetch('/api/billing/trial-verification-order', {
+  const res = await apiFetch('/api/billing/trial-verification-order', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -960,7 +1016,7 @@ export async function verifyTrialPayment(payload: {
   error?: string;
 }> {
   const token = getStoredAuthToken();
-  const res = await fetch('/api/billing/verify-trial-payment', {
+  const res = await apiFetch('/api/billing/verify-trial-payment', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -986,7 +1042,7 @@ export async function activateSubscription(payload: {
   error?: string;
 }> {
   const token = getStoredAuthToken();
-  const res = await fetch('/api/billing/activate-subscription', {
+  const res = await apiFetch('/api/billing/activate-subscription', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1007,7 +1063,7 @@ export async function fetchSubscriptionDetails(): Promise<{
   plans: any[];
 }> {
   const token = getStoredAuthToken();
-  const res = await fetch('/api/billing/subscription-details', {
+  const res = await apiFetch('/api/billing/subscription-details', {
     headers: {
       ...(token ? { 'Authorization': `Bearer ${token}` } : {})
     }
@@ -1024,7 +1080,7 @@ export async function fetchSupabaseStatus(): Promise<{
   statusText: string;
   tables: { name: string; recordsCount: number; lastSync: string }[];
 }> {
-  const res = await fetch('/api/supabase/status');
+  const res = await apiFetch('/api/supabase/status');
   return res.json();
 }
 
@@ -1036,7 +1092,7 @@ export async function syncSupabase(action = 'export', table = 'customers'): Prom
   timestamp: string;
   message: string;
 }> {
-  const res = await fetch('/api/supabase/sync', {
+  const res = await apiFetch('/api/supabase/sync', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, table })
@@ -1051,7 +1107,7 @@ export async function testSupabase(): Promise<{
   latencyMs: number;
   message: string;
 }> {
-  const res = await fetch('/api/supabase/test', {
+  const res = await apiFetch('/api/supabase/test', {
     method: 'POST'
   });
   return res.json();
@@ -1121,7 +1177,7 @@ export interface SendMessageResponse {
 }
 
 export async function fetchOutboundStatus(): Promise<OutboundStatusResponse> {
-  const res = await fetch('/api/integrations/outbound-status', {
+  const res = await apiFetch('/api/integrations/outbound-status', {
     headers: getAuthHeaders()
   });
   if (!res.ok) {
@@ -1131,7 +1187,7 @@ export async function fetchOutboundStatus(): Promise<OutboundStatusResponse> {
 }
 
 export async function testOutboundConfig(channel: 'whatsapp' | 'email'): Promise<TestOutboundConfigResponse> {
-  const res = await fetch('/api/integrations/test-config', {
+  const res = await apiFetch('/api/integrations/test-config', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ channel })
@@ -1140,7 +1196,7 @@ export async function testOutboundConfig(channel: 'whatsapp' | 'email'): Promise
 }
 
 export async function sendRetentionMessage(payload: SendMessagePayload): Promise<SendMessageResponse> {
-  const res = await fetch('/api/messages/send', {
+  const res = await apiFetch('/api/messages/send', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
@@ -1158,7 +1214,7 @@ export async function enqueueRetentionMessages(messages: any[]): Promise<{
   queueStatus: any;
   message: string;
 }> {
-  const res = await fetch('/api/queue/enqueue', {
+  const res = await apiFetch('/api/queue/enqueue', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ messages })
@@ -1167,14 +1223,14 @@ export async function enqueueRetentionMessages(messages: any[]): Promise<{
 }
 
 export async function fetchQueueStatus(): Promise<any> {
-  const res = await fetch('/api/queue/status', {
+  const res = await apiFetch('/api/queue/status', {
     headers: getAuthHeaders()
   });
   return res.json();
 }
 
 export async function processQueueNow(): Promise<any> {
-  const res = await fetch('/api/queue/process', {
+  const res = await apiFetch('/api/queue/process', {
     method: 'POST',
     headers: getAuthHeaders()
   });
@@ -1182,7 +1238,7 @@ export async function processQueueNow(): Promise<any> {
 }
 
 export async function fetchQueueItems(): Promise<any> {
-  const res = await fetch('/api/queue/items', {
+  const res = await apiFetch('/api/queue/items', {
     headers: getAuthHeaders()
   });
   return res.json();
@@ -1190,14 +1246,14 @@ export async function fetchQueueItems(): Promise<any> {
 
 // Scheduler & Daily Retention Briefs
 export async function fetchSchedulerStatus(): Promise<any> {
-  const res = await fetch('/api/scheduler/status', {
+  const res = await apiFetch('/api/scheduler/status', {
     headers: getAuthHeaders()
   });
   return res.json();
 }
 
 export async function updateSchedulerSettings(payload: any): Promise<any> {
-  const res = await fetch('/api/scheduler/update', {
+  const res = await apiFetch('/api/scheduler/update', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
@@ -1206,7 +1262,7 @@ export async function updateSchedulerSettings(payload: any): Promise<any> {
 }
 
 export async function triggerDailyCronScan(ownerEmail?: string): Promise<any> {
-  const res = await fetch('/api/cron/daily-scan', {
+  const res = await apiFetch('/api/cron/daily-scan', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ ownerEmail })
@@ -1215,7 +1271,7 @@ export async function triggerDailyCronScan(ownerEmail?: string): Promise<any> {
 }
 
 export async function fetchRetentionBriefs(): Promise<any> {
-  const res = await fetch('/api/scheduler/briefs', {
+  const res = await apiFetch('/api/scheduler/briefs', {
     headers: getAuthHeaders()
   });
   return res.json();
@@ -1241,7 +1297,7 @@ export async function fetchAdminAuditLogs(limit: number = 100): Promise<{
   }>;
   error?: string;
 }> {
-  const res = await fetch(`/api/admin/audit-logs?limit=${limit}`, {
+  const res = await apiFetch(`/api/admin/audit-logs?limit=${limit}`, {
     headers: getAuthHeaders()
   });
   return res.json();
@@ -1249,7 +1305,7 @@ export async function fetchAdminAuditLogs(limit: number = 100): Promise<{
 
 // Data Portability & GDPR Export (Area 2, 5, 9)
 export async function exportCustomers(format: 'csv' | 'json' = 'json'): Promise<Blob> {
-  const res = await fetch(`/api/export?format=${format}`, {
+  const res = await apiFetch(`/api/export?format=${format}`, {
     headers: getAuthHeaders()
   });
   if (!res.ok) {

@@ -30,9 +30,18 @@ async function migrate() {
     connectionTimeoutMillis: 10000
   });
 
+  pool.on('error', (err) => {
+    console.warn('[Churnveda Migration Pool Warning]:', err?.message || err);
+  });
+
   try {
     const client = await pool.connect();
+    const clientErrHandler = (err: Error) => {
+      console.warn('[Churnveda Migration Client Warning]:', err?.message || err);
+    };
+    client.on('error', clientErrHandler);
     console.log('✅ [Churnveda Migration] Connected to PostgreSQL. Running database DDL migrations...');
+    client.removeListener('error', clientErrHandler);
     client.release();
 
     // 1. Run core schema DDL migrations (workspaces, users, sessions, subscriptions, customers, etc.)

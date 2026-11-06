@@ -582,42 +582,54 @@ export default function App() {
   }, [authInitialized, currentUser, activeView, handleNavigate]);
 
   // Fetch integrations
-  const loadIntegrations = async () => {
+  const loadIntegrations = useCallback(async () => {
+    if (!authService.getCurrentUser()) return;
     try {
       const res = await apiService.fetchIntegrations();
-      setIntegrations(res.integrations);
+      if (Array.isArray(res.integrations)) {
+        setIntegrations(res.integrations);
+      }
     } catch (err) {
       console.error('Failed to load integrations', err);
     }
-  };
+  }, []);
 
   // Fetch alerts
-  const loadAlerts = async () => {
+  const loadAlerts = useCallback(async () => {
+    if (!authService.getCurrentUser()) return;
     try {
       const res = await apiService.fetchAlerts();
-      setAlerts(res.alerts);
+      if (Array.isArray(res.alerts)) {
+        setAlerts(res.alerts);
+      }
     } catch (err) {
       console.error('Failed to load alerts', err);
     }
-  };
+  }, []);
 
   // Health check for Gemini
-  const checkHealth = async () => {
+  const checkHealth = useCallback(async () => {
     try {
       const res = await apiService.fetchHealth();
       setGeminiReady(res.geminiConfigured);
     } catch (err) {
       setGeminiReady(false);
     }
-  };
+  }, []);
 
-  // Initial load for integrations, alerts, health and customer data
+  // Initial public health check on mount
   useEffect(() => {
-    customerStore.refreshCustomerData();
+    checkHealth();
+  }, [checkHealth]);
+
+  // Hydrate authenticated workspace data when user session is active
+  const refreshWorkspaceCustomers = customerStore.refreshCustomerData;
+  useEffect(() => {
+    if (!currentUser) return;
+    refreshWorkspaceCustomers();
     loadIntegrations();
     loadAlerts();
-    checkHealth();
-  }, []);
+  }, [currentUser?.id, refreshWorkspaceCustomers, loadIntegrations, loadAlerts]);
 
   // Handle Search
   const handleSearchChange = (val: string) => {

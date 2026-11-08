@@ -60,7 +60,7 @@ export const PrivacyPolicyView: React.FC<PrivacyPolicyViewProps> = ({ onNavigate
           </div>
           <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight">Churnveda Privacy Policy</h1>
           <p className="text-sm text-gray-600 mt-2 leading-relaxed">
-            At Churnveda Technologies Inc. ("Churnveda", "we", "us"), we build privacy-first customer intelligence software.
+            At Churnveda ("we", "us"), we build privacy-first customer intelligence software.
             This policy outlines what data we collect, why we collect it, how it is secured, and your full rights under global privacy laws.
           </p>
         </div>
@@ -224,17 +224,16 @@ export const PrivacyPolicyView: React.FC<PrivacyPolicyViewProps> = ({ onNavigate
           </div>
         </section>
 
-        {/* Section 6: Legal Contact & Grievance Officer */}
+        {/* Section 6: Business Information & Support Contact */}
         <section className="space-y-3 border-t border-gray-100 pt-6">
           <div className="flex items-center gap-2">
             <Building className="w-5 h-5 text-blue-900" aria-hidden="true" />
-            <h2 className="text-lg font-bold text-gray-900">Legal Contact & Data Protection Officer</h2>
+            <h2 className="text-lg font-bold text-gray-900">Business Information & Support Contact</h2>
           </div>
           <div className="p-4 bg-gray-50 border border-gray-200 rounded-xl text-xs space-y-1.5 text-gray-700">
-            <p><strong>Legal Entity:</strong> Churnveda Technologies Inc.</p>
-            <p><strong>Mailing Address:</strong> 548 Market St, Suite 89201, San Francisco, CA 94104, USA</p>
-            <p><strong>Support Contact:</strong> <a href="mailto:support@churnveda.com" className="text-blue-900 underline">support@churnveda.com</a></p>
-            <p><strong>Data Protection / Grievance Officer:</strong> Elena Rostova, Chief Privacy Officer (<a href="mailto:privacy@churnveda.com" className="text-blue-900 underline">privacy@churnveda.com</a>)</p>
+            <p><strong>Business Information:</strong> Churnveda is currently not registered as an incorporated company.</p>
+            <p><strong>Support & Inquiries:</strong> <a href="mailto:sharatbuchanalli4@gmail.com" className="text-blue-900 underline">sharatbuchanalli4@gmail.com</a></p>
+            <p><strong>Direct Support Phone:</strong> <a href="tel:+919620262041" className="text-blue-900 underline">+91 96202 62041</a></p>
           </div>
         </section>
       </div>

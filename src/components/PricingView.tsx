@@ -1332,7 +1332,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
           <div className="text-xs text-gray-500">
             Need custom pricing?{' '}
             <a
-              href="mailto:support@churnveda.com"
+              href="mailto:sharatbuchanalli4@gmail.com"
               className="text-[#1E3A8A] font-semibold hover:underline"
             >
               Contact Support
@@ -1385,19 +1385,27 @@ export const PricingView: React.FC<PricingViewProps> = ({
         </div>
 
         {/* Customer Support Contact Callout */}
-        <div className="mt-4 p-3.5 bg-blue-50/60 rounded-xl border border-blue-100 flex items-center justify-between text-xs">
+        <div className="mt-4 p-3.5 bg-blue-50/60 rounded-xl border border-blue-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2">
-            <MessageSquare className="w-4 h-4 text-[#1E3A8A]" />
+            <MessageSquare className="w-4 h-4 text-[#1E3A8A] shrink-0" />
             <span className="text-gray-700">
-              Have specific billing or technical questions? Our customer success engineering team is here to help.
+              Have specific billing or technical questions? Reach our team directly via email or phone.
             </span>
           </div>
-          <a
-            href="mailto:support@churnveda.com"
-            className="px-3 py-1.5 bg-[#1E3A8A] hover:bg-blue-800 text-white font-semibold rounded-lg shrink-0 transition-colors"
-          >
-            Email Support
-          </a>
+          <div className="flex items-center gap-2 shrink-0">
+            <a
+              href="mailto:sharatbuchanalli4@gmail.com"
+              className="px-3 py-1.5 bg-[#1E3A8A] hover:bg-blue-800 text-white font-semibold rounded-lg transition-colors"
+            >
+              Email Support
+            </a>
+            <a
+              href="tel:+919620262041"
+              className="px-3 py-1.5 bg-white hover:bg-blue-50 border border-blue-200 text-[#1E3A8A] font-semibold rounded-lg transition-colors"
+            >
+              Call +91 96202 62041
+            </a>
+          </div>
         </div>
       </div>
 

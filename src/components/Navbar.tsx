@@ -23,8 +23,7 @@ import {
   Users,
   MessageSquare,
   Settings,
-  DollarSign,
-  Download
+  DollarSign
 } from 'lucide-react';
 import { DailyAlert, UserProfile } from '../types';
 
@@ -64,31 +63,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [showNotifications, setShowNotifications] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [isDownloadingZip, setIsDownloadingZip] = useState(false);
   const notifRef = useRef<HTMLDivElement>(null);
   const userRef = useRef<HTMLDivElement>(null);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
-
-  const handleDownloadZip = async () => {
-    setIsDownloadingZip(true);
-    try {
-      const res = await fetch('/churnveda-deployment.zip');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'churnveda-deployment.zip';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => window.URL.revokeObjectURL(url), 1000);
-    } catch {
-      window.location.href = '/churnveda-deployment.zip';
-    } finally {
-      setIsDownloadingZip(false);
-    }
-  };
 
   // Prevent background scrolling when mobile menu is open
   useEffect(() => {
@@ -266,18 +243,6 @@ export const Navbar: React.FC<NavbarProps> = ({
           <span className="font-medium text-blue-900">Gemini 3.8 Flash</span>
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
         </div>
-
-        {/* Quick Deployment ZIP Download Button */}
-        <button
-          onClick={handleDownloadZip}
-          disabled={isDownloadingZip}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-gray-700 hover:text-blue-900 bg-white hover:bg-blue-50 border border-gray-200 hover:border-blue-300 rounded-lg transition-all shadow-2xs focus:outline-none cursor-pointer"
-          title="Download complete Churnveda deployment ZIP project (ready for Netlify, Railway, or Docker)"
-        >
-          <Download className={`w-3.5 h-3.5 text-blue-700 ${isDownloadingZip ? 'animate-bounce' : ''}`} />
-          <span className="hidden sm:inline">{isDownloadingZip ? 'Packaging...' : 'Download ZIP'}</span>
-          <span className="sm:hidden">{isDownloadingZip ? '...' : 'ZIP'}</span>
-        </button>
 
         {/* Notifications Dropdown */}
         <div className="relative" ref={notifRef}>
@@ -666,20 +631,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </div>
               </div>
 
-              {/* Mobile Project Archive Download Button */}
-              <div className="pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    handleDownloadZip();
-                  }}
-                  disabled={isDownloadingZip}
-                  className="w-full py-2 px-3 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                >
-                  <Download className={`w-4 h-4 text-blue-700 ${isDownloadingZip ? 'animate-bounce' : ''}`} />
-                  <span>{isDownloadingZip ? 'Packaging Project ZIP...' : 'Download Project Deployment ZIP'}</span>
-                </button>
-              </div>
             </div>
 
             {/* Bottom Actions */}

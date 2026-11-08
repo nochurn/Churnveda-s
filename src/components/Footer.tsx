@@ -97,31 +97,35 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
           </nav>
         </div>
 
-        {/* Legal Entity, Business Details & Grievance Contact (Requirement 11) */}
-        <div className="pt-4 border-t border-gray-100 grid grid-cols-1 md:grid-cols-3 gap-4 text-[11px] text-gray-600">
+        {/* Business Information & Support Contact */}
+        <div className="pt-4 border-t border-gray-100 grid grid-cols-1 md:grid-cols-2 gap-4 text-[11px] text-gray-600">
           <div>
-            <strong className="block text-gray-900 font-semibold">Legal Entity & Headquarters:</strong>
-            <span>Churnveda Technologies Inc.</span>
-            <span className="block">548 Market St, Suite 89201, San Francisco, CA 94104</span>
+            <strong className="block text-gray-900 font-semibold">Business Information:</strong>
+            <span>Churnveda is currently not registered as an incorporated company.</span>
           </div>
 
           <div>
             <strong className="block text-gray-900 font-semibold">Support & Assistance:</strong>
-            <span>Email: <a href="mailto:support@churnveda.com" className="text-blue-900 hover:underline">support@churnveda.com</a></span>
-            <span className="block">Response SLA: Within 2 business days</span>
-          </div>
-
-          <div>
-            <strong className="block text-gray-900 font-semibold">Grievance & Data Protection Officer:</strong>
-            <span>Elena Rostova, Chief Privacy Officer</span>
-            <span className="block">Email: <a href="mailto:privacy@churnveda.com" className="text-blue-900 hover:underline">privacy@churnveda.com</a></span>
+            <span className="block">
+              Email:{' '}
+              <a href="mailto:sharatbuchanalli4@gmail.com" className="text-blue-900 hover:underline">
+                sharatbuchanalli4@gmail.com
+              </a>
+            </span>
+            <span className="block">
+              Mobile:{' '}
+              <a href="tel:+919620262041" className="text-blue-900 hover:underline">
+                +91 96202 62041
+              </a>
+            </span>
+            <span className="block text-gray-500">Response SLA: Within 2 business days</span>
           </div>
         </div>
 
         {/* Bottom Sub-bar */}
         <div className="pt-4 border-t border-gray-100 flex flex-col sm:flex-row items-center justify-between gap-3 text-[11px] text-gray-600">
           <div>
-            © {new Date().getFullYear()} Churnveda Technologies Inc. All rights reserved. B2B service for businesses only (18+).
+            © {new Date().getFullYear()} Churnveda. All rights reserved. B2B service for businesses only (18+).
           </div>
           <div className="flex items-center gap-3">
             <span className="text-gray-600">Encrypted at rest (AES-256)</span>

@@ -167,7 +167,7 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
       `Keep these 10 single-use codes in a secure password vault.\n` +
       `Each code can be used once if you lose access to your 2FA device.\n\n` +
       user.backupCodes.map((c, i) => `${i + 1}. ${c}`).join('\n') +
-      `\n\nsupport@churnveda.com`;
+      `\n\nSupport: sharatbuchanalli4@gmail.com | +91 96202 62041`;
 
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);

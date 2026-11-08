@@ -7515,32 +7515,97 @@ process.on('uncaughtException', (err: any) => {
   console.error('[Churnveda Process] Uncaught Exception:', err);
 });
 
+interface ProcStatInfo {
+  state: string;
+  ppid: number;
+  startTime: bigint;
+}
+
+function readProcStatInfo(pid: number | 'self'): ProcStatInfo | null {
+  try {
+    const raw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const rparen = raw.lastIndexOf(')');
+    if (rparen === -1) return null;
+    const fields = raw.slice(rparen + 2).trim().split(/\s+/);
+    const state = fields[0] || '';
+    const ppid = parseInt(fields[1] || '0', 10);
+    const startTime = BigInt(fields[19] || '0');
+    if (Number.isNaN(ppid)) return null;
+    return { state, ppid, startTime };
+  } catch {
+    return null;
+  }
+}
+
+function getAncestorPids(): Set<number> {
+  const ancestors = new Set<number>([process.pid]);
+  let currentPid = process.ppid;
+  for (let depth = 0; depth < 16 && currentPid > 1; depth++) {
+    if (ancestors.has(currentPid)) break;
+    ancestors.add(currentPid);
+    const stat = readProcStatInfo(currentPid);
+    if (!stat || stat.ppid <= 1) break;
+    currentPid = stat.ppid;
+  }
+  return ancestors;
+}
+
 /**
- * Signals any lingering orphaned server.ts child process from an interrupted wrapper
- * so it can run graceful shutdown and release the port.
+ * Signals any lingering older orphaned server.ts process holding targetPort
+ * so it can run graceful shutdown and release the port without ever signaling
+ * newer or ancestor processes.
  */
 function signalOrphanedServerProcesses(targetPort: number): void {
   try {
+    const selfStat = readProcStatInfo('self');
+    const ancestors = getAncestorPids();
     const entries = fs.readdirSync('/proc', { withFileTypes: true });
+    const candidates: Array<{ pid: number; ppid: number; isTsxWrapper: boolean }> = [];
+
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
       const pid = parseInt(entry.name, 10);
-      if (pid <= 1 || pid === process.pid || pid === process.ppid) continue;
+      if (pid <= 1 || ancestors.has(pid)) continue;
       try {
+        const stat = readProcStatInfo(pid);
+        if (!stat || stat.state === 'Z') continue;
+        // Never signal a process started at or after our own start time
+        if (selfStat && stat.startTime >= selfStat.startTime) continue;
+
         const cmdlineRaw = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
         if (!cmdlineRaw) continue;
         const args = cmdlineRaw.split('\0').filter(Boolean);
         const isNodeProc = args[0] && (args[0] === 'node' || args[0].endsWith('/node'));
         const runsServerTs = args.some(a => a === 'server.ts' || a.endsWith('/server.ts') || a.endsWith('/dist/server.cjs'));
         if (!isNodeProc || !runsServerTs) continue;
+
         const portIdx = args.findIndex(a => a === '--port' || a === '-p');
         const otherPort = portIdx !== -1 && args[portIdx + 1] ? parseInt(args[portIdx + 1], 10) : targetPort;
-        if (otherPort === targetPort) {
-          console.warn(`[Server] Sending SIGTERM to orphaned server process (PID ${pid}) holding port ${targetPort}...`);
-          process.kill(pid, 'SIGTERM');
-        }
+        if (otherPort !== targetPort) continue;
+
+        const isTsxWrapper = Boolean(args[1] && (args[1] === 'tsx' || args[1].endsWith('/tsx')));
+        candidates.push({ pid, ppid: stat.ppid, isTsxWrapper });
       } catch {
         // Process already exited or inaccessible
+      }
+    }
+
+    // Prefer signaling only the leaf Node server process (never its parent tsx CLI wrapper)
+    const candidateParentPids = new Set(candidates.map(c => c.ppid));
+    const leafNodeTargets = candidates
+      .filter(c => !c.isTsxWrapper && !candidateParentPids.has(c.pid))
+      .map(c => c.pid);
+    const leafFallbackTargets = candidates
+      .filter(c => !candidateParentPids.has(c.pid))
+      .map(c => c.pid);
+    const targets = leafNodeTargets.length > 0 ? leafNodeTargets : leafFallbackTargets;
+
+    for (const pid of targets) {
+      try {
+        console.warn(`[Server] Sending SIGTERM to older server process (PID ${pid}) holding port ${targetPort}...`);
+        process.kill(pid, 'SIGTERM');
+      } catch {
+        // Process already exited
       }
     }
   } catch {
@@ -7557,31 +7622,32 @@ async function startServer() {
   server.headersTimeout = 10000;
 
   let isShuttingDown = false;
-  const MAX_PORT_RETRIES = 12;
-  const PORT_RETRY_DELAY_MS = 500;
+  let viteServer: { close: () => Promise<void> } | null = null;
+  const MAX_PORT_RETRIES = 20;
+  const PORT_RETRY_DELAY_MS = 300;
   let portRetryCount = 0;
 
+  server.on('listening', () => {
+    portRetryCount = 0;
+    console.log(`Churnveda Server running on http://0.0.0.0:${PORT}`);
+  });
+
   const startListening = () => {
-    if (isShuttingDown) return;
-    server.listen(PORT, '0.0.0.0', () => {
-      portRetryCount = 0;
-      console.log(`Churnveda Server running on http://0.0.0.0:${PORT}`);
-    });
+    if (isShuttingDown || server.listening) return;
+    server.listen(PORT, '0.0.0.0');
   };
 
   server.on('error', (err: any) => {
     if (err.code === 'EADDRINUSE' && !isShuttingDown) {
       portRetryCount++;
-      if (portRetryCount === 1) {
+      // Allow a brief grace window for an already-terminating server before signaling older processes
+      if (portRetryCount === 2 || portRetryCount === 6) {
         signalOrphanedServerProcesses(PORT);
       }
       if (portRetryCount <= MAX_PORT_RETRIES) {
         console.warn(
           `[Server] Port ${PORT} is currently in use (attempt ${portRetryCount}/${MAX_PORT_RETRIES}). Retrying in ${PORT_RETRY_DELAY_MS}ms...`
         );
-        try {
-          server.close();
-        } catch {}
         setTimeout(startListening, PORT_RETRY_DELAY_MS);
         return;
       }
@@ -7602,14 +7668,20 @@ async function startServer() {
         (server as any).closeAllConnections?.();
       } catch {}
       process.exit(0);
-    }, 1200);
+    }, 300);
     if (forceExitTimer.unref) forceExitTimer.unref();
 
     try {
       (server as any).closeIdleConnections?.();
     } catch {}
 
-    server.close(async () => {
+    if (viteServer) {
+      try {
+        await viteServer.close();
+      } catch {}
+    }
+
+    const finalizeShutdown = async () => {
       try {
         await db.closePool();
         console.log('[Server] Database pool closed successfully.');
@@ -7618,7 +7690,13 @@ async function startServer() {
       }
       clearTimeout(forceExitTimer);
       process.exit(0);
-    });
+    };
+
+    if (server.listening) {
+      server.close(finalizeShutdown);
+    } else {
+      await finalizeShutdown();
+    }
   };
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
@@ -7634,17 +7712,31 @@ async function startServer() {
         console.warn('[NoChurn Database] Boot sync warning:', err?.message || err);
       }),
       (async () => {
-        if (process.env.NODE_ENV !== 'production') {
-          const vite = await createViteServer({
-            server: { middlewareMode: true, hmr: false, ws: false },
-            appType: 'spa'
-          });
-          app.use(vite.middlewares);
+        const distPath = path.join(process.cwd(), 'dist');
+        const distIndexPath = path.join(distPath, 'index.html');
+        const shouldUseViteDev = process.env.NODE_ENV !== 'production' || !fs.existsSync(distIndexPath);
+
+        if (shouldUseViteDev) {
+          try {
+            const vite = await createViteServer({
+              server: { middlewareMode: true, hmr: false, ws: false, watch: null },
+              appType: 'spa'
+            });
+            viteServer = vite;
+            app.use(vite.middlewares);
+          } catch (viteErr: any) {
+            console.error('[Server] Failed to initialize Vite middleware:', viteErr?.message || viteErr);
+            if (fs.existsSync(distIndexPath)) {
+              app.use(express.static(distPath));
+              app.get('*', (_req, res) => {
+                res.sendFile(distIndexPath);
+              });
+            }
+          }
         } else {
-          const distPath = path.join(process.cwd(), 'dist');
           app.use(express.static(distPath));
-          app.get('*', (req, res) => {
-            res.sendFile(path.join(distPath, 'index.html'));
+          app.get('*', (_req, res) => {
+            res.sendFile(distIndexPath);
           });
         }
       })()

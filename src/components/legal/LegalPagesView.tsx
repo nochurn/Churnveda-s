@@ -12,7 +12,8 @@ import {
   RotateCcw,
   Trash2,
   Check,
-  AlertTriangle
+  AlertTriangle,
+  Phone
 } from 'lucide-react';
 import { apiService } from '../../services/api';
 
@@ -591,9 +592,8 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
                   <div className="flex items-start gap-3 p-3 bg-gray-50 border border-gray-200 rounded-xl">
                     <Building className="w-4 h-4 text-blue-900 shrink-0 mt-0.5" aria-hidden="true" />
                     <div>
-                      <strong className="block text-gray-900">Legal Entity & Headquarters</strong>
-                      <span className="text-gray-600">Churnveda Technologies Inc.</span>
-                      <span className="block text-gray-600">548 Market St, Suite 89201, San Francisco, CA 94104</span>
+                      <strong className="block text-gray-900">Business Information</strong>
+                      <span className="text-gray-600 block">Churnveda is currently not registered as an incorporated company.</span>
                     </div>
                   </div>
 
@@ -601,16 +601,15 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
                     <Mail className="w-4 h-4 text-blue-900 shrink-0 mt-0.5" aria-hidden="true" />
                     <div>
                       <strong className="block text-gray-900">Support & Inquiries</strong>
-                      <a href="mailto:support@churnveda.com" className="text-blue-900 underline block">support@churnveda.com</a>
+                      <a href="mailto:sharatbuchanalli4@gmail.com" className="text-blue-900 underline block">sharatbuchanalli4@gmail.com</a>
                     </div>
                   </div>
 
                   <div className="flex items-start gap-3 p-3 bg-gray-50 border border-gray-200 rounded-xl">
-                    <Shield className="w-4 h-4 text-blue-900 shrink-0 mt-0.5" aria-hidden="true" />
+                    <Phone className="w-4 h-4 text-blue-900 shrink-0 mt-0.5" aria-hidden="true" />
                     <div>
-                      <strong className="block text-gray-900">Data Protection & Grievance Officer</strong>
-                      <span className="text-gray-600 block">Elena Rostova, Chief Privacy Officer</span>
-                      <a href="mailto:privacy@churnveda.com" className="text-blue-900 underline block">privacy@churnveda.com</a>
+                      <strong className="block text-gray-900">Direct Support Phone</strong>
+                      <a href="tel:+919620262041" className="text-blue-900 underline block">+91 96202 62041</a>
                     </div>
                   </div>
                 </div>

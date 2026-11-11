@@ -135,8 +135,9 @@ export const DataIntegrationView: React.FC<DataIntegrationViewProps> = ({
     switch (id) {
       case 'razorpay':
         return <CreditCard className="w-5 h-5 text-blue-600" />;
+      case 'firebase':
       case 'supabase':
-        return <Database className="w-5 h-5 text-emerald-600" />;
+        return <Database className="w-5 h-5 text-amber-600" />;
       case 'mixpanel':
         return <Activity className="w-5 h-5 text-purple-600" />;
       case 'intercom':
@@ -600,12 +601,18 @@ export const DataIntegrationView: React.FC<DataIntegrationViewProps> = ({
                 <div className="flex items-center gap-2">
                   <span
                     className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                      item.isConnected
+                      item.isConnected && !item.isFallbackCatalog
                         ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : item.isFallbackCatalog
+                        ? 'bg-amber-50 text-amber-700 border border-amber-200'
                         : 'bg-gray-100 text-gray-500'
                     }`}
                   >
-                    {item.isConnected ? 'Connected' : 'Disconnected'}
+                    {item.isConnected && !item.isFallbackCatalog
+                      ? 'Connected'
+                      : item.isFallbackCatalog
+                      ? 'Catalog Available'
+                      : 'Disconnected'}
                   </span>
                 </div>
               </div>

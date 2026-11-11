@@ -48,6 +48,7 @@ import { CookieConsentBanner } from './components/legal/CookieConsentBanner';
 import { apiService } from './services/api';
 import { authService } from './services/authService';
 import { Customer, IntegrationStatus, DailyAlert, UserProfile } from './types';
+import { testFirestoreConnection } from './lib/firebaseClient';
 import { Sparkles, CheckCircle2, AlertCircle, RefreshCw, UploadCloud } from 'lucide-react';
 
 // Route metadata resolver for document.title, description, and indexing boundaries
@@ -513,6 +514,11 @@ export default function App() {
 
   // Subscribe to authService state changes & handle initial session load
   useEffect(() => {
+    // Test Firestore connection on boot per critical constraint
+    testFirestoreConnection().catch((err) => {
+      console.warn('[Firebase] Connection probe:', err);
+    });
+
     const unsub = authService.subscribe((user) => {
       setCurrentUser(user);
       setAuthInitialized(true);
@@ -586,11 +592,11 @@ export default function App() {
     if (!authService.getCurrentUser()) return;
     try {
       const res = await apiService.fetchIntegrations();
-      if (Array.isArray(res.integrations)) {
+      if (res && Array.isArray(res.integrations) && res.integrations.length > 0) {
         setIntegrations(res.integrations);
       }
     } catch (err) {
-      console.error('Failed to load integrations', err);
+      console.warn('Notice: Failed to load integrations feed, using active defaults:', err);
     }
   }, []);
 
@@ -599,11 +605,11 @@ export default function App() {
     if (!authService.getCurrentUser()) return;
     try {
       const res = await apiService.fetchAlerts();
-      if (Array.isArray(res.alerts)) {
+      if (res && Array.isArray(res.alerts)) {
         setAlerts(res.alerts);
       }
     } catch (err) {
-      console.error('Failed to load alerts', err);
+      console.warn('Notice: Failed to load alerts feed, using active defaults:', err);
     }
   }, []);
 

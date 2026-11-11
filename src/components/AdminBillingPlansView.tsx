@@ -162,7 +162,7 @@ export const AdminBillingPlansView: React.FC<AdminBillingPlansViewProps> = ({
             <div>
               <h3 className="text-base font-semibold text-gray-900">Razorpay Subscriptions Gateway</h3>
               <p className="text-xs text-gray-600 mt-0.5">
-                Active Key ID: <code className="font-mono bg-white px-2 py-0.5 rounded border border-gray-200 text-indigo-700">{keyId || 'rzp_test_TdpOBvJYcT9ENW'}</code>
+                Active Key ID: <code className="font-mono bg-white px-2 py-0.5 rounded border border-gray-200 text-indigo-700">{keyId ? `${keyId.slice(0, 8)}••••••••` : 'Configured via RAZORPAY_KEY_ID'}</code>
               </p>
               <div className="flex items-center gap-4 text-xs text-gray-500 mt-2">
                 <span className="flex items-center gap-1.5">

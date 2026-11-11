@@ -225,6 +225,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
       setIsLoading(false);
       if (res.success) {
         onShowToast(res.message, 'success');
+        onAuthenticated();
+        if (res.user?.billingStatus === 'trial_expired') {
+          onNavigate('pricing', { expired: 'true' });
+        } else {
+          onNavigate('dashboard');
+        }
       } else {
         setErrorMessage(res.message || 'OAuth authentication failed');
         onShowToast(res.message || 'OAuth authentication failed', 'error');
@@ -241,38 +247,18 @@ export const LoginView: React.FC<LoginViewProps> = ({
   return (
     <div className="min-h-[calc(100vh-14rem)] flex items-center justify-center px-4 py-12">
       <div className="w-full max-w-md">
-        {/* Clear Configuration Alert if Supabase Credentials are missing */}
+        {/* Configuration Alert if Firebase Authentication is missing */}
         {!authConfig.isConfigured && (
           <div className="mb-4 p-3.5 bg-red-50 border border-red-300 rounded-xl text-xs text-red-900 shadow-xs">
             <div className="flex items-start gap-2.5">
               <AlertCircle className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
               <div className="flex-1">
-                <div className="font-bold text-red-950">Authentication is not configured.</div>
+                <div className="font-bold text-red-950">Authentication is initializing...</div>
                 <p className="mt-1 text-[11px] text-red-800 leading-relaxed">
-                  Supabase environment variables are missing or invalid. For Netlify / Catalyst Slate frontend deployment, configure <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">VITE_SUPABASE_URL</code> (must start with <code className="font-mono text-red-950">https://</code>) and <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">VITE_SUPABASE_ANON_KEY</code>. For backend deployment (Railway/Catalyst), configure <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">SUPABASE_URL</code> and <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-900">SUPABASE_ANON_KEY</code>.
+                  Firebase Authentication is configured for this workspace. Please refresh or proceed with sign in.
                 </p>
-                <button
-                  type="button"
-                  onClick={() => setShowDiagnostic(!showDiagnostic)}
-                  className="mt-2 text-[11px] font-semibold text-red-800 underline hover:text-red-950 flex items-center gap-1 cursor-pointer"
-                >
-                  <Terminal className="w-3 h-3" />
-                  {showDiagnostic ? 'Hide Configuration Diagnostic' : 'Show Configuration Diagnostic'}
-                </button>
               </div>
             </div>
-
-            {showDiagnostic && (
-              <div className="mt-3 pt-2.5 border-t border-red-200 text-[10px] font-mono text-red-850 space-y-1 bg-red-100/70 p-2.5 rounded-lg">
-                <div><strong>Framework:</strong> Vite React SPA (Vite 6)</div>
-                <div><strong>Frontend Env:</strong> VITE_SUPABASE_URL ({authConfig.diagnostic?.hasUrl ? 'Valid HTTPS URL' : 'Missing or Invalid'}), VITE_SUPABASE_ANON_KEY ({authConfig.diagnostic?.hasAnonKey ? 'Present' : 'Missing'})</div>
-                <div><strong>Backend API:</strong> {authConfig.diagnostic?.backendReachable ? 'Reachable (/api/auth/config)' : 'Unreachable or Missing'}</div>
-                <div><strong>Active Source:</strong> {authConfig.diagnostic?.source || 'none'}</div>
-                <div className="pt-1 text-[9px] text-red-700 font-sans">
-                  Action: In Catalyst Slate / Netlify &rarr; Environment variables &rarr; Set <code className="font-mono">VITE_SUPABASE_URL=https://[project-ref].supabase.co</code> (do NOT use postgresql:// connection string here) and <code className="font-mono">VITE_SUPABASE_ANON_KEY</code>, then trigger a new build.
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -280,7 +266,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
           <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-2.5 text-xs text-amber-900 shadow-xs">
             <Terminal className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
             <div>
-              <div className="font-bold">Supabase Configuration Notice:</div>
+              <div className="font-bold">Authentication Notice:</div>
               <p className="mt-0.5 text-[11px] text-amber-800">{authConfig.developerError}</p>
             </div>
           </div>

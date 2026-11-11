@@ -26,6 +26,7 @@ import { aiEmployeeService } from '../services/aiEmployeeService';
 import { fetchOutboundStatus, OutboundStatusResponse } from '../services/api';
 import { ImportCustomerDataModal } from './ImportCustomerDataModal';
 import { generatePlainEnglishRiskExplanation } from '../utils/aiEmployeeEngine';
+import { useCustomerStore } from '../context/CustomerContext';
 
 interface HomeDashboardViewProps {
   customers: Customer[];
@@ -54,6 +55,10 @@ export const HomeDashboardView: React.FC<HomeDashboardViewProps> = ({
   onImportCustomers,
   onLoadDemoData
 }) => {
+  const customerStore = useCustomerStore();
+  const handleImport = onImportCustomers || customerStore.importCustomers;
+  const handleDemo = onLoadDemoData || customerStore.loadDemoData;
+
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
   const [approvingMsgId, setApprovingMsgId] = useState<string | null>(null);
 
@@ -135,6 +140,10 @@ export const HomeDashboardView: React.FC<HomeDashboardViewProps> = ({
           <ImportCustomerDataModal
             isOpen={isImportModalOpen}
             onClose={() => setIsImportModalOpen(false)}
+            onImportCustomers={handleImport}
+            onLoadDemoData={handleDemo}
+            onShowToast={onShowToast}
+            onNavigate={onNavigate}
             onImportSuccess={() => {
               setIsImportModalOpen(false);
               onRunScan();
@@ -496,6 +505,10 @@ export const HomeDashboardView: React.FC<HomeDashboardViewProps> = ({
         <ImportCustomerDataModal
           isOpen={isImportModalOpen}
           onClose={() => setIsImportModalOpen(false)}
+          onImportCustomers={handleImport}
+          onLoadDemoData={handleDemo}
+          onShowToast={onShowToast}
+          onNavigate={onNavigate}
           onImportSuccess={() => {
             setIsImportModalOpen(false);
             onRunScan();

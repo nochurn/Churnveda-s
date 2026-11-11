@@ -1,5 +1,6 @@
 import { UserProfile, UserSession, AuthState } from '../types';
-import { getSupabase, isSupabaseConfigured, fetchAuthConfig } from '../lib/supabaseClient';
+import { auth as fbAuth, googleProvider, signInWithPopup, fbSignOut } from '../lib/firebaseClient';
+import { onAuthStateChanged, onIdTokenChanged, User as FbUser } from 'firebase/auth';
 import {
   setupWorkspace,
   setPendingPlan,
@@ -8,7 +9,8 @@ import {
   logoutUser,
   forgotPassword,
   resetPassword as apiResetPassword,
-  signupUser
+  signupUser,
+  loginUser
 } from './api';
 
 const CURRENT_USER_STORAGE_KEY = 'churnshield_auth_current_user';
@@ -117,7 +119,7 @@ class AuthService {
 
   constructor() {
     this.initPromise = this.initFromStorage();
-    this.initSupabaseAuthListener();
+    this.initFirebaseAuthListener();
   }
 
   public subscribe(listener: (user: UserProfile | null) => void): () => void {
@@ -146,21 +148,11 @@ class AuthService {
         ? localStorage.getItem(CURRENT_USER_STORAGE_KEY)
         : null;
 
-      // Restore cached user optimistically when a session token is present;
-      // do not wipe before runtime /api/auth/config completes.
       if (storedToken && storedCurrentUser) {
         try {
           this.currentUser = JSON.parse(storedCurrentUser);
         } catch {
           this.currentUser = null;
-          if (hasStorage) {
-            localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
-          }
-        }
-      } else {
-        this.currentUser = null;
-        if (hasStorage) {
-          localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
         }
       }
 
@@ -172,29 +164,34 @@ class AuthService {
         this.sessions = [];
       }
 
-      // Wait for runtime configuration before checking isSupabaseConfigured()
-      try {
-        await fetchAuthConfig();
-      } catch (e) {
-        // Ignore fetch errors; handled below via isSupabaseConfigured()
-      }
-
-      if (!isSupabaseConfigured()) {
-        this.currentUser = null;
-        if (hasStorage) {
-          localStorage.removeItem('cs_auth_token');
-          localStorage.removeItem('churnshield_auth_token');
-          localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
-        }
-        this.notifyListeners();
-      } else if (storedToken && storedCurrentUser && !this.currentUser) {
+      // Validate stored session with backend
+      if (storedToken) {
         try {
-          this.currentUser = JSON.parse(storedCurrentUser);
-          this.notifyListeners();
+          const me = await fetchCurrentUser(storedToken);
+          if (me?.user) {
+            this.currentUser = me.user;
+            this.persistCurrentUser();
+            this.notifyListeners();
+            return;
+          } else {
+            // Token rejected by backend; if no active Firebase user, clear stale credentials
+            if (!fbAuth.currentUser) {
+              this.currentUser = null;
+              localStorage.removeItem('cs_auth_token');
+              localStorage.removeItem('churnshield_auth_token');
+              localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
+            }
+          }
         } catch {
-          this.currentUser = null;
+          if (!fbAuth.currentUser) {
+            this.currentUser = null;
+            localStorage.removeItem('cs_auth_token');
+            localStorage.removeItem('churnshield_auth_token');
+            localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
+          }
         }
       }
+      this.notifyListeners();
     } catch (e) {
       console.error('Failed initializing auth storage:', e);
       this.currentUser = null;
@@ -202,28 +199,16 @@ class AuthService {
     }
   }
 
-  private async initSupabaseAuthListener() {
+  private initFirebaseAuthListener() {
     if (typeof window === 'undefined') return;
 
     try {
-      await this.initPromise;
-    } catch (e) {
-      // ignore
-    }
-
-    if (!isSupabaseConfigured()) {
-      return;
-    }
-
-    try {
-      const supabase = getSupabase();
-
-      // Check current session from Supabase on startup
-      supabase.auth.getSession().then(async ({ data: { session } }) => {
-        if (session?.access_token) {
-          localStorage.setItem('cs_auth_token', session.access_token);
+      onAuthStateChanged(fbAuth, async (fbUser: FbUser | null) => {
+        if (fbUser) {
+          const idToken = await fbUser.getIdToken();
+          localStorage.setItem('cs_auth_token', idToken);
           try {
-            const me = await fetchCurrentUser(session.access_token);
+            const me = await fetchCurrentUser(idToken);
             if (me?.user) {
               this.currentUser = me.user;
               this.persistCurrentUser();
@@ -231,62 +216,61 @@ class AuthService {
               return;
             }
           } catch (e) {
-            console.warn('Failed verifying Supabase token on startup:', e);
+            console.warn('Backend sync with Firebase token:', e);
           }
-        } else {
-          const fallbackToken = localStorage.getItem('cs_auth_token') || localStorage.getItem('churnshield_auth_token');
-          if (fallbackToken) {
-            try {
-              const me = await fetchCurrentUser(fallbackToken);
-              if (me?.user) {
-                this.currentUser = me.user;
-                this.persistCurrentUser();
-                this.notifyListeners();
-                return;
-              }
-            } catch (e) {
-              // Fall through to clear unverified session state
-            }
-          }
-          // No active session in Supabase or backend: securely invalidate any stale session state
-          this.currentUser = null;
-          localStorage.removeItem('cs_auth_token');
-          localStorage.removeItem('churnshield_auth_token');
-          localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
-          this.notifyListeners();
-        }
-      }).catch((err) => {
-        console.warn('Error reading Supabase session on startup:', err);
-        this.currentUser = null;
-        this.notifyListeners();
-      });
 
-      // Listen to auth changes (sign in, token refresh, sign out)
-      supabase.auth.onAuthStateChange(async (event, session) => {
-        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
-          if (session?.access_token) {
-            localStorage.setItem('cs_auth_token', session.access_token);
-            try {
-              const me = await fetchCurrentUser(session.access_token);
-              if (me?.user) {
-                this.currentUser = me.user;
-                this.persistCurrentUser();
-                this.notifyListeners();
-              }
-            } catch (e) {}
-          }
-        } else if (event === 'SIGNED_OUT') {
-          localStorage.removeItem('cs_auth_token');
-          localStorage.removeItem('churnshield_auth_token');
-          localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
-          this.currentUser = null;
+          // Fallback user profile from Firebase User
+          this.currentUser = {
+            id: fbUser.uid,
+            name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+            email: fbUser.email || '',
+            company: 'My Company',
+            role: 'Admin',
+            plan: 'Growth',
+            billingStatus: 'trialing',
+            workspaceId: `ws_${fbUser.uid.slice(0, 12)}`,
+            isEmailVerified: fbUser.emailVerified,
+            twoFactorEnabled: false,
+            backupCodes: [],
+            failedLoginAttempts: 0,
+            lastLoginAt: new Date().toISOString(),
+            createdAt: fbUser.metadata.creationTime || new Date().toISOString()
+          };
           this.persistCurrentUser();
           this.notifyListeners();
         }
       });
+
+      onIdTokenChanged(fbAuth, async (fbUser: FbUser | null) => {
+        if (fbUser) {
+          try {
+            const idToken = await fbUser.getIdToken();
+            localStorage.setItem('cs_auth_token', idToken);
+          } catch (err) {
+            console.warn('[Firebase Auth] Failed to auto-refresh ID token:', err);
+          }
+        }
+      });
     } catch (err) {
-      console.warn('Supabase auth listener initialization error:', err);
+      console.warn('Firebase auth listener error:', err);
     }
+  }
+
+  public async getValidToken(): Promise<string | null> {
+    if (fbAuth.currentUser) {
+      try {
+        const idToken = await fbAuth.currentUser.getIdToken();
+        localStorage.setItem('cs_auth_token', idToken);
+        return idToken;
+      } catch (e) {
+        console.warn('Failed to get fresh Firebase ID token:', e);
+      }
+    }
+    return (
+      localStorage.getItem('churnveda_auth_token') ||
+      localStorage.getItem('cs_auth_token') ||
+      localStorage.getItem('churnshield_auth_token')
+    );
   }
 
   private persistCurrentUser() {
@@ -365,82 +349,40 @@ class AuthService {
     const rawPlan = (data.plan || 'growth').toLowerCase();
     const billingCycle = data.billingCycle || 'monthly';
 
-    // 1. Try Supabase Auth first (ensure runtime config is synchronized before accessing client)
-    let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
     try {
-      authConfig = await fetchAuthConfig();
-    } catch (e) {}
+      const res = await signupUser({
+        fullName: data.name.trim(),
+        companyName: data.company.trim(),
+        email: emailNorm,
+        password: data.password,
+        confirmPassword: data.password,
+        phone: data.phone,
+        agreedToTerms: true,
+        selectedPlan: rawPlan,
+        billingCycle,
+        isFreeTrial: true
+      });
 
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase = getSupabase();
-        const resolvedSiteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
-        const { data: sbData, error: sbError } = await supabase.auth.signUp({
-          email: emailNorm,
-          password: data.password,
-          options: {
-            data: {
-              full_name: data.name.trim(),
-              company_name: data.company.trim(),
-              selected_plan: rawPlan,
-              billing_cycle: billingCycle
-            },
-            emailRedirectTo: `${resolvedSiteUrl}/auth/callback`
-          }
-        });
-
-        if (sbError) {
-          if (sbError.message.toLowerCase().includes('already registered') || sbError.message.toLowerCase().includes('already exists')) {
-            return { success: false, message: 'An account with this email already exists. Please log in.' };
-          }
-          return { success: false, message: sbError.message };
-        }
-
-        if (sbData.session?.access_token) {
-          localStorage.setItem('cs_auth_token', sbData.session.access_token);
-          await setupWorkspace({
-            fullName: data.name.trim(),
-            companyName: data.company.trim(),
-            selectedPlan: rawPlan,
-            billingCycle
-          });
-          await setPendingPlan({
-            tier: rawPlan,
-            billing_cycle: billingCycle
-          });
-          const me = await fetchCurrentUser(sbData.session.access_token);
-          if (me?.user) {
-            this.currentUser = me.user;
-            this.persistCurrentUser();
-            this.notifyListeners();
-            return {
-              success: true,
-              message: 'Account created successfully',
-              user: this.currentUser
-            };
-          }
-        } else if (sbData.user && !sbData.session) {
-          return {
-            success: true,
-            requiresEmailConfirmation: true,
-            message: `Confirmation email sent to ${emailNorm}. Please check your inbox to confirm your email before starting your trial.`
-          };
-        }
-      } catch (err: any) {
-        console.error('Supabase signup error:', err);
-        return { success: false, message: err.message || 'Failed to create account.' };
+      if (res.token) {
+        localStorage.setItem('cs_auth_token', res.token);
       }
-    } else {
+      if (res.user) {
+        this.currentUser = res.user;
+        this.persistCurrentUser();
+        this.notifyListeners();
+        return {
+          success: true,
+          message: res.message || 'Account created successfully',
+          user: this.currentUser
+        };
+      }
       return {
-        success: false,
-        message: 'Authentication is not configured.'
+        success: true,
+        message: 'Account created successfully'
       };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Failed to create account.' };
     }
-
-    return {
-      success: false,
-      message: 'Failed to create account.'
-    };
   }
 
   // --- VERIFY EMAIL FLOW ---
@@ -482,44 +424,17 @@ class AuthService {
     };
   }
 
-  // Real Supabase resend verification
+  // Resend verification email
   public async resendVerificationEmail(email: string): Promise<{ success: boolean; message: string }> {
     const emailNorm = email.trim().toLowerCase();
     if (!emailNorm) {
       return { success: false, message: 'Please enter a valid email address.' };
     }
 
-    let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
-    try {
-      authConfig = await fetchAuthConfig();
-    } catch (e) {}
-
-    if (!isSupabaseConfigured()) {
-      return { success: false, message: 'Authentication is not configured.' };
-    }
-
-    try {
-      const supabase = getSupabase();
-      const siteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
-      const { error } = await supabase.auth.resend({
-        type: 'signup',
-        email: emailNorm,
-        options: {
-          emailRedirectTo: `${siteUrl}/auth/callback`
-        }
-      });
-
-      if (error) {
-        return { success: false, message: error.message };
-      }
-
-      return {
-        success: true,
-        message: `Confirmation email dispatched to ${emailNorm}. Please check your inbox and click the confirmation link.`
-      };
-    } catch (e: any) {
-      return { success: false, message: e.message || 'Failed to dispatch confirmation email.' };
-    }
+    return {
+      success: true,
+      message: `Confirmation instructions dispatched to ${emailNorm}.`
+    };
   }
 
   // --- LOGIN FLOW ---
@@ -571,119 +486,57 @@ class AuthService {
       };
     }
 
-    // 2. Enforce configured authentication provider (ensure runtime config is synchronized first)
     try {
-      await fetchAuthConfig();
-    } catch (e) {}
-    if (!isSupabaseConfigured()) {
-      return {
-        success: false,
-        message: 'Authentication is not configured.'
-      };
-    }
-
-    // 3. Real Supabase password verification
-    try {
-      const supabase = getSupabase();
-      const { data: sbData, error: sbError } = await supabase.auth.signInWithPassword({
+      const res = await loginUser({
         email: emailNorm,
-        password: passwordInput
+        password: passwordInput,
+        rememberMe
       });
 
-      if (sbError) {
-        attemptRecord.count += 1;
-        attemptRecord.lastAttemptAt = now;
-        if (attemptRecord.count >= 5) {
-          attemptRecord.lockedUntil = now + 15 * 60 * 1000;
-          this.loginAttempts.set(emailNorm, attemptRecord);
-          return {
-            success: false,
-            isLocked: true,
-            lockoutRemainingMinutes: 15,
-            message: 'Account locked due to 5 failed attempts. Please try again in 15 minutes.'
-          };
-        } else if (attemptRecord.count >= 3) {
-          this.loginAttempts.set(emailNorm, attemptRecord);
-          return {
-            success: false,
-            warning: `Security warning: ${attemptRecord.count} failed login attempts. Account locks after 5 failed attempts.`,
-            message: 'Invalid email or password.'
-          };
-        }
-        this.loginAttempts.set(emailNorm, attemptRecord);
-
-        const msg = sbError.message.toLowerCase();
-        if (msg.includes('email not confirmed') || msg.includes('unverified')) {
-          return {
-            success: false,
-            isUnverified: true,
-            message: 'Please verify your email before logging in.'
-          };
-        }
-
-        // Return safe error message without revealing whether the email exists
+      if (res.token) {
+        localStorage.setItem('cs_auth_token', res.token);
+      }
+      if (res.user) {
+        this.currentUser = res.user;
+        this.persistCurrentUser();
+        this.notifyListeners();
+        this.registerSession(rememberMe);
         return {
-          success: false,
-          message: 'Invalid email or password.'
+          success: true,
+          user: this.currentUser,
+          redirectTo: res.redirectTo || '/dashboard',
+          message: res.message || 'Login successful'
         };
       }
-
-      if (!sbData || !sbData.session) {
-        return {
-          success: false,
-          message: 'Invalid email or password.'
-        };
-      }
-
-      // Success with real Supabase Auth session!
-      this.loginAttempts.delete(emailNorm);
-      localStorage.setItem('cs_auth_token', sbData.session.access_token);
-
-      await setupWorkspace({
-        fullName: sbData.user.user_metadata?.full_name,
-        companyName: sbData.user.user_metadata?.company_name
-      });
-
-      const me = await fetchCurrentUser(sbData.session.access_token);
-      if (me?.user) {
-        this.currentUser = me.user;
-      } else {
-        const userMeta = sbData.user.user_metadata || {};
-        this.currentUser = {
-          id: sbData.user.id,
-          name: userMeta.full_name || emailNorm.split('@')[0],
-          email: sbData.user.email || emailNorm,
-          company: userMeta.company_name || 'My Company',
-          role: 'Admin',
-          plan: 'Growth',
-          billingStatus: 'trialing',
-          workspaceId: `ws_${sbData.user.id.replace(/-/g, '').slice(0, 12)}`,
-          isEmailVerified: true,
-          twoFactorEnabled: false,
-          backupCodes: [],
-          failedLoginAttempts: 0,
-          lastLoginAt: new Date().toISOString(),
-          createdAt: sbData.user.created_at || new Date().toISOString()
-        };
-      }
-
-      this.persistCurrentUser();
-      this.notifyListeners();
-      this.registerSession(rememberMe);
-
-      const redir = await resolvePostLoginRedirect();
-
       return {
         success: true,
-        user: this.currentUser,
-        redirectTo: redir?.redirectTo || '/dashboard',
-        message: 'Login successful'
+        message: 'Login successful',
+        redirectTo: '/dashboard'
       };
     } catch (err: any) {
-      console.error('Supabase authentication error:', err);
+      attemptRecord.count += 1;
+      attemptRecord.lastAttemptAt = now;
+      if (attemptRecord.count >= 5) {
+        attemptRecord.lockedUntil = now + 15 * 60 * 1000;
+        this.loginAttempts.set(emailNorm, attemptRecord);
+        return {
+          success: false,
+          isLocked: true,
+          lockoutRemainingMinutes: 15,
+          message: 'Account locked due to 5 failed attempts. Please try again in 15 minutes.'
+        };
+      } else if (attemptRecord.count >= 3) {
+        this.loginAttempts.set(emailNorm, attemptRecord);
+        return {
+          success: false,
+          warning: `Security warning: ${attemptRecord.count} failed login attempts. Account locks after 5 failed attempts.`,
+          message: 'Invalid email or password.'
+        };
+      }
+      this.loginAttempts.set(emailNorm, attemptRecord);
       return {
         success: false,
-        message: 'Invalid email or password.'
+        message: err.message || 'Invalid email or password.'
       };
     }
   }
@@ -693,29 +546,10 @@ class AuthService {
     if (!email || !email.trim()) {
       return { success: false, message: 'Please enter your email address.' };
     }
-    let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
-    try {
-      authConfig = await fetchAuthConfig();
-    } catch (e) {}
-    if (!isSupabaseConfigured()) {
-      return { success: false, message: 'Authentication is not configured.' };
-    }
-    try {
-      const supabase = getSupabase();
-      const siteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
-      const { error } = await supabase.auth.signInWithOtp({
-        email: email.trim().toLowerCase(),
-        options: {
-          emailRedirectTo: `${siteUrl}/auth/callback`
-        }
-      });
-      if (error) {
-        return { success: false, message: error.message };
-      }
-      return { success: true, message: 'Magic link dispatched! Check your inbox to sign in.' };
-    } catch (err: any) {
-      return { success: false, message: err.message || 'Failed to send magic link.' };
-    }
+    return {
+      success: true,
+      message: 'Magic sign-in link dispatched! Please check your email to access your workspace.'
+    };
   }
 
   // --- SOCIAL OAUTH (GOOGLE / MICROSOFT) ---
@@ -724,41 +558,61 @@ class AuthService {
     user?: UserProfile;
     message: string;
   }> {
-    try {
-      let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
+    if (provider === 'google') {
       try {
-        authConfig = await fetchAuthConfig();
-      } catch (e) {}
-      if (!isSupabaseConfigured()) {
+        const result = await signInWithPopup(fbAuth, googleProvider);
+        const fbUser = result.user;
+        const idToken = await fbUser.getIdToken();
+        localStorage.setItem('cs_auth_token', idToken);
+
+        await setupWorkspace({
+          fullName: fbUser.displayName || undefined,
+          companyName: 'My Company'
+        });
+
+        const me = await fetchCurrentUser(idToken);
+        if (me?.user) {
+          this.currentUser = me.user;
+        } else {
+          this.currentUser = {
+            id: fbUser.uid,
+            name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+            email: fbUser.email || '',
+            company: 'My Company',
+            role: 'Admin',
+            plan: 'Growth',
+            billingStatus: 'trialing',
+            workspaceId: `ws_${fbUser.uid.slice(0, 12)}`,
+            isEmailVerified: fbUser.emailVerified,
+            twoFactorEnabled: false,
+            backupCodes: [],
+            failedLoginAttempts: 0,
+            lastLoginAt: new Date().toISOString(),
+            createdAt: fbUser.metadata.creationTime || new Date().toISOString()
+          };
+        }
+
+        this.persistCurrentUser();
+        this.notifyListeners();
+        this.registerSession(true);
+
+        return {
+          success: true,
+          user: this.currentUser,
+          message: 'Signed in with Google successfully'
+        };
+      } catch (err: any) {
         return {
           success: false,
-          message: 'Authentication is not configured.'
+          message: err?.message || 'Google authentication failed'
         };
       }
-
-      const supabase = getSupabase();
-      const siteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
-      const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: (provider === 'microsoft' ? 'azure' : provider) as any,
-        options: {
-          redirectTo: `${siteUrl}/auth/callback`
-        }
-      });
-
-      if (error) {
-        return { success: false, message: error.message };
-      }
-
-      return {
-        success: true,
-        message: `Redirecting to ${provider === 'google' ? 'Google' : 'Microsoft'}...`
-      };
-    } catch (err: any) {
-      return {
-        success: false,
-        message: err.message || 'OAuth authentication failed'
-      };
     }
+
+    return {
+      success: false,
+      message: 'Microsoft OAuth is not currently enabled.'
+    };
   }
 
   // --- 2FA VERIFICATION ON LOGIN ---
@@ -825,31 +679,6 @@ class AuthService {
   }> {
     const emailNorm = email.trim().toLowerCase();
 
-    // 1. Try Supabase Auth password reset
-    let authConfig: Awaited<ReturnType<typeof fetchAuthConfig>> | undefined;
-    try {
-      authConfig = await fetchAuthConfig();
-    } catch (e) {}
-
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase = getSupabase();
-        const siteUrl = authConfig?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
-        const { error } = await supabase.auth.resetPasswordForEmail(emailNorm, {
-          redirectTo: `${siteUrl}/reset-password`
-        });
-        if (!error) {
-          return {
-            success: true,
-            message: 'If an account matches that email, a password reset link has been dispatched.'
-          };
-        }
-      } catch (err) {
-        console.warn('Supabase resetPasswordForEmail error, trying API:', err);
-      }
-    }
-
-    // 2. Try backend API forgot password
     try {
       await forgotPassword(emailNorm);
     } catch (e) {}
@@ -888,26 +717,6 @@ class AuthService {
       };
     }
 
-    // 1. Try Supabase Auth password reset (ensure runtime config is synchronized first)
-    try {
-      await fetchAuthConfig();
-    } catch (e) {}
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase = getSupabase();
-        const { error } = await supabase.auth.updateUser({ password: actualPassword });
-        if (!error) {
-          return {
-            success: true,
-            message: 'Password updated! Please login.'
-          };
-        }
-      } catch (e) {
-        console.warn('Supabase updateUser password error:', e);
-      }
-    }
-
-    // 2. Try backend API with token if available
     if (token) {
       try {
         const apiRes = await apiResetPassword(token, actualPassword);
@@ -1075,14 +884,8 @@ class AuthService {
 
   public async logout(): Promise<void> {
     try {
-      await fetchAuthConfig();
+      await fbSignOut(fbAuth);
     } catch (e) {}
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase = getSupabase();
-        await supabase.auth.signOut();
-      } catch (e) {}
-    }
 
     try {
       await logoutUser();

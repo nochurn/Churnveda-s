@@ -1,0 +1,84 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Verified workspace membership: checks workspace owner, member document, or user profile workspace mapping
+    function isWorkspaceMember(workspaceId) {
+      return isSignedIn() && isValidId(workspaceId) && (
+        (exists(/databases/$(database)/documents/workspaces/$(workspaceId)) &&
+         (get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.owner_id == request.auth.uid ||
+          get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId == request.auth.uid)) ||
+        exists(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId == workspaceId ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspace_id == workspaceId))
+      );
+    }
+
+    // Workspace admin or owner verification for privileged mutations
+    function isWorkspaceAdminOrOwner(workspaceId) {
+      return isSignedIn() && isValidId(workspaceId) && (
+        (exists(/databases/$(database)/documents/workspaces/$(workspaceId)) &&
+         (get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.owner_id == request.auth.uid ||
+          get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId == request.auth.uid)) ||
+        (exists(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)) &&
+         (get(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)).data.role in ['owner', 'admin'])) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId == workspaceId ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspace_id == workspaceId) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin')
+      );
+    }
+
+    // User Profile: private to document owner
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isValidId(userId);
+      allow delete: if false;
+    }
+
+    // Tenant Workspaces
+    match /workspaces/{workspaceId} {
+      allow get: if isWorkspaceMember(workspaceId);
+      allow create: if isSignedIn() && isValidId(workspaceId) &&
+        (request.resource.data.owner_id == request.auth.uid || request.resource.data.ownerId == request.auth.uid);
+      allow update: if isWorkspaceAdminOrOwner(workspaceId);
+      allow delete: if isWorkspaceAdminOrOwner(workspaceId);
+
+      // Workspace Members
+      match /members/{memberId} {
+        allow read: if isWorkspaceMember(workspaceId);
+        allow write: if isWorkspaceAdminOrOwner(workspaceId);
+      }
+
+      // Workspace Customer records: strictly isolated to verified workspace members
+      match /customers/{customerId} {
+        allow read: if isWorkspaceMember(workspaceId);
+        allow create, update: if isWorkspaceMember(workspaceId) && isValidId(customerId) &&
+          request.resource.data.workspaceId == workspaceId;
+        allow delete: if isWorkspaceAdminOrOwner(workspaceId);
+      }
+    }
+
+    // Connection Health Verification (test connection ping)
+    match /test/connection {
+      allow read: if isSignedIn();
+    }
+  }
+}

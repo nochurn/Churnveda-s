@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { aiEmployeeService } from '../services/aiEmployeeService';
 import { ImportCustomerDataModal } from './ImportCustomerDataModal';
+import { useCustomerStore } from '../context/CustomerContext';
 
 interface AiEmployeeViewProps {
   customers: Customer[];
@@ -44,6 +45,10 @@ export const AiEmployeeView: React.FC<AiEmployeeViewProps> = ({
   onImportCustomers,
   onLoadDemoData
 }) => {
+  const customerStore = useCustomerStore();
+  const handleImport = onImportCustomers || customerStore.importCustomers;
+  const handleDemoData = onLoadDemoData || customerStore.loadDemoData;
+
   const [settings, setSettings] = useState<AiEmployeeSettings>(() => aiEmployeeService.getSettings());
   const [isSavingSettings, setIsSavingSettings] = useState<boolean>(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
@@ -455,9 +460,11 @@ export const AiEmployeeView: React.FC<AiEmployeeViewProps> = ({
       <ImportCustomerDataModal
         isOpen={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
-        onImportCustomers={onImportCustomers || (async () => {})}
-        onLoadDemoData={onLoadDemoData || (async () => {})}
+        onImportCustomers={handleImport}
+        onLoadDemoData={handleDemoData}
         onShowToast={onShowToast}
+        onNavigate={onNavigate}
+        onImportSuccess={onRunScan}
       />
     </div>
   );

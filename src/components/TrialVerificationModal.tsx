@@ -117,7 +117,7 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
       // 2. Open Razorpay Checkout modal with ALL supported payment methods
       if (typeof (window as any).Razorpay !== 'undefined') {
         const options = buildRazorpayOneTimeOptions({
-          keyId: orderRes.keyId || 'rzp_test_TdpOBvJYcT9ENW',
+          keyId: orderRes.keyId || '',
           orderId: orderRes.orderId,
           amountCents: orderRes.amountCents || orderRes.amount,
           amount: orderRes.amountCents || orderRes.amount,

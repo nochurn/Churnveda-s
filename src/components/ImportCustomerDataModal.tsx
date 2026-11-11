@@ -21,9 +21,14 @@ interface ImportCustomerDataModalProps {
     rawPdfBase64?: string;
     fileType?: 'csv' | 'pdf';
     fileName?: string;
+    deduplicationMode?: 'overwrite' | 'skip';
+    validateOnly?: boolean;
+    importValidOnly?: boolean;
   }) => Promise<any>;
   onLoadDemoData: () => Promise<number | void>;
   onShowToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
+  onImportSuccess?: () => void;
+  onNavigate?: (view: string) => void;
 }
 
 // Common fields supported
@@ -48,7 +53,9 @@ export const ImportCustomerDataModal: React.FC<ImportCustomerDataModalProps> = (
   onClose,
   onImportCustomers,
   onLoadDemoData,
-  onShowToast
+  onShowToast,
+  onImportSuccess,
+  onNavigate
 }) => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileType, setFileType] = useState<'csv' | 'pdf' | null>(null);
@@ -264,30 +271,49 @@ export const ImportCustomerDataModal: React.FC<ImportCustomerDataModalProps> = (
 
   // Trigger import
   const handleConfirmImport = async () => {
-    if (!selectedFile) return;
+    if (!selectedFile || isProcessing) return;
+    if (typeof onImportCustomers !== 'function') {
+      setValidationError('Import service is not available. Please refresh and try again.');
+      return;
+    }
     setIsProcessing(true);
     setValidationError(null);
 
     try {
+      let res: any;
       if (fileType === 'csv') {
-        await onImportCustomers({
+        res = await onImportCustomers({
           rawCsv: rawCsvText,
           fileName: selectedFile.name,
           fileType: 'csv'
         });
-        if (onShowToast) onShowToast(`Successfully imported customer records from ${selectedFile.name}!`, 'success');
+        const importedCount = res?.importedCount ?? res?.validRowsCount ?? totalRowsCount;
+        if (onShowToast) onShowToast(`Successfully imported ${importedCount} customer records from ${selectedFile.name}!`, 'success');
       } else if (fileType === 'pdf') {
-        await onImportCustomers({
+        res = await onImportCustomers({
           rawPdfBase64: rawPdfBase64,
           fileName: selectedFile.name,
           fileType: 'pdf'
         });
-        if (onShowToast) onShowToast(`Successfully parsed and imported customer accounts from ${selectedFile.name}!`, 'success');
+        const importedCount = res?.importedCount ?? res?.validRowsCount ?? totalRowsCount;
+        if (onShowToast) onShowToast(`Successfully parsed and imported ${importedCount} customer accounts from ${selectedFile.name}!`, 'success');
+      }
+      if (onImportSuccess) {
+        onImportSuccess();
       }
       handleClose();
     } catch (err: any) {
       console.error('Import failed:', err);
-      setValidationError(err?.message || 'Failed to import customer records. Please check the file format.');
+      const isAuthErr = err?.isAuthError ||
+        err?.status === 401 ||
+        err?.message?.toLowerCase().includes('authentication') ||
+        err?.message?.toLowerCase().includes('sign in') ||
+        err?.message?.toLowerCase().includes('unauthorized');
+      if (isAuthErr) {
+        setValidationError('Your authentication session has expired or is required. Please sign in to access and import customer data into your workspace.');
+      } else {
+        setValidationError(err?.message || 'Failed to import customer records. Please check the file format.');
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -340,9 +366,24 @@ export const ImportCustomerDataModal: React.FC<ImportCustomerDataModalProps> = (
         {/* Modal Body */}
         <div className="p-6 overflow-y-auto space-y-5 flex-1">
           {validationError && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
+            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2.5">
               <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-              <span>{validationError}</span>
+              <div className="flex-1 space-y-2">
+                <p>{validationError}</p>
+                {validationError.toLowerCase().includes('sign in') && onNavigate && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleClose();
+                      onNavigate('login');
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-900 hover:bg-blue-800 text-white rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <span>Sign In to Your Workspace</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           )}
 

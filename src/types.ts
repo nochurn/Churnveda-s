@@ -289,7 +289,7 @@ export interface ManualCustomerInput {
 }
 
 export interface IntegrationStatus {
-  id: 'razorpay' | 'mixpanel' | 'intercom' | 'sendgrid' | 'supabase' | string;
+  id: 'razorpay' | 'mixpanel' | 'intercom' | 'sendgrid' | 'firebase' | 'supabase' | string;
   name: string;
   category: 'billing' | 'usage' | 'support' | 'engagement' | 'database';
   icon: string;
@@ -300,6 +300,7 @@ export interface IntegrationStatus {
   syncFrequency: 'Every 24 Hours' | 'Real-time' | 'Manual';
   apiKeyMasked?: string;
   statusText: string;
+  isFallbackCatalog?: boolean;
 }
 
 export interface DailyAlert {

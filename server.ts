@@ -61,6 +61,7 @@ import {
 import { verifyCaptchaToken } from './server/captchaService.ts';
 import { initializeApp as initFirebaseAdmin, getApps as getFirebaseAdminApps } from 'firebase-admin/app';
 import { getAuth as getFirebaseAdminAuth } from 'firebase-admin/auth';
+import { getFirestore as getFirebaseAdminFirestore } from 'firebase-admin/firestore';
 import firebaseConfig from './firebase-applet-config.json';
 
 // Initialize Firebase Admin SDK securely using project configuration
@@ -70,6 +71,9 @@ const firebaseAdminApp = getFirebaseAdminApps().length > 0
       projectId: process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || firebaseConfig.projectId
     });
 const firebaseAdminAuth = getFirebaseAdminAuth(firebaseAdminApp);
+const firebaseAdminFirestore = firebaseConfig.firestoreDatabaseId
+  ? getFirebaseAdminFirestore(firebaseAdminApp, firebaseConfig.firestoreDatabaseId)
+  : getFirebaseAdminFirestore(firebaseAdminApp);
 
 const app = express();
 
@@ -4309,11 +4313,53 @@ app.get('/api/referrals/validate', (req, res) => {
 // 15. RAZORPAY BILLING PLANS & RECURRING SUBSCRIPTIONS
 // ----------------------------------------------------
 const rawKeyId = process.env.RAZORPAY_KEY_ID?.trim();
-export const RAZORPAY_KEY_ID = rawKeyId
-  ? (rawKeyId.startsWith('rzp_') ? rawKeyId : `rzp_test_${rawKeyId}`)
-  : '';
-export const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET?.trim() || '2LCuzkFSOVpjtuWHPVSHWzPx';
-export const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || 'whsec_churnshield_live_test_secret_9981';
+export const RAZORPAY_KEY_ID = rawKeyId || '';
+export const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET?.trim() || '';
+export const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || '';
+
+/**
+ * Synchronize subscription status to Firestore (/users/{userId} and /workspaces/{workspaceId})
+ */
+async function syncSubscriptionToFirestore(params: {
+  userId?: string;
+  workspaceId?: string;
+  tier?: string;
+  billingCycle?: string;
+  status: 'active' | 'cancelled' | 'pending' | 'past_due' | 'halted' | 'trialing';
+  razorpaySubscriptionId?: string;
+  currentPeriodEnd?: string;
+  amountUsd?: number;
+}) {
+  try {
+    if (!firebaseAdminFirestore) return;
+    const nowIso = new Date().toISOString();
+    if (params.userId) {
+      await firebaseAdminFirestore.collection('users').doc(params.userId).set({
+        billing_status: params.status,
+        payment_status: params.status === 'active' || params.status === 'trialing' ? 'paid' : (params.status === 'past_due' ? 'past_due' : 'unpaid'),
+        selected_plan: params.tier || 'growth',
+        ...(params.amountUsd !== undefined ? { plan_price: params.amountUsd } : {}),
+        ...(params.razorpaySubscriptionId ? { razorpay_subscription_id: params.razorpaySubscriptionId } : {}),
+        ...(params.currentPeriodEnd ? { current_period_end: params.currentPeriodEnd } : {}),
+        updated_at: nowIso
+      }, { merge: true });
+    }
+    if (params.workspaceId) {
+      await firebaseAdminFirestore.collection('workspaces').doc(params.workspaceId).set({
+        subscription: {
+          status: params.status,
+          tier: params.tier || 'growth',
+          billing_cycle: params.billingCycle || 'monthly',
+          ...(params.razorpaySubscriptionId ? { razorpay_subscription_id: params.razorpaySubscriptionId } : {}),
+          ...(params.currentPeriodEnd ? { current_period_end: params.currentPeriodEnd } : {}),
+          updated_at: nowIso
+        }
+      }, { merge: true });
+    }
+  } catch (err: any) {
+    console.warn('[Firestore Subscription Sync Warning]:', err?.message);
+  }
+}
 
 // In-memory / Database authoritative billing plans (Strictly USD Currency)
 // SINGLE SOURCE OF TRUTH: Powered by buildAuthoritativeBillingPlans()
@@ -4683,22 +4729,31 @@ const createSubscriptionHandler = async (req: express.Request, res: express.Resp
       }
     }
 
-    const authUser = getAuthUser(req);
-    const targetEmail = (customerEmail || authUser?.email || (usersDatabase[0] ? usersDatabase[0].email : 'founder@churnveda.com')).toLowerCase();
-    const targetName = customerName || authUser?.full_name || 'SaaS Founder';
-    const userId = authUser?.id || (usersDatabase[0] ? usersDatabase[0].id : 'usr_default');
+    const authUser = (req as any).user || (await resolveAuthUser(req));
+    if (!authUser) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required. Please sign in to create a subscription.',
+        code: 'UNAUTHORIZED'
+      });
+    }
+
+    const workspaceId = (req as any).workspaceId || authUser.workspace_id || 'ws-default';
+    const targetEmail = authUser.email.toLowerCase();
+    const targetName = customerName || authUser.full_name || 'SaaS Founder';
+    const userId = authUser.id;
 
     let razorpaySubscriptionId = `sub_${crypto.randomBytes(8).toString('hex')}`;
     let isProviderLive = false;
-    let providerNote = 'USD subscription initialized with authoritative pricing.';
+    let providerNote = 'Razorpay subscription initialized with authoritative pricing.';
 
     // Call official Razorpay Subscriptions API if configured
-    if (billingPlan.razorpay_plan_id) {
+    if (billingPlan.razorpay_plan_id && RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET) {
       try {
         const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
         const rzpRes = await fetch('https://api.razorpay.com/v1/subscriptions', {
           method: 'POST',
-          signal: AbortSignal.timeout(2000),
+          signal: AbortSignal.timeout(8000),
           headers: {
             'Authorization': authHeader,
             'Content-Type': 'application/json'
@@ -4709,6 +4764,9 @@ const createSubscriptionHandler = async (req: express.Request, res: express.Resp
             quantity: 1,
             customer_notify: 1,
             notes: {
+              userId: authUser.id,
+              firebaseUid: authUser.id,
+              workspaceId,
               tier: selectedTier,
               billing_cycle: selectedCycle,
               billing_plan_id: billingPlan.id,
@@ -4728,17 +4786,29 @@ const createSubscriptionHandler = async (req: express.Request, res: express.Resp
           }
         } else {
           const errJson = await rzpRes.json().catch(() => ({}));
-          providerNote = (errJson as any)?.error?.description || 'Razorpay recurring subscriptions require international recurring approval for USD; simulated sandbox mandate used.';
+          const desc = (errJson as any)?.error?.description || 'Razorpay subscription API rejected plan creation';
+          return res.status(400).json({
+            success: false,
+            error: `Razorpay Error: ${desc}`
+          });
         }
       } catch (apiErr: any) {
-        providerNote = apiErr?.message || 'Network error communicating with payment provider';
+        return res.status(502).json({
+          success: false,
+          error: `Failed to connect to payment provider: ${apiErr?.message || 'Network error'}`
+        });
       }
+    } else if (!billingPlan.razorpay_plan_id) {
+      return res.status(400).json({
+        success: false,
+        error: `No Razorpay plan ID configured for ${selectedTier} (${selectedCycle}).`
+      });
     }
 
     // Record subscription in authoritative database with initial status 'pending'
     const newSubscription: DbSubscription = {
       id: `subrec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      workspace_id: (authUser as any)?.workspace_id || 'ws-default',
+      workspace_id: workspaceId,
       user_id: userId,
       email: targetEmail,
       tier: selectedTier,
@@ -4807,9 +4877,9 @@ const createSubscriptionHandler = async (req: express.Request, res: express.Resp
   }
 };
 
-app.post('/api/razorpay/create-subscription', createSubscriptionHandler);
-app.post('/api/create-subscription', createSubscriptionHandler);
-app.post('/api/create-checkout-session', createSubscriptionHandler);
+app.post('/api/razorpay/create-subscription', requireAuth, createSubscriptionHandler);
+app.post('/api/create-subscription', requireAuth, createSubscriptionHandler);
+app.post('/api/create-checkout-session', requireAuth, createSubscriptionHandler);
 
 // 15B0. Rate Limiter for Trial Verification Orders (6 requests/minute per client)
 const trialOrderRateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -5349,11 +5419,35 @@ app.get('/api/billing/limits', requireAuth, (req, res) => {
   });
 });
 
-// 15B5. Cancel Trial Endpoint (Area 2, 5)
-app.post('/api/billing/cancel-trial', requireAuth, async (req, res) => {
+// 15B5. Cancel Subscription / Trial Endpoint
+const cancelSubscriptionHandler = async (req: express.Request, res: express.Response) => {
   const authUser = (req as any).user as DbUser;
   const workspaceId = (req as any).workspaceId as string;
   const user = authUser;
+
+  const sub = subscriptionsDatabase.find(s => s.workspace_id === workspaceId);
+
+  // If active Razorpay subscription exists, cancel on Razorpay Live API
+  if (sub?.razorpay_subscription_id && sub.razorpay_subscription_id.startsWith('sub_') && RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET) {
+    try {
+      const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
+      const rzpCancelRes = await fetch(`https://api.razorpay.com/v1/subscriptions/${sub.razorpay_subscription_id}/cancel`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(8000),
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ cancel_at_cycle_end: 0 })
+      });
+      if (!rzpCancelRes.ok) {
+        const errJson = await rzpCancelRes.json().catch(() => ({}));
+        console.warn('[Razorpay API Cancel Warning]:', (errJson as any)?.error?.description);
+      }
+    } catch (rzpCancelErr: any) {
+      console.warn('[Razorpay API Cancel Network Warning]:', rzpCancelErr.message);
+    }
+  }
 
   if (user) {
     user.billing_status = 'cancelled';
@@ -5363,7 +5457,6 @@ app.post('/api/billing/cancel-trial', requireAuth, async (req, res) => {
     } catch (e: any) {}
   }
 
-  const sub = subscriptionsDatabase.find(s => s.workspace_id === workspaceId);
   if (sub) {
     sub.status = 'cancelled';
     sub.updated_at = new Date().toISOString();
@@ -5372,21 +5465,35 @@ app.post('/api/billing/cancel-trial', requireAuth, async (req, res) => {
     } catch (e: any) {}
   }
 
+  // Synchronize to Firestore
+  await syncSubscriptionToFirestore({
+    userId: authUser.id,
+    workspaceId,
+    tier: sub?.tier || authUser.selected_plan || 'growth',
+    billingCycle: sub?.billing_cycle || 'monthly',
+    status: 'cancelled',
+    razorpaySubscriptionId: sub?.razorpay_subscription_id
+  });
+
   await db.auditLogs.record({
     workspaceId,
     actorId: authUser.id,
     actorEmail: authUser.email,
-    action: 'billing.trial_cancelled',
+    action: 'billing.subscription_cancelled',
     targetType: 'subscription',
     targetId: sub?.id || workspaceId
   });
 
   res.json({
     success: true,
-    message: 'Trial has been cancelled. Your account remains active until the end of the trial period.',
+    message: 'Subscription has been cancelled. Your account will not be charged again.',
     billingStatus: 'cancelled'
   });
-});
+};
+
+app.post('/api/billing/cancel-trial', requireAuth, cancelSubscriptionHandler);
+app.post('/api/razorpay/cancel-subscription', requireAuth, cancelSubscriptionHandler);
+app.post('/api/cancel-subscription', requireAuth, cancelSubscriptionHandler);
 
 // 15B3. Upgrade Plan Endpoint (Area 2, 3, 5)
 app.post('/api/billing/upgrade', requireAuth, async (req, res) => {
@@ -6160,8 +6267,11 @@ app.post('/api/razorpay/verify-payment', async (req, res) => {
 });
 
 // 16E2. Verify Razorpay Subscription Signature (Monthly Recurring Mandate)
-app.post('/api/razorpay/verify-subscription', async (req, res) => {
+app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
   try {
+    const authUser = (req as any).user as DbUser;
+    const workspaceId = (req as any).workspaceId as string;
+
     const {
       razorpay_subscription_id,
       razorpay_payment_id,
@@ -6170,9 +6280,7 @@ app.post('/api/razorpay/verify-subscription', async (req, res) => {
       plan,
       billing_cycle = 'monthly',
       billingCycle,
-      amount,
       currency,
-      email,
       isFoundingOffer,
       is_founding_offer,
       offer
@@ -6184,6 +6292,10 @@ app.post('/api/razorpay/verify-subscription', async (req, res) => {
 
     if (!razorpay_signature) {
       return res.status(400).json({ success: false, error: 'Missing Razorpay subscription signature' });
+    }
+
+    if (!RAZORPAY_KEY_SECRET) {
+      return res.status(500).json({ success: false, error: 'Razorpay secret key is not configured on the server.' });
     }
 
     const selectedTier = normalizePlanTier(tier || plan);
@@ -6206,7 +6318,6 @@ app.post('/api/razorpay/verify-subscription', async (req, res) => {
       .update(text)
       .digest('hex');
 
-    const isProd = process.env.NODE_ENV === 'production' && !process.env.AIS_DEV_ENVIRONMENT;
     let isValidSignature = false;
     try {
       const expectedBuf = Buffer.from(generatedSignature, 'utf8');
@@ -6218,41 +6329,32 @@ app.post('/api/razorpay/verify-subscription', async (req, res) => {
       isValidSignature = false;
     }
 
-    if (!isProd && (razorpay_signature === 'test_bypass_token' || razorpay_signature.startsWith('sig_mock_') || razorpay_signature.startsWith('test_'))) {
-      isValidSignature = true;
-    }
-
     if (!isValidSignature) {
       return res.status(400).json({ success: false, error: 'Invalid Razorpay subscription signature' });
     }
 
+    const targetEmail = authUser.email.toLowerCase();
+    const periodEndIso = new Date(Date.now() + (expected.billingCycle === 'annual' ? 365 : 30) * 86400000).toISOString();
+    const nowIso = new Date().toISOString();
 
-    const authUser = getAuthUser(req);
-    const targetEmail = (email || authUser?.email || (usersDatabase[0] ? usersDatabase[0].email : '')).toLowerCase();
-    const user = usersDatabase.find(u => u.email.toLowerCase() === targetEmail);
-
-    if (user) {
-      user.billing_status = 'active';
-      user.payment_status = 'paid';
-      user.selected_plan = expected.tier;
-      user.plan_price = expected.amountUsd;
-      user.razorpay_subscription_id = razorpay_subscription_id;
-      user.subscription_start_date = new Date().toISOString();
-      user.current_period_end = new Date(Date.now() + (expected.billingCycle === 'annual' ? 365 : 30) * 86400000).toISOString();
-      user.updated_at = new Date().toISOString();
-      try {
-        await db.users.upsert(user as any);
-      } catch (e: any) {}
-    }
+    authUser.billing_status = 'active';
+    authUser.payment_status = 'paid';
+    authUser.selected_plan = expected.tier;
+    authUser.plan_price = expected.amountUsd;
+    authUser.razorpay_subscription_id = razorpay_subscription_id;
+    authUser.subscription_start_date = nowIso;
+    authUser.current_period_end = periodEndIso;
+    authUser.updated_at = nowIso;
+    try {
+      await db.users.upsert(authUser as any);
+    } catch (e: any) {}
 
     // Synchronize subscriptionsDatabase
-    const workspaceId = user?.workspace_id || authUser?.workspace_id || 'ws-default';
     const subIndex = subscriptionsDatabase.findIndex(s => s.workspace_id === workspaceId);
-    const nowIso = new Date().toISOString();
     const updatedSub: DbSubscription = {
       id: subIndex >= 0 ? subscriptionsDatabase[subIndex].id : `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
       workspace_id: workspaceId,
-      user_id: user?.id || authUser?.id || 'usr-default',
+      user_id: authUser.id,
       email: targetEmail,
       tier: expected.tier,
       billing_cycle: expected.billingCycle,
@@ -6281,11 +6383,11 @@ app.post('/api/razorpay/verify-subscription', async (req, res) => {
       await db.subscriptions.upsert(updatedSub as any);
     } catch (e: any) {}
 
-    // Record verified subscription payment into authoritative ledger (Requirement 7)
+    // Record verified subscription payment into authoritative ledger
     const ledgerPayment: DbSubscriptionPayment = {
       id: `spay_${razorpay_payment_id}`,
       workspace_id: workspaceId,
-      user_id: user?.id || authUser?.id,
+      user_id: authUser.id,
       subscription_id: razorpay_subscription_id,
       razorpay_payment_id: razorpay_payment_id,
       currency: 'USD',
@@ -6302,6 +6404,18 @@ app.post('/api/razorpay/verify-subscription', async (req, res) => {
     } catch (payErr: any) {
       console.warn('[Subscription Payment Ledger Warning]:', payErr.message);
     }
+
+    // Synchronize to Firestore
+    await syncSubscriptionToFirestore({
+      userId: authUser.id,
+      workspaceId,
+      tier: expected.tier,
+      billingCycle: expected.billingCycle,
+      status: 'active',
+      razorpaySubscriptionId: razorpay_subscription_id,
+      currentPeriodEnd: periodEndIso,
+      amountUsd: expected.amountUsd
+    });
 
     res.json({
       success: true,
@@ -6338,40 +6452,37 @@ app.post('/api/razorpay/webhook', async (req, res) => {
     const webhookSecret = RAZORPAY_WEBHOOK_SECRET;
 
     // Webhook Signature Verification (Area 11)
-    if (webhookSecret) {
-      if (!webhookSignature) {
-        console.warn('[Razorpay Webhook]: Missing required x-razorpay-signature header.');
-        return res.status(401).json({ success: false, error: 'Missing required x-razorpay-signature header' });
-      }
-
-      const rawBody = (req as any).rawBody || JSON.stringify(req.body);
-      const expectedSignature = crypto
-        .createHmac('sha256', webhookSecret)
-        .update(rawBody)
-        .digest('hex');
-
-      const isProd = process.env.NODE_ENV === 'production' && !process.env.AIS_DEV_ENVIRONMENT;
-      let isSignatureValid = false;
-      try {
-        const expectedBuf = Buffer.from(expectedSignature, 'utf8');
-        const sigBuf = Buffer.from(webhookSignature, 'utf8');
-        if (expectedBuf.length === sigBuf.length && crypto.timingSafeEqual(expectedBuf, sigBuf)) {
-          isSignatureValid = true;
-        }
-      } catch (e) {
-        isSignatureValid = false;
-      }
-
-      if (!isProd && webhookSignature === 'test_bypass_token') {
-        isSignatureValid = true;
-      }
-
-      if (!isSignatureValid) {
-        console.warn('[Razorpay Webhook]: Rejected invalid or forged webhook signature.');
-        return res.status(400).json({ success: false, error: 'Invalid Razorpay webhook signature' });
-      }
+    if (!webhookSecret) {
+      console.error('[Razorpay Webhook Error]: RAZORPAY_WEBHOOK_SECRET is not configured on the server.');
+      return res.status(500).json({ success: false, error: 'Razorpay webhook secret is not configured on the server.' });
     }
 
+    if (!webhookSignature) {
+      console.warn('[Razorpay Webhook]: Missing required x-razorpay-signature header.');
+      return res.status(401).json({ success: false, error: 'Missing required x-razorpay-signature header' });
+    }
+
+    const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+    const expectedSignature = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(rawBody)
+      .digest('hex');
+
+    let isSignatureValid = false;
+    try {
+      const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+      const sigBuf = Buffer.from(webhookSignature, 'utf8');
+      if (expectedBuf.length === sigBuf.length && crypto.timingSafeEqual(expectedBuf, sigBuf)) {
+        isSignatureValid = true;
+      }
+    } catch (e) {
+      isSignatureValid = false;
+    }
+
+    if (!isSignatureValid) {
+      console.warn('[Razorpay Webhook]: Rejected invalid or forged webhook signature.');
+      return res.status(400).json({ success: false, error: 'Invalid Razorpay webhook signature' });
+    }
 
     const event = req.body?.event;
     const payload = req.body?.payload;
@@ -6419,6 +6530,16 @@ app.post('/api/razorpay/webhook', async (req, res) => {
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
         console.log(`[Razorpay Webhook]: User ${user.email} marked active.`);
+
+        await syncSubscriptionToFirestore({
+          userId: user.id,
+          workspaceId: user.workspace_id || subRec?.workspace_id,
+          tier: subRec?.tier || user.selected_plan || 'growth',
+          billingCycle: subRec?.billing_cycle || 'monthly',
+          status: 'active',
+          razorpaySubscriptionId: subscription?.id,
+          currentPeriodEnd: user.current_period_end
+        });
       }
     } else if (event === 'subscription.charged') {
       const subscription = payload?.subscription?.entity;
@@ -6443,6 +6564,16 @@ app.post('/api/razorpay/webhook', async (req, res) => {
         user.current_period_end = new Date(Date.now() + 30 * 86400000).toISOString();
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
+
+        await syncSubscriptionToFirestore({
+          userId: user.id,
+          workspaceId: user.workspace_id || subRec?.workspace_id,
+          tier: subRec?.tier || user.selected_plan || 'growth',
+          billingCycle: subRec?.billing_cycle || 'monthly',
+          status: 'active',
+          razorpaySubscriptionId: subscription?.id,
+          currentPeriodEnd: user.current_period_end
+        });
       }
 
       // Record in subscription_payments ledger (Requirement 7)
@@ -6504,6 +6635,15 @@ app.post('/api/razorpay/webhook', async (req, res) => {
         user.billing_status = 'past_due';
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
+
+        await syncSubscriptionToFirestore({
+          userId: user.id,
+          workspaceId: user.workspace_id || subRec?.workspace_id,
+          tier: subRec?.tier || user.selected_plan || 'growth',
+          billingCycle: subRec?.billing_cycle || 'monthly',
+          status: 'past_due',
+          razorpaySubscriptionId: subscription?.id
+        });
       }
     } else if (event === 'subscription.cancelled') {
       const subscription = payload?.subscription?.entity;
@@ -6523,6 +6663,15 @@ app.post('/api/razorpay/webhook', async (req, res) => {
         user.billing_status = 'cancelled';
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
+
+        await syncSubscriptionToFirestore({
+          userId: user.id,
+          workspaceId: user.workspace_id || subRec?.workspace_id,
+          tier: subRec?.tier || user.selected_plan || 'growth',
+          billingCycle: subRec?.billing_cycle || 'monthly',
+          status: 'cancelled',
+          razorpaySubscriptionId: subscription?.id
+        });
       }
     } else if (event === 'payment.captured' || event === 'order.paid') {
       const payment = payload?.payment?.entity;
@@ -6581,6 +6730,16 @@ app.post('/api/razorpay/webhook', async (req, res) => {
 
           await db.trialVerifications.upsert(verification as any);
           await db.subscriptions.upsert(updatedSub as any);
+
+          await syncSubscriptionToFirestore({
+            userId: matchedUser?.id || verification.user_id,
+            workspaceId: verification.workspace_id,
+            tier: verification.tier,
+            billingCycle: verification.billing_cycle,
+            status: 'trialing',
+            currentPeriodEnd: trialEndsAt
+          });
+
           console.log(`[Webhook Trial Activation]: Successfully activated 14-day trial for workspace ${verification.workspace_id} via webhook ${event}.`);
         }
       }
@@ -6598,6 +6757,15 @@ app.post('/api/razorpay/webhook', async (req, res) => {
         user.billing_status = 'past_due';
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
+
+        await syncSubscriptionToFirestore({
+          userId: user.id,
+          workspaceId: user.workspace_id || subRec?.workspace_id,
+          tier: subRec?.tier || user.selected_plan || 'growth',
+          billingCycle: subRec?.billing_cycle || 'monthly',
+          status: 'past_due',
+          razorpaySubscriptionId: subscription?.id
+        });
       }
     } else if (event === 'payment.failed') {
       const payment = payload?.payment?.entity;

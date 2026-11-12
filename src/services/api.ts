@@ -468,6 +468,14 @@ export async function cancelTrial(email?: string) {
   return res.json();
 }
 
+export async function cancelRazorpaySubscription() {
+  const res = await apiFetch('/api/razorpay/cancel-subscription', {
+    method: 'POST',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' })
+  });
+  return res.json();
+}
+
 export async function upgradePlan(plan: string, email?: string) {
   const res = await apiFetch('/api/billing/upgrade', {
     method: 'POST',
@@ -1146,7 +1154,7 @@ export async function verifyRazorpaySubscription(payload: {
 }> {
   const res = await apiFetch('/api/razorpay/verify-subscription', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
   });
   return res.json();
@@ -1580,6 +1588,7 @@ export const apiService = {
   requestAccountDeletion,
   signupUser,
   cancelTrial,
+  cancelRazorpaySubscription,
   upgradePlan,
   addPaymentMethod,
   fetchPaymentMethods,

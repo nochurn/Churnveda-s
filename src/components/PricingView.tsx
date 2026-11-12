@@ -330,18 +330,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
           rzp.open();
           return;
         } else {
-          // Simulated development verification
-          const verifyRes = await apiService.verifyRazorpaySubscription({
-            razorpay_subscription_id: subRes.subscriptionId,
-            razorpay_payment_id: `pay_sim_${Date.now()}`,
-            razorpay_signature: 'test_mandate_signature',
-            tier: planId,
-            billing_cycle: selectedCycle,
-            isFoundingOffer: isFoundingEligible,
-            email: email || 'founder@example.com'
-          });
-          if (onShowToast) onShowToast(`🎉 Test subscription verified! Plan upgraded to ${planId.toUpperCase()}${isFoundingEligible ? ' at Founding Rate' : ''}.`, 'success');
-          if (onNavigate) onNavigate('dashboard');
+          if (onShowToast) onShowToast('Razorpay Checkout SDK is still loading. Please check your internet connection and try again.', 'error');
           return;
         }
       }
@@ -400,16 +389,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
         const rzp = new (window as any).Razorpay(options);
         rzp.open();
       } else {
-        const verifyRes = await apiService.verifyRazorpayPayment({
-          razorpay_order_id: orderRes.orderId,
-          razorpay_payment_id: `pay_${Date.now()}`,
-          razorpay_signature: 'test_bypass_token',
-          plan: planId,
-          billingCycle: isAnnual ? 'annual' : 'monthly',
-          email: email || 'founder@example.com'
-        });
-        if (onShowToast) onShowToast(`🎉 Razorpay Test Payment Completed! Plan upgraded to ${planId.toUpperCase()}.`, 'success');
-        if (onNavigate) onNavigate('dashboard');
+        if (onShowToast) onShowToast('Razorpay Checkout SDK is still loading. Please check your internet connection and try again.', 'error');
       }
     } catch (err: any) {
       if (onShowToast) onShowToast(err.message || 'Razorpay checkout failed.', 'error');

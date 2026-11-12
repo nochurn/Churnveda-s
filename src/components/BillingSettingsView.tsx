@@ -339,19 +339,24 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
     }
   };
 
-  // Handle Cancel Trial
+  // Handle Cancel Trial / Subscription
   const handleConfirmCancelTrial = async () => {
     setIsProcessing(true);
     try {
-      const res = await apiService.cancelTrial();
+      const res = await apiService.cancelRazorpaySubscription().catch(() => apiService.cancelTrial());
       if (res.user) {
         authService.setCurrentUser(res.user);
         if (onUpdateUser) onUpdateUser(res.user);
+      } else if (currentUser && onUpdateUser) {
+        onUpdateUser({
+          ...currentUser,
+          billingStatus: 'cancelled'
+        });
       }
       setShowCancelModal(false);
-      onShowToast('Your 14-day trial has been canceled. No charges will be incurred.', 'info');
+      onShowToast('Your subscription / trial has been canceled. No future charges will occur.', 'info');
     } catch (err: any) {
-      onShowToast(err.message || 'Failed to cancel trial.', 'error');
+      onShowToast(err.message || 'Failed to cancel subscription.', 'error');
     } finally {
       setIsProcessing(false);
     }
@@ -420,24 +425,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
           rzpInstance.open();
           return;
         } else {
-          // Simulated dev verification
-          const verifyRes = await apiService.verifyRazorpaySubscription({
-            razorpay_subscription_id: subRes.subscriptionId,
-            razorpay_payment_id: `pay_mandate_${Date.now()}`,
-            razorpay_signature: 'test_mandate_signature',
-            tier: targetPlan,
-            billing_cycle: selectedCycle,
-            email: currentUser?.email
-          });
-          onShowToast(`🎉 Test recurring subscription activated for ${targetPlan.toUpperCase()} Plan!`, 'success');
-          if (currentUser && onUpdateUser) {
-            onUpdateUser({
-              ...currentUser,
-              selectedPlan: targetPlan,
-              billingStatus: 'active',
-              paymentStatus: 'paid'
-            } as any);
-          }
+          onShowToast('Razorpay Checkout SDK is still loading. Please check your internet connection and try again.', 'error');
           return;
         }
       }
@@ -500,24 +488,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         const rzpInstance = new (window as any).Razorpay(options);
         rzpInstance.open();
       } else {
-        // Fallback test verification
-        const verifyRes = await apiService.verifyRazorpayPayment({
-          razorpay_order_id: orderRes.orderId,
-          razorpay_payment_id: `pay_${Date.now()}`,
-          razorpay_signature: 'test_bypass_token',
-          plan: targetPlan,
-          billingCycle,
-          email: currentUser?.email
-        });
-        onShowToast(`🎉 Razorpay Test Payment Completed! Plan upgraded to ${targetPlan.toUpperCase()}.`, 'success');
-        if (currentUser && onUpdateUser) {
-          onUpdateUser({
-            ...currentUser,
-            selectedPlan: targetPlan,
-            billingStatus: 'active',
-            paymentStatus: 'paid'
-          } as any);
-        }
+        onShowToast('Razorpay Checkout SDK is still loading. Please check your internet connection and try again.', 'error');
       }
     } catch (err: any) {
       onShowToast(err.message || 'Razorpay payment could not be initiated.', 'error');

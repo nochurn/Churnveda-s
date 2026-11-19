@@ -49,6 +49,7 @@ import { apiService } from './services/api';
 import { authService } from './services/authService';
 import { Customer, IntegrationStatus, DailyAlert, UserProfile } from './types';
 import { testFirestoreConnection } from './lib/firebaseClient';
+import { trackPageView } from './utils/analytics';
 import { Sparkles, CheckCircle2, AlertCircle, RefreshCw, UploadCloud } from 'lucide-react';
 
 // Route metadata resolver for document.title, description, and indexing boundaries
@@ -222,6 +223,12 @@ function getRouteMetadata(view: string): { title: string; description: string; i
       return {
         title: 'Help Center | Churnveda',
         description: 'Churnveda documentation, guides, and customer support.',
+        isPrivate: false
+      };
+    case 'unsubscribe':
+      return {
+        title: 'Unsubscribe | Churnveda',
+        description: 'Opt out of Churnveda outreach emails and manage communication preferences.',
         isPrivate: false
       };
     default:
@@ -482,6 +489,7 @@ export default function App() {
       document.head.appendChild(robotsTag);
     }
     robotsTag.setAttribute('content', meta.isPrivate ? 'noindex, nofollow' : 'index, follow');
+    trackPageView(activeView, meta.title);
   }, [activeView]);
 
   // Synchronize hash with activeView
@@ -776,7 +784,7 @@ export default function App() {
   const handleSyncAll = async () => {
     try {
       setIsSyncing(true);
-      showToast('Syncing integrations: Razorpay, Mixpanel, Intercom, SendGrid, Supabase...', 'info');
+      showToast('Syncing integrations: Razorpay, Mixpanel, Intercom, Resend, WhatsApp, Firebase...', 'info');
       const res = await apiService.syncAllIntegrations();
       setIntegrations(res.integrations);
       await customerStore.refreshCustomerData();
@@ -899,7 +907,8 @@ export default function App() {
     'cookies',
     'acceptable-use',
     'contact',
-    'help'
+    'help',
+    'unsubscribe'
   ].includes(activeView);
 
   // Check if current view is a core app view
@@ -1098,13 +1107,14 @@ export default function App() {
             <PrivacyPolicyView onNavigate={handleNavigate} onShowToast={showToast} />
           )}
 
-          {['terms', 'refund', 'cancellation', 'deletion', 'dpa', 'cookies', 'acceptable-use', 'contact', 'help'].includes(activeView) && (
+          {['terms', 'refund', 'cancellation', 'deletion', 'dpa', 'cookies', 'acceptable-use', 'contact', 'help', 'unsubscribe'].includes(activeView) && (
             <LegalPagesView
               page={
                 activeView === 'cancellation'
                   ? 'refund'
-                  : (activeView as 'terms' | 'refund' | 'deletion' | 'dpa' | 'cookies' | 'acceptable-use' | 'contact' | 'help')
+                  : (activeView as 'terms' | 'refund' | 'deletion' | 'dpa' | 'cookies' | 'acceptable-use' | 'contact' | 'help' | 'unsubscribe')
               }
+              initialEmail={routeParams.email}
               onNavigate={handleNavigate}
               onShowToast={showToast}
             />

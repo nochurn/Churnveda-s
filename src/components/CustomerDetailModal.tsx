@@ -303,11 +303,16 @@ export const CustomerDetailModal: React.FC<CustomerDetailModalProps> = ({
             <div className="space-y-6">
               {/* Plain English "Why this customer is at risk" card */}
               <div className="bg-red-50/70 border border-red-200 rounded-xl p-4.5 space-y-2">
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-red-900">
-                    Why this customer is at risk
-                  </h4>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-red-900">
+                      Why this customer is at risk
+                    </h4>
+                  </div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-900 border border-indigo-200">
+                    AI-Generated Summary
+                  </span>
                 </div>
                 <p className="text-sm font-medium text-gray-900 leading-relaxed pl-6">
                   "{plainEnglishRisk}"
@@ -529,6 +534,9 @@ export const CustomerDetailModal: React.FC<CustomerDetailModalProps> = ({
                   <div className="flex items-center gap-2 text-xs font-semibold text-gray-700">
                     <MessageSquare className="w-4 h-4 text-blue-900" />
                     <span>Personalized Retention Message</span>
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-900 border border-indigo-200">
+                      AI-Generated
+                    </span>
                   </div>
 
                   <div className="flex items-center gap-2">

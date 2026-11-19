@@ -617,6 +617,13 @@ export async function runPostgresMigrations(pool: Pool) {
       CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
 
+      CREATE TABLE IF NOT EXISTS unsubscribed_contacts (
+        contact_key TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,
+        contact_value TEXT NOT NULL,
+        unsubscribed_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+      );
+
       -- Enable Row-Level Security (RLS) across all private tables if not already enabled
       DO $$
       DECLARE tbl text;
@@ -872,6 +879,13 @@ function runSqliteMigrations(db: DatabaseSync) {
       user_agent TEXT,
       metadata TEXT,
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS unsubscribed_contacts (
+      contact_key TEXT PRIMARY KEY,
+      channel TEXT NOT NULL,
+      contact_value TEXT NOT NULL,
+      unsubscribed_at TEXT NOT NULL
     );
   `);
 }
@@ -2239,6 +2253,182 @@ export const db = {
           { name: 'audit_logs', recordsCount: auditLogs, lastSync: now }
         ]
       };
+    }
+  },
+
+  /**
+   * Persistent email/WhatsApp opt-out suppression registry
+   */
+  unsubscribes: {
+    async add(channel: 'email' | 'whatsapp', contactValue: string): Promise<void> {
+      if (!databaseInitialized) await initDatabase();
+      const norm = contactValue.trim().toLowerCase();
+      if (!norm) return;
+      const key = `${channel}:${norm}`;
+      const now = new Date().toISOString();
+      if (isPostgresActive && pgPool) {
+        await pgPool.query(
+          `INSERT INTO unsubscribed_contacts (contact_key, channel, contact_value, unsubscribed_at)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (contact_key) DO UPDATE SET unsubscribed_at = EXCLUDED.unsubscribed_at`,
+          [key, channel, norm, now]
+        );
+        return;
+      }
+      sqliteDb!.prepare(
+        `INSERT INTO unsubscribed_contacts (contact_key, channel, contact_value, unsubscribed_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (contact_key) DO UPDATE SET unsubscribed_at = excluded.unsubscribed_at`
+      ).run(key, channel, norm, now);
+    },
+
+    async has(channel: 'email' | 'whatsapp', contactValue: string): Promise<boolean> {
+      if (!databaseInitialized) await initDatabase();
+      const norm = contactValue.trim().toLowerCase();
+      if (!norm) return false;
+      const key = `${channel}:${norm}`;
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT 1 FROM unsubscribed_contacts WHERE contact_key = $1', [key]);
+        return res.rows.length > 0;
+      }
+      const row = sqliteDb!.prepare('SELECT 1 FROM unsubscribed_contacts WHERE contact_key = ?').get(key);
+      return Boolean(row);
+    },
+
+    async listAll(): Promise<Array<{ channel: string; contact_value: string; unsubscribed_at: string }>> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT channel, contact_value, unsubscribed_at FROM unsubscribed_contacts');
+        return res.rows;
+      }
+      return sqliteDb!.prepare('SELECT channel, contact_value, unsubscribed_at FROM unsubscribed_contacts').all() as any[];
+    }
+  },
+
+  /**
+   * GDPR/DPDP Account Data Export & Full Multi-Table Account Deletion
+   */
+  accountPrivacy: {
+    async exportUserData(params: { userId: string; workspaceId: string; email: string }): Promise<{
+      exportedAt: string;
+      user: Record<string, any> | null;
+      workspace: Record<string, any> | null;
+      customers: any[];
+      csvImports: any[];
+      retentionActions: any[];
+      subscriptions: any[];
+      auditLogs: any[];
+    }> {
+      if (!databaseInitialized) await initDatabase();
+      const { userId, workspaceId, email } = params;
+      const cleanEmail = email.trim().toLowerCase();
+
+      const sanitizeUser = (u: any) => {
+        if (!u) return null;
+        const { password_hash: _pw, ...safe } = u;
+        return safe;
+      };
+
+      if (isPostgresActive && pgPool) {
+        const [uRes, wRes, cRes, iRes, rRes, sRes, aRes] = await Promise.all([
+          pgPool.query('SELECT * FROM users WHERE id = $1 OR email = $2 LIMIT 1', [userId, cleanEmail]),
+          pgPool.query('SELECT * FROM workspaces WHERE id = $1 LIMIT 1', [workspaceId]),
+          pgPool.query('SELECT * FROM customers WHERE workspace_id = $1', [workspaceId]),
+          pgPool.query('SELECT * FROM csv_imports WHERE workspace_id = $1', [workspaceId]),
+          pgPool.query('SELECT * FROM retention_actions WHERE workspace_id = $1', [workspaceId]),
+          pgPool.query('SELECT * FROM subscriptions WHERE workspace_id = $1', [workspaceId]),
+          pgPool.query('SELECT * FROM audit_logs WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 200', [workspaceId])
+        ]);
+        return {
+          exportedAt: new Date().toISOString(),
+          user: sanitizeUser(uRes.rows[0] || null),
+          workspace: wRes.rows[0] || null,
+          customers: cRes.rows,
+          csvImports: iRes.rows,
+          retentionActions: rRes.rows,
+          subscriptions: sRes.rows,
+          auditLogs: aRes.rows
+        };
+      }
+
+      const uRow = sqliteDb!.prepare('SELECT * FROM users WHERE id = ? OR email = ? LIMIT 1').get(userId, cleanEmail);
+      const wRow = sqliteDb!.prepare('SELECT * FROM workspaces WHERE id = ? LIMIT 1').get(workspaceId);
+      const cRows = sqliteDb!.prepare('SELECT * FROM customers WHERE workspace_id = ?').all(workspaceId);
+      const iRows = sqliteDb!.prepare('SELECT * FROM csv_imports WHERE workspace_id = ?').all(workspaceId);
+      const rRows = sqliteDb!.prepare('SELECT * FROM retention_actions WHERE workspace_id = ?').all(workspaceId);
+      const sRows = sqliteDb!.prepare('SELECT * FROM subscriptions WHERE workspace_id = ?').all(workspaceId);
+      const aRows = sqliteDb!.prepare('SELECT * FROM audit_logs WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 200').all(workspaceId);
+
+      return {
+        exportedAt: new Date().toISOString(),
+        user: sanitizeUser(uRow || null),
+        workspace: (wRow as Record<string, any>) || null,
+        customers: cRows,
+        csvImports: iRows,
+        retentionActions: rRows,
+        subscriptions: sRows,
+        auditLogs: aRows
+      };
+    },
+
+    async deleteUserData(params: { userId: string; workspaceId: string; email: string }): Promise<{
+      deletedTables: Record<string, number>;
+    }> {
+      if (!databaseInitialized) await initDatabase();
+      const { userId, workspaceId, email } = params;
+      const cleanEmail = email.trim().toLowerCase();
+      const deletedTables: Record<string, number> = {};
+      const isDefaultWs = workspaceId === 'ws-default';
+
+      if (isPostgresActive && pgPool) {
+        const del = async (name: string, sql: string, values: any[]) => {
+          const r = await pgPool!.query(sql, values);
+          deletedTables[name] = r.rowCount || 0;
+        };
+        await del('sessions', 'DELETE FROM sessions WHERE user_id = $1 OR email = $2', [userId, cleanEmail]);
+        await del('password_reset_tokens', 'DELETE FROM password_reset_tokens WHERE email = $1', [cleanEmail]);
+        await del('pending_signups', 'DELETE FROM pending_signups WHERE email = $1', [cleanEmail]);
+        await del('trial_verifications', 'DELETE FROM trial_verifications WHERE email = $1 OR user_id = $2', [cleanEmail, userId]);
+        await del('workspace_members', 'DELETE FROM workspace_members WHERE user_id = $1 OR workspace_id = $2', [userId, workspaceId]);
+        if (!isDefaultWs) {
+          await del('customers', 'DELETE FROM customers WHERE workspace_id = $1', [workspaceId]);
+          await del('csv_imports', 'DELETE FROM csv_imports WHERE workspace_id = $1', [workspaceId]);
+          await del('retention_actions', 'DELETE FROM retention_actions WHERE workspace_id = $1', [workspaceId]);
+          await del('subscription_payments', 'DELETE FROM subscription_payments WHERE workspace_id = $1 OR user_id = $2', [workspaceId, userId]);
+          await del('subscriptions', 'DELETE FROM subscriptions WHERE workspace_id = $1', [workspaceId]);
+          await del('razorpay_orders', 'DELETE FROM razorpay_orders WHERE workspace_id = $1', [workspaceId]);
+          await del('audit_logs', 'DELETE FROM audit_logs WHERE workspace_id = $1 OR actor_id = $2', [workspaceId, userId]);
+          await del('users', 'DELETE FROM users WHERE id = $1 OR email = $2', [userId, cleanEmail]);
+          await del('workspaces', 'DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+        } else {
+          await del('users', 'DELETE FROM users WHERE id = $1 OR email = $2', [userId, cleanEmail]);
+        }
+        return { deletedTables };
+      }
+
+      const delSqlite = (name: string, sql: string, ...values: any[]) => {
+        const info = sqliteDb!.prepare(sql).run(...values);
+        deletedTables[name] = Number(info.changes || 0);
+      };
+      delSqlite('sessions', 'DELETE FROM sessions WHERE user_id = ? OR email = ?', userId, cleanEmail);
+      delSqlite('password_reset_tokens', 'DELETE FROM password_reset_tokens WHERE email = ?', cleanEmail);
+      delSqlite('pending_signups', 'DELETE FROM pending_signups WHERE email = ?', cleanEmail);
+      delSqlite('trial_verifications', 'DELETE FROM trial_verifications WHERE email = ? OR user_id = ?', cleanEmail, userId);
+      delSqlite('workspace_members', 'DELETE FROM workspace_members WHERE user_id = ? OR workspace_id = ?', userId, workspaceId);
+      if (!isDefaultWs) {
+        delSqlite('customers', 'DELETE FROM customers WHERE workspace_id = ?', workspaceId);
+        delSqlite('csv_imports', 'DELETE FROM csv_imports WHERE workspace_id = ?', workspaceId);
+        delSqlite('retention_actions', 'DELETE FROM retention_actions WHERE workspace_id = ?', workspaceId);
+        delSqlite('subscription_payments', 'DELETE FROM subscription_payments WHERE workspace_id = ? OR user_id = ?', workspaceId, userId);
+        delSqlite('subscriptions', 'DELETE FROM subscriptions WHERE workspace_id = ?', workspaceId);
+        delSqlite('razorpay_orders', 'DELETE FROM razorpay_orders WHERE workspace_id = ?', workspaceId);
+        delSqlite('audit_logs', 'DELETE FROM audit_logs WHERE workspace_id = ? OR actor_id = ?', workspaceId, userId);
+        delSqlite('users', 'DELETE FROM users WHERE id = ? OR email = ?', userId, cleanEmail);
+        delSqlite('workspaces', 'DELETE FROM workspaces WHERE id = ?', workspaceId);
+      } else {
+        delSqlite('users', 'DELETE FROM users WHERE id = ? OR email = ?', userId, cleanEmail);
+      }
+      return { deletedTables };
     }
   },
 

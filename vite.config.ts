@@ -113,6 +113,18 @@ export default defineConfig(({ mode }) => {
       'process.env.VITE_RAZORPAY_KEY_ID': JSON.stringify(razorpayKey),
       'import.meta.env.VITE_RAZORPAY_KEY_ID': JSON.stringify(razorpayKey)
     },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-react': ['react', 'react-dom'],
+            'vendor-firebase': ['firebase/app', 'firebase/auth', 'firebase/firestore'],
+            'vendor-pdf': ['jspdf', 'jspdf-autotable', 'html2canvas'],
+            'vendor-ui': ['lucide-react', 'motion']
+          }
+        }
+      }
+    },
     server: {
       // HMR and WebSocket servers are disabled in AI Studio
       hmr: false,

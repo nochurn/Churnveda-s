@@ -25,8 +25,10 @@ import {
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { authService } from '../services/authService';
-import { fetchAdminAuditLogs, exportCustomers, requestAccountDeletion } from '../services/api';
+import { fetchAdminAuditLogs, exportCustomers, exportAccountData, requestAccountDeletion } from '../services/api';
 import { UserProfile, UserSession } from '../types';
+import { auth as firebaseAuth, db as firestoreDb } from '../lib/firebaseClient';
+import { deleteDoc, doc } from 'firebase/firestore';
 
 interface SecurityViewProps {
   initialTab?: '2fa' | 'sessions' | 'governance' | 'audit';
@@ -251,16 +253,45 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
     }
   };
 
+  const handleExportFullAccount = async () => {
+    try {
+      showToast('Generating complete account JSON export...', 'info');
+      const blob = await exportAccountData();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `churnveda_account_export_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      showToast('Complete account archive downloaded successfully.', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to download account export. Please ensure you are signed in.', 'error');
+    }
+  };
+
   const handleScheduleDelete = async () => {
     const normalized = deleteInput.trim().toUpperCase();
     if (normalized !== 'DELETE CHURNVEDA' && normalized !== 'DELETE NOCHURN' && normalized !== 'DELETE CHURNSHIELD') return;
     setIsDeleting(true);
     try {
+      const fbUser = firebaseAuth.currentUser;
+      if (fbUser) {
+        await deleteDoc(doc(firestoreDb, 'users', fbUser.uid)).catch(() => {});
+      }
       const res = await requestAccountDeletion();
+      if (fbUser) {
+        await fbUser.delete().catch(() => {});
+      }
       setIsDeleting(false);
       setShowDeleteModal(false);
       setDeleteScheduled(true);
-      showToast(res.message || 'Account deletion scheduled (30-day grace period).', 'info');
+      const cleaned = res.servicesCleaned?.length ? ` (${res.servicesCleaned.join(', ')})` : '';
+      showToast(`${res.message || 'Account deleted.'}${cleaned}`, 'info');
+      if (onLoggedOut) {
+        setTimeout(() => onLoggedOut(), 1500);
+      }
     } catch (err: any) {
       setIsDeleting(false);
       showToast(err?.message || 'Failed to schedule account deletion.', 'error');
@@ -738,6 +769,23 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
               <Download className="w-4 h-4 text-blue-900" />
               GDPR Article 20: Data Portability & Complete Export
             </h3>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-blue-50/50 rounded-xl border border-blue-200 text-xs">
+              <div>
+                <span className="font-bold text-gray-900">Download My Complete Account Data (GDPR Art. 15 / India DPDP)</span>
+                <p className="text-gray-600 mt-0.5">
+                  Export your full user profile, workspace settings, customer dataset, retention drafts, billing records, and audit trail as JSON.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleExportFullAccount}
+                className="px-3.5 py-2 bg-blue-900 hover:bg-blue-800 text-white rounded-lg font-bold flex items-center gap-1.5 transition-colors self-start shadow-xs text-xs cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download My Data</span>
+              </button>
+            </div>
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-gray-50 rounded-xl border border-gray-200 text-xs">
               <div>

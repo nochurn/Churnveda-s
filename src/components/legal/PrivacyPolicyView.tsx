@@ -197,30 +197,38 @@ export const PrivacyPolicyView: React.FC<PrivacyPolicyViewProps> = ({ onNavigate
           </p>
         </section>
 
-        {/* Section 5: Data Deletion & Retention Practices */}
+        {/* Section 5: Data Retention, User Rights & Jurisdiction Disclosures */}
         <section className="space-y-3">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg bg-blue-50 text-blue-900 flex items-center justify-center font-bold text-xs">
               5
             </div>
-            <h2 className="text-lg font-bold text-gray-900">Data Deletion & Retention Practices (30-Day SLA)</h2>
+            <h2 className="text-lg font-bold text-gray-900">Retention, Your Privacy Rights &amp; Jurisdiction Notices (India DPDP, EU/UK GDPR, US CCPA)</h2>
           </div>
           <p className="text-xs text-gray-600 leading-relaxed">
-            Customers retain full sovereign control over all data uploaded to Churnveda:
+            Customers and end-users retain clear rights over personal data processed by Churnveda:
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
             <div className="p-3.5 bg-gray-50 border border-gray-200 rounded-xl space-y-1">
-              <strong className="text-gray-900 block">Instant Self-Serve Deletion</strong>
-              <p className="text-gray-600 text-[11px]">
-                You can delete individual accounts, batches of customers, or all sample datasets instantly via the Customers table. Deleted rows are expunged from the live database immediately.
+              <strong className="text-gray-900 block">Retention &amp; 30-Day Backup Purge Rule</strong>
+              <p className="text-gray-600 text-[11px] leading-relaxed">
+                Active account and customer telemetry is kept only while your workspace remains active. Expired password-reset/verification tokens are purged automatically; session cookies expire in 30 days. When you delete your account or customer rows, live database records, workspace file storage, and outbound queues are deleted immediately, and encrypted backups expire within <strong>30 calendar days</strong>.
               </p>
             </div>
             <div className="p-3.5 bg-gray-50 border border-gray-200 rounded-xl space-y-1">
-              <strong className="text-gray-900 block">30-Day Complete Backup Purge SLA</strong>
-              <p className="text-gray-600 text-[11px]">
-                When an account deletion request is triggered via <strong>Settings → Purge Data</strong> or our Data Deletion Request form, all production and database backup archives are permanently overwritten within 30 calendar days.
+              <strong className="text-gray-900 block">Access, Export, Correction &amp; Deletion</strong>
+              <p className="text-gray-600 text-[11px] leading-relaxed">
+                Use <strong>Settings → Security &amp; 2FA → Download My Data</strong> (or <strong>Security → Data Portability</strong>) to export a complete JSON copy of your records, or click <strong>Delete My Account</strong> for immediate live erasure and confirmation email. You may also withdraw analytics consent anytime via <strong>Cookie Settings / Opt-Out</strong> in the footer.
               </p>
             </div>
+          </div>
+          <div className="p-3.5 bg-blue-50/50 border border-blue-200 rounded-xl text-[11px] text-blue-950 space-y-1 leading-relaxed">
+            <p>
+              <strong>We Do Not Sell or Share Personal Data (US CCPA/CPRA):</strong> Churnveda does not sell personal information for monetary value or share personal data for cross-context behavioral advertising.
+            </p>
+            <p>
+              <strong>EU/UK GDPR &amp; India DPDP Act:</strong> Users in the EEA/UK and Data Principals in India may exercise rights to access, correction, erasure, grievance redressal, and consent withdrawal by contacting our Privacy / Grievance Contact below or using self-serve settings. <em>[ASK A LAWYER: Confirm cross-border transfer SCCs, EU/UK Article 27 representative requirement, and India DPDP Grievance Officer details before launch.]</em>
+            </p>
           </div>
         </section>
 
@@ -228,11 +236,12 @@ export const PrivacyPolicyView: React.FC<PrivacyPolicyViewProps> = ({ onNavigate
         <section className="space-y-3 border-t border-gray-100 pt-6">
           <div className="flex items-center gap-2">
             <Building className="w-5 h-5 text-blue-900" aria-hidden="true" />
-            <h2 className="text-lg font-bold text-gray-900">Business Information & Support Contact</h2>
+            <h2 className="text-lg font-bold text-gray-900">Business Information, Grievance Officer &amp; Contact</h2>
           </div>
           <div className="p-4 bg-gray-50 border border-gray-200 rounded-xl text-xs space-y-1.5 text-gray-700">
-            <p><strong>Business Information:</strong> Churnveda is currently not registered as an incorporated company.</p>
-            <p><strong>Support & Inquiries:</strong> <a href="mailto:sharatbuchanalli4@gmail.com" className="text-blue-900 underline">sharatbuchanalli4@gmail.com</a></p>
+            <p><strong>Operating Entity:</strong> Churnveda — <em>[FILL IN / ASK A LAWYER: Registered legal business entity name &amp; incorporation status]</em></p>
+            <p><strong>Physical Mailing Address (CAN-SPAM / Statutory):</strong> <em>[FILL IN: Registered street address, city, state/postal code, country — also set <code>POSTAL_ADDRESS</code> env var]</em></p>
+            <p><strong>Privacy &amp; Grievance Contact:</strong> <a href="mailto:sharatbuchanalli4@gmail.com" className="text-blue-900 underline">sharatbuchanalli4@gmail.com</a> <em>[FILL IN: Dedicated Privacy / Grievance Officer name]</em></p>
             <p><strong>Direct Support Phone:</strong> <a href="tel:+919620262041" className="text-blue-900 underline">+91 96202 62041</a></p>
           </div>
         </section>

@@ -21,6 +21,7 @@ import {
   ONE_TIME_PAYMENT_DISCLOSURE,
   buildRazorpayOneTimeOptions
 } from '../services/razorpayConfig';
+import { ensureRazorpaySdk } from '../services/razorpaySdk';
 
 interface BillingVerifyViewProps {
   onNavigate: (view: string, queryParams?: Record<string, string>) => void;
@@ -76,7 +77,8 @@ export const BillingVerifyView: React.FC<BillingVerifyViewProps> = ({
       }
 
       // 2. Open Razorpay Checkout modal with ALL supported payment methods
-      if (typeof (window as any).Razorpay !== 'undefined') {
+      const sdkReady = await ensureRazorpaySdk();
+      if (sdkReady && typeof (window as any).Razorpay !== 'undefined') {
         const options = buildRazorpayOneTimeOptions({
           keyId: orderRes.keyId || '',
           orderId: orderRes.orderId,

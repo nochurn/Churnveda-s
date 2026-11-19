@@ -223,6 +223,25 @@ export const SecurityTermsView: React.FC<SecurityTermsViewProps> = ({ onNavigate
           </div>
         </section>
 
+        {/* 4. Written Data Breach Response & Notification Plan */}
+        <section className="space-y-4 border-t border-gray-100 pt-8">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-amber-600" aria-hidden="true" />
+            <h2 className="text-lg font-bold text-gray-900">4. Written Data Breach Response &amp; Notification Plan (Draft — Review with a Lawyer)</h2>
+          </div>
+          <div className="p-4 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-700 space-y-2.5 leading-relaxed">
+            <p>
+              <strong>Incident Lead &amp; Decision Authority:</strong> <em>[FILL IN: Founder / Data Protection Lead, sharatbuchanalli4@gmail.com]</em> is responsible for triaging security incidents, revoking compromised keys/sessions, and authorizing regulatory notifications.
+            </p>
+            <ul className="list-disc pl-5 space-y-1">
+              <li><strong>Step 1 — Containment (0–4 hours):</strong> Revoke affected API secrets, invalidate active sessions, isolate affected workspace records, and preserve immutable audit logs.</li>
+              <li><strong>Step 2 — EU/UK GDPR Notification (within 72 hours):</strong> Where a personal data breach is likely to result in a risk to individuals' rights and freedoms, notify the relevant supervisory authority within <strong>72 hours</strong> of becoming aware and notify affected users without undue delay when high risk exists.</li>
+              <li><strong>Step 3 — India DPDP Act / DPDP Rules Notification:</strong> In the event of a personal data breach affecting Indian Data Principals, notify the <strong>Data Protection Board of India</strong> and affected users in the prescribed statutory format and timeline without delay.</li>
+              <li><strong>Step 4 — US State Laws &amp; Workspace Controllers:</strong> Notify B2B customer workspace owners promptly so Controllers can fulfill any state or contractual notice obligations.</li>
+            </ul>
+          </div>
+        </section>
+
         {/* Security Contact Footer */}
         <div className="p-4 bg-gray-50 border border-gray-200 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
           <div>
@@ -231,10 +250,10 @@ export const SecurityTermsView: React.FC<SecurityTermsViewProps> = ({ onNavigate
           </div>
           <div className="flex items-center gap-3">
             <a
-              href="mailto:security@churnveda.com"
+              href="mailto:sharatbuchanalli4@gmail.com"
               className="px-3 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-blue-900"
             >
-              security@churnveda.com
+              sharatbuchanalli4@gmail.com
             </a>
           </div>
         </div>

@@ -29,6 +29,7 @@ import {
   buildRazorpayOneTimeOptions,
   buildRazorpaySubscriptionOptions
 } from '../services/razorpayConfig';
+import { ensureRazorpaySdk } from '../services/razorpaySdk';
 
 import { CENTRAL_PRICING, FOUNDING_OFFER_CONFIG, FoundingOfferPlan } from '../config/pricing';
 
@@ -293,7 +294,8 @@ export const PricingView: React.FC<PricingViewProps> = ({
       }
 
       if (subRes.success && subRes.subscriptionId) {
-        if (typeof (window as any).Razorpay !== 'undefined') {
+        const sdkReady = await ensureRazorpaySdk();
+        if (sdkReady && typeof (window as any).Razorpay !== 'undefined') {
           const options = buildRazorpaySubscriptionOptions({
             keyId: subRes.keyId,
             subscriptionId: subRes.subscriptionId,
@@ -348,7 +350,8 @@ export const PricingView: React.FC<PricingViewProps> = ({
         throw new Error(orderRes.error || 'Failed to initialize Razorpay checkout');
       }
 
-      if (typeof (window as any).Razorpay !== 'undefined') {
+      const sdkReady = await ensureRazorpaySdk();
+      if (sdkReady && typeof (window as any).Razorpay !== 'undefined') {
         const options = buildRazorpayOneTimeOptions({
           keyId: orderRes.keyId,
           orderId: orderRes.orderId,

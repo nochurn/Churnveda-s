@@ -48,7 +48,28 @@ function getFirebaseClientModule() {
   return firebaseClientModulePromise;
 }
 
-async function withFreshFirebaseToken(path: string, init?: RequestInit): Promise<RequestInit | undefined> {
+export function isFirebaseJwtExpired(token?: string | null, bufferSeconds: number = 0): boolean {
+  if (!token || typeof token !== 'string') return false;
+  const clean = token.startsWith('Bearer ') ? token.slice(7).trim() : token.trim();
+  if (!clean.startsWith('ey')) return false;
+  const parts = clean.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const payload = JSON.parse(atob(padded));
+    if (typeof payload?.exp !== 'number') return false;
+    return Date.now() >= (payload.exp - bufferSeconds) * 1000;
+  } catch {
+    return false;
+  }
+}
+
+async function withFreshFirebaseToken(
+  path: string,
+  init?: RequestInit,
+  forceRefresh: boolean = false
+): Promise<RequestInit | undefined> {
   if (typeof window === 'undefined') return init;
   const cleanPath = path.split('?')[0];
   if (PUBLIC_API_PREFIXES.some((prefix) => cleanPath === prefix || cleanPath.startsWith(`${prefix}/`))) {
@@ -57,24 +78,43 @@ async function withFreshFirebaseToken(path: string, init?: RequestInit): Promise
 
   try {
     const { auth: fbAuth } = await getFirebaseClientModule();
-    const currentUser = fbAuth?.currentUser;
-    if (!currentUser) return init;
+    if (typeof (fbAuth as { authStateReady?: () => Promise<void> })?.authStateReady === 'function') {
+      await (fbAuth as { authStateReady: () => Promise<void> }).authStateReady();
+    }
 
     const headers = new Headers(init?.headers || {});
     const existingAuth = headers.get('Authorization') || headers.get('authorization');
+    const existingBearer = existingAuth?.startsWith('Bearer ') ? existingAuth.slice(7).trim() : null;
     const storedToken = getStoredAuthToken();
-    const isUsingFirebaseJwt =
-      !existingAuth ||
-      (existingAuth.startsWith('Bearer ey') && existingAuth.includes('.')) ||
-      (storedToken && storedToken.startsWith('ey') && storedToken.includes('.'));
+    const candidateJwt = existingBearer?.startsWith('ey')
+      ? existingBearer
+      : storedToken?.startsWith('ey')
+      ? storedToken
+      : null;
 
-    if (isUsingFirebaseJwt) {
-      const freshIdToken = await currentUser.getIdToken();
-      if (freshIdToken) {
-        if (storedToken !== freshIdToken) {
-          setStoredAuthToken(freshIdToken);
+    const currentUser = fbAuth?.currentUser;
+    if (currentUser) {
+      const isUsingFirebaseJwt =
+        !existingAuth ||
+        Boolean(existingBearer && existingBearer.startsWith('ey') && existingBearer.includes('.')) ||
+        Boolean(storedToken && storedToken.startsWith('ey') && storedToken.includes('.'));
+
+      if (isUsingFirebaseJwt) {
+        const needsForce = forceRefresh || isFirebaseJwtExpired(candidateJwt, 60);
+        const freshIdToken = await currentUser.getIdToken(needsForce);
+        if (freshIdToken) {
+          if (storedToken !== freshIdToken) {
+            setStoredAuthToken(freshIdToken);
+          }
+          headers.set('Authorization', `Bearer ${freshIdToken}`);
+          return { ...init, headers };
         }
-        headers.set('Authorization', `Bearer ${freshIdToken}`);
+      }
+    } else if (candidateJwt && isFirebaseJwtExpired(candidateJwt, 0)) {
+      // No active Firebase user and the cached JWT is already expired — clear it instead of sending a stale token
+      setStoredAuthToken(null);
+      if (existingBearer && existingBearer === candidateJwt) {
+        headers.delete('Authorization');
         return { ...init, headers };
       }
     }
@@ -91,13 +131,39 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
   const baseUrl = getApiBaseUrl();
   if (typeof input === 'string' && input.startsWith('/api')) {
     const targetUrl = apiUrl(input);
-    const enrichedInit = await withFreshFirebaseToken(input, init);
+    const enrichedInit = await withFreshFirebaseToken(input, init, false);
     const requestInit: RequestInit = {
       ...enrichedInit,
       ...(baseUrl ? { credentials: enrichedInit?.credentials || 'include' } : {})
     };
     try {
-      const response = await nativeFetch(targetUrl, requestInit);
+      let response = await nativeFetch(targetUrl, requestInit);
+
+      // If server rejects with 401 (e.g. auth/id-token-expired due to clock skew or tab wake), force-refresh once and retry
+      const cleanPath = input.split('?')[0];
+      const isPublic = PUBLIC_API_PREFIXES.some((prefix) => cleanPath === prefix || cleanPath.startsWith(`${prefix}/`));
+      if (response.status === 401 && !isPublic && typeof window !== 'undefined') {
+        try {
+          const { auth: fbAuth } = await getFirebaseClientModule();
+          if (fbAuth?.currentUser) {
+            const refreshedInit = await withFreshFirebaseToken(input, init, true);
+            const retryRequestInit: RequestInit = {
+              ...refreshedInit,
+              ...(baseUrl ? { credentials: refreshedInit?.credentials || 'include' } : {})
+            };
+            response = await nativeFetch(targetUrl, retryRequestInit);
+          } else {
+            const authErrHeader = response.headers.get('X-Auth-Error');
+            const stored = getStoredAuthToken();
+            if (authErrHeader === 'id-token-expired' || isFirebaseJwtExpired(stored, 0)) {
+              setStoredAuthToken(null);
+            }
+          }
+        } catch {
+          // fall through to original 401 response
+        }
+      }
+
       const contentType = response.headers.get('content-type') || '';
       const isTransientHtmlGateway =
         contentType.includes('text/html') &&
@@ -555,7 +621,23 @@ export async function fetchRoiMetrics(): Promise<{
   });
 }
 
-export async function requestAccountDeletion(): Promise<{ success: boolean; message: string; scheduledDeletionDate: string }> {
+export async function exportAccountData(): Promise<Blob> {
+  const res = await apiFetch('/api/auth/export-data', {
+    headers: getAuthHeaders()
+  });
+  if (!res.ok) {
+    throw new Error('Failed to download full account data export');
+  }
+  return res.blob();
+}
+
+export async function requestAccountDeletion(): Promise<{
+  success: boolean;
+  message: string;
+  scheduledDeletionDate: string;
+  confirmationEmailSent?: boolean;
+  servicesCleaned?: string[];
+}> {
   const res = await apiFetch('/api/auth/delete-account', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
@@ -1031,27 +1113,7 @@ export async function importCustomersData(payload: {
   validateOnly?: boolean;
   importValidOnly?: boolean;
 }) {
-  let authHeaders = getAuthHeaders({ 'Content-Type': 'application/json' });
-
-  // If Firebase client has an active authenticated user, ensure fresh ID token is attached
-  if (typeof window !== 'undefined') {
-    try {
-      const { auth: fbAuth } = await import('../lib/firebaseClient');
-      if (fbAuth?.currentUser) {
-        const freshIdToken = await fbAuth.currentUser.getIdToken();
-        if (freshIdToken) {
-          localStorage.setItem('cs_auth_token', freshIdToken);
-          authHeaders = {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${freshIdToken}`
-          };
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
+  const authHeaders = getAuthHeaders({ 'Content-Type': 'application/json' });
 
   const res = await apiFetch('/api/customers/import', {
     method: 'POST',
@@ -1604,6 +1666,21 @@ export async function exportCustomers(format: 'csv' | 'json' = 'json'): Promise<
   return res.blob();
 }
 
+export async function submitContactForm(payload: {
+  name: string;
+  email: string;
+  company?: string;
+  message: string;
+  consent: boolean;
+}): Promise<{ success: boolean; ticketId?: string; emailDispatched?: boolean; message?: string; error?: string }> {
+  const res = await apiFetch('/api/contact', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  return await parseJsonResponse(res, 'Failed to submit support message');
+}
+
 export const apiService = {
   fetchHealth,
   fetchCustomers,
@@ -1736,6 +1813,8 @@ export const apiService = {
   fetchRetentionBriefs,
   fetchAdminAuditLogs,
   exportCustomers,
+  exportAccountData,
   fetchInternationalBillingStatus,
-  fetchBillingTransactions
+  fetchBillingTransactions,
+  submitContactForm
 };

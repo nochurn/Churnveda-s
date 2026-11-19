@@ -100,7 +100,7 @@ async function migrate() {
         amount_paise: 275600,
         amount_inr: 2756,
         currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_PLAN_STARTER_MONTHLY || 'plan_TeZlsQOQaeAWAw'
+        razorpay_plan_id: process.env.RAZORPAY_STARTER_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_STARTER_MONTHLY || 'plan_U1vm4YhuBfkHU6'
       },
       {
         id: 'plan_tier_starter_annual',
@@ -110,7 +110,7 @@ async function migrate() {
         amount_paise: 2756200,
         amount_inr: 27562,
         currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_PLAN_STARTER_ANNUAL || 'plan_TeZMQYLVPEtQuj'
+        razorpay_plan_id: process.env.RAZORPAY_STARTER_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_STARTER_YEARLY || process.env.RAZORPAY_PLAN_STARTER_ANNUAL || 'plan_U1vpfqbMX7PrvO'
       },
       {
         id: 'plan_tier_growth_monthly',
@@ -120,7 +120,7 @@ async function migrate() {
         amount_paise: 750800,
         amount_inr: 7508,
         currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_TeZQFjmJoxrnKM'
+        razorpay_plan_id: process.env.RAZORPAY_GROWTH_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_U1vtzGKxsZRAT2'
       },
       {
         id: 'plan_tier_growth_annual',
@@ -130,7 +130,7 @@ async function migrate() {
         amount_paise: 7508200,
         amount_inr: 75082,
         currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_PLAN_GROWTH_ANNUAL || 'plan_TfXxPsAOqPYklF'
+        razorpay_plan_id: process.env.RAZORPAY_GROWTH_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_YEARLY || process.env.RAZORPAY_PLAN_GROWTH_ANNUAL || 'plan_U1vvXZFmhM3XK2'
       },
       {
         id: 'plan_tier_pro_monthly',
@@ -140,7 +140,7 @@ async function migrate() {
         amount_paise: 3316900,
         amount_inr: 33169,
         currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_PLAN_PRO_MONTHLY || 'plan_TeZraPPrYthtEk'
+        razorpay_plan_id: process.env.RAZORPAY_ENTERPRISE_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_ENTERPRISE_MONTHLY || process.env.RAZORPAY_PLAN_PRO_MONTHLY || 'plan_U1vwty43aSFOmP'
       },
       {
         id: 'plan_tier_pro_annual',
@@ -150,7 +150,7 @@ async function migrate() {
         amount_paise: 33169000,
         amount_inr: 331690,
         currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_PLAN_PRO_ANNUAL || 'plan_Tea17dB6H4EHdn'
+        razorpay_plan_id: process.env.RAZORPAY_ENTERPRISE_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_ENTERPRISE_YEARLY || process.env.RAZORPAY_PLAN_PRO_ANNUAL || 'plan_U1w0VddfSIKKQG'
       }
     ];
 

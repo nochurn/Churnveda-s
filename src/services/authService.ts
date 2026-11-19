@@ -12,7 +12,8 @@ import {
   signupUser,
   loginUser,
   getStoredAuthToken,
-  setStoredAuthToken
+  setStoredAuthToken,
+  isFirebaseJwtExpired
 } from './api';
 import { clearFirestoreSyncCache, syncUserAndWorkspaceToFirestore } from './firestoreService';
 
@@ -174,10 +175,32 @@ class AuthService {
         }
       }
 
-      // Validate stored session with backend
-      if (storedToken) {
+      // Determine authoritative startup token: always prefer fresh Firebase token when signed in
+      let activeToken = storedToken;
+      if (fbAuth.currentUser) {
         try {
-          const me = await fetchCurrentUser(storedToken);
+          const freshToken = await fbAuth.currentUser.getIdToken(isFirebaseJwtExpired(storedToken, 60));
+          if (freshToken) {
+            activeToken = freshToken;
+            setStoredAuthToken(freshToken);
+          }
+        } catch {
+          // keep activeToken fallback
+        }
+      } else if (activeToken && isFirebaseJwtExpired(activeToken, 0)) {
+        // Stored Firebase JWT is expired and no Firebase user session exists — clear stale state immediately
+        activeToken = null;
+        this.currentUser = null;
+        setStoredAuthToken(null);
+        if (hasStorage) {
+          localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
+        }
+      }
+
+      // Validate active session with backend
+      if (activeToken) {
+        try {
+          const me = await fetchCurrentUser(activeToken);
           if (me?.user) {
             this.currentUser = me.user;
             this.persistCurrentUser();
@@ -288,6 +311,21 @@ class AuthService {
           }
         }
       });
+
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible' && fbAuth.currentUser) {
+            const stored = getStoredAuthToken();
+            const needsForce = isFirebaseJwtExpired(stored, 60);
+            fbAuth.currentUser
+              .getIdToken(needsForce)
+              .then((idToken) => {
+                if (idToken) setStoredAuthToken(idToken);
+              })
+              .catch(() => {});
+          }
+        });
+      }
     } catch (err) {
       console.warn('Firebase auth listener error:', err);
     }

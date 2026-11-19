@@ -1,5 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Cookie, Shield, Check, X, Settings2 } from 'lucide-react';
+import { Cookie, Settings2 } from 'lucide-react';
+import {
+  COOKIE_CONSENT_KEY,
+  initAnalytics,
+  revokeAnalyticsConsent
+} from '../../utils/analytics';
 
 export interface CookiePreferences {
   essential: boolean; // Always true
@@ -9,7 +14,11 @@ export interface CookiePreferences {
   timestamp: string;
 }
 
-const COOKIE_CONSENT_KEY = 'nochurn_cookie_consent_v1';
+export function openCookieSettings(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('churnveda:open-cookie-settings'));
+  }
+}
 
 export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void }> = ({ onNavigate }) => {
   const [showBanner, setShowBanner] = useState<boolean>(false);
@@ -28,12 +37,24 @@ export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void
       if (!stored) {
         setShowBanner(true);
       } else {
-        const parsed = JSON.parse(stored);
+        const parsed = JSON.parse(stored) as CookiePreferences;
         setPreferences(parsed);
+        if (parsed.analytics) {
+          initAnalytics();
+        } else {
+          revokeAnalyticsConsent();
+        }
       }
     } catch {
       setShowBanner(true);
     }
+
+    const handleOpenSettings = () => {
+      setShowBanner(true);
+      setShowPreferences(true);
+    };
+    window.addEventListener('churnveda:open-cookie-settings', handleOpenSettings);
+    return () => window.removeEventListener('churnveda:open-cookie-settings', handleOpenSettings);
   }, []);
 
   const saveConsent = (prefs: CookiePreferences) => {
@@ -42,6 +63,11 @@ export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void
       setPreferences(prefs);
       setShowBanner(false);
       setShowPreferences(false);
+      if (prefs.analytics) {
+        initAnalytics();
+      } else {
+        revokeAnalyticsConsent();
+      }
     } catch {
       setShowBanner(false);
     }
@@ -51,7 +77,7 @@ export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void
     saveConsent({
       essential: true,
       functional: true,
-      analytics: false, // No marketing/tracking trackers exist in Churnveda
+      analytics: true,
       marketing: false,
       timestamp: new Date().toISOString()
     });
@@ -71,6 +97,7 @@ export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void
     saveConsent({
       ...preferences,
       essential: true,
+      marketing: false,
       timestamp: new Date().toISOString()
     });
   };
@@ -87,15 +114,16 @@ export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void
           <div className="flex items-center gap-2">
             <Cookie className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
             <h2 className="text-sm font-bold text-white tracking-tight">
-              Privacy & Cookie Choices at Churnveda
+              Privacy &amp; Cookie Choices at Churnveda
             </h2>
           </div>
           <p className="text-xs text-slate-300 leading-relaxed">
-            We use strictly essential cookies for secure login and CSRF defense. We never use third-party behavioral ad trackers or sell data. Non-essential cookies and functional storage are blocked unless you consent. Review our{' '}
+            We use strictly essential cookies for login and CSRF protection. Optional analytics (Google Analytics 4) and UI preference storage are{' '}
+            <strong className="text-white">blocked by default</strong> until you click Accept. We never run ad pixels or sell your data. Review our{' '}
             <button
               type="button"
               onClick={() => onNavigate?.('cookies')}
-              className="text-blue-300 underline hover:text-blue-200 font-semibold focus:outline-hidden focus:ring-2 focus:ring-blue-400 rounded-xs"
+              className="text-blue-300 underline hover:text-blue-200 font-semibold focus:outline-hidden focus:ring-2 focus:ring-blue-400 rounded-xs cursor-pointer"
             >
               Cookie Policy
             </button>{' '}
@@ -103,7 +131,7 @@ export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void
             <button
               type="button"
               onClick={() => onNavigate?.('privacy')}
-              className="text-blue-300 underline hover:text-blue-200 font-semibold focus:outline-hidden focus:ring-2 focus:ring-blue-400 rounded-xs"
+              className="text-blue-300 underline hover:text-blue-200 font-semibold focus:outline-hidden focus:ring-2 focus:ring-blue-400 rounded-xs cursor-pointer"
             >
               Privacy Policy
             </button>
@@ -115,7 +143,7 @@ export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void
           <button
             type="button"
             onClick={handleRejectNonEssential}
-            className="flex-1 lg:flex-none px-3.5 py-2 text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl transition-colors focus:outline-hidden focus:ring-2 focus:ring-slate-400 cursor-pointer text-center"
+            className="flex-1 lg:flex-none px-4 py-2 text-xs font-bold text-white bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-xl transition-colors focus:outline-hidden focus:ring-2 focus:ring-slate-400 cursor-pointer text-center"
           >
             Reject Non-Essential
           </button>
@@ -134,7 +162,7 @@ export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void
             onClick={handleAcceptAll}
             className="flex-1 lg:flex-none px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-colors shadow-sm focus:outline-hidden focus:ring-2 focus:ring-blue-300 cursor-pointer text-center"
           >
-            Accept Necessary & Functional
+            Accept All
           </button>
         </div>
       </div>
@@ -167,22 +195,35 @@ export const CookieConsentBanner: React.FC<{ onNavigate?: (view: string) => void
                 />
               </div>
               <label htmlFor="cookie-pref-functional" className="text-[11px] text-slate-300 block cursor-pointer">
-                Remembers UI theme layout, table density, and column sorting preferences across sessions.
+                Remembers UI layout density and column sorting preferences across sessions.
               </label>
             </div>
 
-            <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700 space-y-1 opacity-75">
+            <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700 space-y-1">
               <div className="flex items-center justify-between">
-                <span className="font-bold text-white">Marketing & Pixels</span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase bg-slate-900 px-2 py-0.5 rounded border border-slate-700">None Used</span>
+                <span className="font-bold text-white">Analytics (Google Analytics 4)</span>
+                <input
+                  type="checkbox"
+                  id="cookie-pref-analytics"
+                  checked={preferences.analytics}
+                  onChange={(e) => setPreferences(p => ({ ...p, analytics: e.target.checked }))}
+                  className="rounded border-slate-600 text-blue-600 focus:ring-blue-400 cursor-pointer"
+                />
               </div>
-              <p className="text-[11px] text-slate-400">
-                Churnveda never embeds third-party marketing retargeting pixels, Facebook Pixels, or cross-site tracking beacons.
-              </p>
+              <label htmlFor="cookie-pref-analytics" className="text-[11px] text-slate-300 block cursor-pointer">
+                Helps us understand page visits without ads or cross-site tracking. Blocked unless opted in.
+              </label>
             </div>
           </div>
 
-          <div className="flex justify-end pt-2">
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={handleRejectNonEssential}
+              className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 rounded-lg text-xs font-semibold focus:outline-hidden focus:ring-2 focus:ring-slate-400 cursor-pointer"
+            >
+              Reject Non-Essential
+            </button>
             <button
               type="button"
               onClick={handleSaveCustom}

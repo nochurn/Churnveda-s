@@ -13,19 +13,50 @@ import {
   Trash2,
   Check,
   AlertTriangle,
-  Phone
+  Phone,
+  MessageCircle
 } from 'lucide-react';
 import { apiService } from '../../services/api';
+import { openCookieSettings } from './CookieConsentBanner';
 
-export type LegalPageKey = 'terms' | 'dpa' | 'cookies' | 'refund' | 'deletion' | 'acceptable-use' | 'contact' | 'help';
+export type LegalPageKey = 'terms' | 'dpa' | 'cookies' | 'refund' | 'deletion' | 'acceptable-use' | 'contact' | 'help' | 'unsubscribe';
 
 interface LegalPagesViewProps {
   page: LegalPageKey;
+  initialEmail?: string;
   onNavigate: (view: string) => void;
   onShowToast: (message: string, type?: 'success' | 'info' | 'error') => void;
 }
 
-export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate, onShowToast }) => {
+export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, initialEmail = '', onNavigate, onShowToast }) => {
+  // Unsubscribe State
+  const [unsubEmail, setUnsubEmail] = useState(initialEmail);
+  const [unsubDone, setUnsubDone] = useState(false);
+  const [isUnsubscribing, setIsUnsubscribing] = useState(false);
+
+  const handleUnsubscribeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = unsubEmail.trim().toLowerCase();
+    if (!cleaned || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned)) {
+      onShowToast('Please enter a valid email address.', 'error');
+      return;
+    }
+    setIsUnsubscribing(true);
+    try {
+      const resp = await fetch('/api/communications/unsubscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: cleaned, channel: 'email' })
+      });
+      if (!resp.ok) throw new Error('Unsubscribe request failed');
+      setUnsubDone(true);
+      onShowToast(`${cleaned} has been unsubscribed.`, 'success');
+    } catch {
+      onShowToast('Failed to process unsubscribe request. Please try again.', 'error');
+    } finally {
+      setIsUnsubscribing(false);
+    }
+  };
   // Contact Form State
   const [contactName, setContactName] = useState('');
   const [contactEmail, setContactEmail] = useState('');
@@ -33,6 +64,8 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
   const [contactMessage, setContactMessage] = useState('');
   const [contactConsent, setContactConsent] = useState(false);
   const [contactSubmitted, setContactSubmitted] = useState(false);
+  const [contactTicketId, setContactTicketId] = useState<string | null>(null);
+  const [isSubmittingContact, setIsSubmittingContact] = useState(false);
 
   // Deletion Request Form State
   const [deleteEmail, setDeleteEmail] = useState('');
@@ -41,14 +74,29 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
   const [deleteSubmitted, setDeleteSubmitted] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  const handleContactSubmit = (e: React.FormEvent) => {
+  const handleContactSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!contactConsent) {
       onShowToast('Please check the consent box to submit your inquiry.', 'error');
       return;
     }
-    setContactSubmitted(true);
-    onShowToast('Support ticket dispatched. Our team responds within 2 business days.', 'success');
+    setIsSubmittingContact(true);
+    try {
+      const res = await apiService.submitContactForm({
+        name: contactName.trim(),
+        email: contactEmail.trim(),
+        company: contactCompany.trim(),
+        message: contactMessage.trim(),
+        consent: contactConsent
+      });
+      setContactTicketId(res.ticketId || null);
+      setContactSubmitted(true);
+      onShowToast(res.message || 'Support ticket dispatched. Our team responds within 2 business days.', 'success');
+    } catch (err: any) {
+      onShowToast(err?.message || 'Failed to send message. Please email sharatbuchanalli4@gmail.com directly.', 'error');
+    } finally {
+      setIsSubmittingContact(false);
+    }
   };
 
   const handleDeleteRequestSubmit = async (e: React.FormEvent) => {
@@ -185,7 +233,7 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
                   New subscribers receive a 14-day free trial on selected plans. A $1 nominal card authorization is utilized to verify account legitimacy and prevent automated registration abuse.
                 </p>
                 <p>
-                  Subscription Billing: Subscriptions renew automatically at the end of each billing cycle (monthly or annual) at the clear advertised pricing ($49/mo Starter, $149/mo Growth, $499/mo Enterprise). No hidden charges or automatic tier upsells apply.
+                  Subscription Billing: Subscriptions renew automatically at the end of each billing cycle (monthly or annual) at the clear advertised pricing ($49/mo Starter, $149/mo Growth, $349/mo Enterprise; Founding Offer $29/mo Starter & $79/mo Growth). No hidden charges or automatic tier upsells apply.
                 </p>
               </section>
 
@@ -210,6 +258,18 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
                 <h2 className="text-sm font-bold text-gray-900">6. Limitation of Liability</h2>
                 <p>
                   In no event shall Churnveda's aggregate liability exceed the total amounts actually paid by Customer in the twelve (12) months preceding the incident giving rise to liability.
+                </p>
+              </section>
+
+              <section className="space-y-2">
+                <h2 className="text-sm font-bold text-gray-900">7. User-Uploaded Files, Content Reporting &amp; Copyright / DMCA Takedown</h2>
+                <p>
+                  Workspace administrators may upload customer telemetry CSV files and custom outreach copy. You represent that you have all lawful rights to upload such materials and that they do not infringe third-party intellectual property or privacy rights.
+                </p>
+                <p>
+                  <strong>Reporting Abuse &amp; Copyright Takedowns:</strong> To report abusive content, unauthorized personal data uploads, or submit a copyright/DMCA takedown notice, email{' '}
+                  <a href="mailto:sharatbuchanalli4@gmail.com" className="text-blue-900 underline font-semibold">sharatbuchanalli4@gmail.com</a>{' '}
+                  with (a) identification of the material or copyrighted work, (b) workspace or URL context, (c) your contact information, and (d) a good-faith statement of authority. Verified notices are reviewed within 2 business days, and infringing content is removed or disabled promptly. <em>[Ask a lawyer to designate a registered DMCA agent if serving US users commercially.]</em>
                 </p>
               </section>
             </div>
@@ -299,38 +359,47 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
                   </thead>
                   <tbody className="divide-y divide-gray-200 text-gray-600">
                     <tr>
-                      <td className="p-3 font-mono font-bold text-gray-900">churnveda_session (nochurn_session)</td>
-                      <td className="p-3">Encrypted user authentication session token</td>
+                      <td className="p-3 font-mono font-bold text-gray-900">nochurn_session (churnveda_session)</td>
+                      <td className="p-3">HTTP-only encrypted user authentication session token</td>
                       <td className="p-3">Session or 30 days</td>
                       <td className="p-3 text-blue-900 font-semibold">Strictly Necessary</td>
                     </tr>
                     <tr>
-                      <td className="p-3 font-mono font-bold text-gray-900">churnveda_csrf</td>
+                      <td className="p-3 font-mono font-bold text-gray-900">nochurn_csrf</td>
                       <td className="p-3">Cross-Site Request Forgery security mitigation</td>
                       <td className="p-3">Session</td>
                       <td className="p-3 text-blue-900 font-semibold">Strictly Necessary</td>
                     </tr>
                     <tr>
-                      <td className="p-3 font-mono font-bold text-gray-900">churnveda_cookie_consent_v1</td>
-                      <td className="p-3">Stores your cookie preferences (accept/reject non-essential)</td>
-                      <td className="p-3">1 Year</td>
+                      <td className="p-3 font-mono font-bold text-gray-900">nochurn_cookie_consent_v1 (localStorage)</td>
+                      <td className="p-3">Stores your cookie choices (Accept vs. Reject Non-Essential)</td>
+                      <td className="p-3">Persistent until cleared</td>
                       <td className="p-3 text-emerald-700 font-semibold">Strictly Necessary</td>
                     </tr>
                     <tr>
-                      <td className="p-3 font-mono font-bold text-gray-900">churnveda_ui_density</td>
-                      <td className="p-3">Stores user preference for UI layout density and column sort</td>
-                      <td className="p-3">1 Year</td>
-                      <td className="p-3 text-emerald-700 font-semibold">Functional</td>
+                      <td className="p-3 font-mono font-bold text-gray-900">_ga, _ga_* (Google Analytics 4)</td>
+                      <td className="p-3">Aggregated traffic &amp; page-view telemetry (anonymize_ip enabled). Blocked strictly until you click Accept.</td>
+                      <td className="p-3">Up to 13 months (purged immediately on Reject/Withdraw)</td>
+                      <td className="p-3 text-amber-800 font-semibold">Optional Analytics (Consent Gated)</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
 
-              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 space-y-1">
-                <span className="font-bold text-gray-900 block">No Third-Party Advertising Pixels</span>
-                <p className="text-[11px] text-gray-600">
-                  Churnveda never places third-party behavioral advertising cookies, Meta/Facebook Pixels, Google Ads remarketing tags, or cross-site tracking beacons on your workspace.
-                </p>
+              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <span className="font-bold text-gray-900 block">No Third-Party Advertising Pixels or Session Replay</span>
+                  <p className="text-[11px] text-gray-600">
+                    Churnveda never loads Meta/Facebook Pixels, Google Ads remarketing tags, Hotjar/Clarity session replay, or keystroke loggers. You can withdraw or update analytics consent at any time.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={openCookieSettings}
+                  className="px-3.5 py-2 bg-blue-900 hover:bg-blue-800 text-white rounded-lg font-bold text-xs shrink-0 cursor-pointer"
+                >
+                  Change Cookie Preferences
+                </button>
               </div>
             </div>
           </>
@@ -612,6 +681,22 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
                       <a href="tel:+919620262041" className="text-blue-900 underline block">+91 96202 62041</a>
                     </div>
                   </div>
+
+                  <a
+                    href="https://wa.me/919620262041?text=Hi%20Churnveda%20team%2C%20I%20would%20like%20help%20with%20my%20account."
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between gap-3 p-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-xs transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <MessageCircle className="w-5 h-5 shrink-0" aria-hidden="true" />
+                      <div>
+                        <strong className="block text-xs font-bold">Chat on WhatsApp</strong>
+                        <span className="text-[11px] text-emerald-100 block">Instant founder support (+91 96202 62041)</span>
+                      </div>
+                    </div>
+                    <span className="text-xs font-bold bg-white/15 px-2.5 py-1 rounded-lg">Open WhatsApp</span>
+                  </a>
                 </div>
               </div>
 
@@ -702,9 +787,10 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
 
                     <button
                       type="submit"
-                      className="w-full py-2.5 px-3 bg-blue-900 text-white rounded-lg font-bold text-xs hover:bg-blue-800 transition-colors shadow-2xs focus:outline-hidden focus:ring-2 focus:ring-blue-400 cursor-pointer"
+                      disabled={isSubmittingContact}
+                      className="w-full py-2.5 px-3 bg-blue-900 text-white rounded-lg font-bold text-xs hover:bg-blue-800 disabled:opacity-60 transition-colors shadow-2xs focus:outline-hidden focus:ring-2 focus:ring-blue-400 cursor-pointer"
                     >
-                      Send Message
+                      {isSubmittingContact ? 'Sending Message...' : 'Send Message'}
                     </button>
                   </form>
                 ) : (
@@ -712,7 +798,7 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
                     <CheckCircle2 className="w-8 h-8 text-emerald-600 mx-auto" aria-hidden="true" />
                     <h3 className="font-bold text-emerald-950 text-sm">Message Received!</h3>
                     <p className="text-emerald-800 text-xs">
-                      Thank you for contacting Churnveda. A customer engineer will reach out to you within 2 business days.
+                      Thank you for contacting Churnveda{contactTicketId ? ` (Ticket ${contactTicketId})` : ''}. Our team will reach out to you within 2 business days.
                     </p>
                   </div>
                 )}
@@ -754,6 +840,56 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, onNavigate
                 </p>
               </div>
             </div>
+          </>
+        )}
+
+        {/* 9. EMAIL UNSUBSCRIBE */}
+        {page === 'unsubscribe' && (
+          <>
+            <div className="border-b border-gray-200 pb-6">
+              <div className="inline-flex items-center gap-2 px-3 py-1 bg-blue-50 text-blue-900 rounded-full text-xs font-bold mb-3">
+                <Mail className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>CAN-SPAM &amp; DPDP Communication Preferences</span>
+              </div>
+              <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight">Email Unsubscribe</h1>
+              <p className="text-xs text-gray-600 mt-2">Immediately opt out from outbound retention emails sent through Churnveda</p>
+            </div>
+
+            {!unsubDone ? (
+              <form onSubmit={handleUnsubscribeSubmit} className="max-w-md space-y-4 text-xs">
+                <div>
+                  <label htmlFor="unsub-email" className="block font-semibold text-gray-700 mb-1">
+                    Email Address to Unsubscribe
+                  </label>
+                  <input
+                    id="unsub-email"
+                    type="email"
+                    required
+                    value={unsubEmail}
+                    onChange={(e) => setUnsubEmail(e.target.value)}
+                    placeholder="name@company.com"
+                    className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-900"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isUnsubscribing}
+                  className="px-4 py-2.5 bg-blue-900 hover:bg-blue-800 disabled:opacity-50 text-white rounded-lg font-bold cursor-pointer"
+                >
+                  {isUnsubscribing ? 'Processing...' : 'Confirm Unsubscribe'}
+                </button>
+              </form>
+            ) : (
+              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-xs space-y-1">
+                <div className="flex items-center gap-2 font-bold text-emerald-950">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>You have been unsubscribed</span>
+                </div>
+                <p className="text-emerald-800">
+                  <strong>{unsubEmail}</strong> is blocked from all future Churnveda outbound campaign emails.
+                </p>
+              </div>
+            )}
           </>
         )}
       </div>

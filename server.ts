@@ -45,7 +45,10 @@ import {
   getOutboundQueueStatus,
   getQueueItem,
   listQueueItems,
-  startOutboundQueueRunner
+  startOutboundQueueRunner,
+  markEmailUnsubscribed,
+  markPhoneOptedOut,
+  removeWorkspaceQueueItems
 } from './server/outboundQueue.ts';
 import {
   executeDailyRetentionScan,
@@ -103,6 +106,85 @@ const PORT = resolveServerPort();
 app.disable('x-powered-by');
 
 app.use(cookieParser());
+
+// ----------------------------------------------------
+// 0. HTTP GZIP COMPRESSION FOR FAST MOBILE LOADING
+// ----------------------------------------------------
+app.use((req, res, next) => {
+  if (req.method !== 'GET') return next();
+  if (req.path.endsWith('.zip') || req.path.includes('/download/')) return next();
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  if (!acceptEncoding.includes('gzip')) return next();
+
+  const origWrite = res.write.bind(res);
+  const origEnd = res.end.bind(res);
+  const chunks: Buffer[] = [];
+  let decided = false;
+  let shouldCompress = false;
+
+  const toBuffer = (chunk: unknown, encoding?: unknown): Buffer => {
+    if (Buffer.isBuffer(chunk)) return chunk;
+    if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+    const enc = (typeof encoding === 'string' ? encoding : 'utf8') as BufferEncoding;
+    return Buffer.from(String(chunk), enc);
+  };
+
+  const evaluateCompressibility = () => {
+    if (decided) return;
+    decided = true;
+    if (res.getHeader('Content-Encoding') || res.statusCode === 204 || res.statusCode === 304) {
+      shouldCompress = false;
+      return;
+    }
+    const ct = String(res.getHeader('Content-Type') || '').toLowerCase();
+    shouldCompress =
+      ct.includes('text/') ||
+      ct.includes('javascript') ||
+      ct.includes('json') ||
+      ct.includes('xml') ||
+      ct.includes('svg');
+  };
+
+  (res as any).write = function (chunk: any, encoding?: any, cb?: any) {
+    evaluateCompressibility();
+    if (!shouldCompress) {
+      return origWrite(chunk, encoding, cb);
+    }
+    if (chunk) {
+      chunks.push(toBuffer(chunk, encoding));
+    }
+    if (typeof encoding === 'function') encoding();
+    else if (typeof cb === 'function') cb();
+    return true;
+  };
+
+  (res as any).end = function (chunk?: any, encoding?: any, cb?: any) {
+    evaluateCompressibility();
+    if (!shouldCompress) {
+      return origEnd(chunk, encoding, cb);
+    }
+    if (chunk && typeof chunk !== 'function') {
+      chunks.push(toBuffer(chunk, encoding));
+    }
+    const callback = typeof chunk === 'function' ? chunk : typeof encoding === 'function' ? encoding : typeof cb === 'function' ? cb : undefined;
+    const raw = Buffer.concat(chunks);
+    if (raw.length < 1024) {
+      return origEnd(raw, callback);
+    }
+    zlib.gzip(raw, (err, compressed) => {
+      if (err) {
+        return origEnd(raw, callback);
+      }
+      res.removeHeader('Content-Length');
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Vary', 'Accept-Encoding');
+      return origEnd(compressed, callback);
+    });
+    return res;
+  };
+
+  next();
+});
 
 // ----------------------------------------------------
 // 1. HTTPS EVERYWHERE ENFORCEMENT (Area 15)
@@ -187,10 +269,10 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
-  // CSP allowing Razorpay, Firebase, Google Identity, Cloudflare Turnstile, and Vite preview
+  // CSP allowing Razorpay, Firebase, Google Identity, Google Analytics, Cloudflare Turnstile, and Vite preview
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://checkout.razorpay.com https://api.razorpay.com https://challenges.cloudflare.com https://apis.google.com https://*.firebaseapp.com; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://api.razorpay.com https://api.resend.com https://graph.facebook.com https://challenges.cloudflare.com https://www.google.com wss: ws:; frame-src 'self' https://api.razorpay.com https://challenges.cloudflare.com https://*.firebaseapp.com https://accounts.google.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; object-src 'none'; base-uri 'self';"
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://checkout.razorpay.com https://api.razorpay.com https://challenges.cloudflare.com https://apis.google.com https://*.firebaseapp.com https://www.googletagmanager.com; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://api.razorpay.com https://api.resend.com https://graph.facebook.com https://challenges.cloudflare.com https://www.google.com https://www.google-analytics.com https://*.google-analytics.com https://*.analytics.google.com wss: ws:; frame-src 'self' https://api.razorpay.com https://challenges.cloudflare.com https://*.firebaseapp.com https://accounts.google.com; img-src 'self' data: blob: https: https://www.google-analytics.com; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; object-src 'none'; base-uri 'self';"
   );
 
   // Set HSTS only when served over HTTPS
@@ -316,11 +398,53 @@ const cronScanLimiter = createRateLimiter({
 });
 
 // ----------------------------------------------------
-// PUBLIC SEO ASSETS: ROBOTS.TXT & SITEMAP.XML (Check 9)
+// PUBLIC SEO ASSETS: ROBOTS.TXT, SITEMAP.XML & OG INJECTION
 // ----------------------------------------------------
+function resolvePublicBaseUrl(req: express.Request): string {
+  const configured = (process.env.APP_URL || process.env.VITE_SITE_URL || '').trim().replace(/\/+$/, '');
+  if (configured && configured.startsWith('http')) {
+    return configured;
+  }
+  const host = req.get('x-forwarded-host') || req.get('host') || 'churnveda.com';
+  const protoHeader = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const isTls = req.secure || protoHeader === 'https' || host.endsWith('.run.app') || host.endsWith('.web.app');
+  const proto = isTls ? 'https' : 'http';
+  return `${proto}://${host}`;
+}
+
+function injectSeoAndAnalytics(html: string, req: express.Request): string {
+  const baseUrl = resolvePublicBaseUrl(req);
+  const cleanPath = req.path === '/' ? '/' : req.path.replace(/\/+$/, '');
+  const canonicalUrl = `${baseUrl}${cleanPath}`;
+  const ogImageUrl = `${baseUrl}/og-image.jpg`;
+
+  let output = html
+    .replace(/<link rel="canonical" href="[^"]*"\s*\/?>/i, `<link rel="canonical" href="${canonicalUrl}" />`)
+    .replace(/<meta property="og:image" content="[^"]*"\s*\/?>/i, `<meta property="og:image" content="${ogImageUrl}" />\n    <meta property="og:url" content="${canonicalUrl}" />`)
+    .replace(/<meta name="twitter:image" content="[^"]*"\s*\/?>/i, `<meta name="twitter:image" content="${ogImageUrl}" />`);
+
+  const extraHeadTags: string[] = [];
+  const gscVerification = (process.env.GOOGLE_SITE_VERIFICATION || '').trim();
+  if (gscVerification) {
+    extraHeadTags.push(`<meta name="google-site-verification" content="${gscVerification.replace(/"/g, '')}" />`);
+  }
+
+  const gaId = (process.env.GA_MEASUREMENT_ID || process.env.VITE_GA_MEASUREMENT_ID || '').trim();
+  if (gaId && /^G-[A-Z0-9]+$/i.test(gaId)) {
+    // Only pass the Measurement ID; gtag.js is strictly consent-gated client-side in analytics.ts
+    extraHeadTags.push(
+      `<script>window.__CHURNVEDA_GA_ID__=${JSON.stringify(gaId)};</script>`
+    );
+  }
+
+  if (extraHeadTags.length > 0) {
+    output = output.replace('</head>', `    ${extraHeadTags.join('\n    ')}\n  </head>`);
+  }
+  return output;
+}
+
 app.get('/robots.txt', (req, res) => {
-  const host = req.get('host') || 'churnveda.com';
-  const proto = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+  const baseUrl = resolvePublicBaseUrl(req);
   res.type('text/plain');
   res.send(`User-agent: *
 Allow: /
@@ -328,6 +452,8 @@ Allow: /pricing
 Allow: /privacy
 Allow: /terms
 Allow: /security
+Allow: /contact
+Allow: /help
 Disallow: /api/
 Disallow: /dashboard
 Disallow: /customers
@@ -335,14 +461,12 @@ Disallow: /messages
 Disallow: /settings
 Disallow: /admin
 
-Sitemap: ${proto}://${host}/sitemap.xml
+Sitemap: ${baseUrl}/sitemap.xml
 `);
 });
 
 app.get('/sitemap.xml', (req, res) => {
-  const host = req.get('host') || 'churnveda.com';
-  const proto = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
-  const baseUrl = `${proto}://${host}`;
+  const baseUrl = resolvePublicBaseUrl(req);
   const now = new Date().toISOString().split('T')[0];
 
   res.type('application/xml');
@@ -361,6 +485,24 @@ app.get('/sitemap.xml', (req, res) => {
     <priority>0.9</priority>
   </url>
   <url>
+    <loc>${baseUrl}/security</loc>
+    <lastmod>${now}</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>${baseUrl}/contact</loc>
+    <lastmod>${now}</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>${baseUrl}/help</loc>
+    <lastmod>${now}</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+  </url>
+  <url>
     <loc>${baseUrl}/privacy</loc>
     <lastmod>${now}</lastmod>
     <changefreq>monthly</changefreq>
@@ -371,12 +513,6 @@ app.get('/sitemap.xml', (req, res) => {
     <lastmod>${now}</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.5</priority>
-  </url>
-  <url>
-    <loc>${baseUrl}/security</loc>
-    <lastmod>${now}</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.6</priority>
   </url>
 </urlset>`);
 });
@@ -432,7 +568,91 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true, limit: '80mb' }));
 
-// Validate Supabase environment on startup
+// Real Contact / Support Inquiry Endpoint
+interface ContactSubmission {
+  id: string;
+  name: string;
+  email: string;
+  company: string;
+  message: string;
+  createdAt: string;
+  emailDispatched: boolean;
+}
+const contactSubmissions: ContactSubmission[] = [];
+
+app.post('/api/contact', publicFormLimiter, async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim().slice(0, 120);
+    const email = String(req.body?.email || '').trim().toLowerCase().slice(0, 160);
+    const company = String(req.body?.company || '').trim().slice(0, 120);
+    const message = String(req.body?.message || '').trim().slice(0, 3000);
+    const consent = Boolean(req.body?.consent);
+
+    if (!name || name.length < 2) {
+      return res.status(400).json({ success: false, error: 'Please enter your name.' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid work email address.' });
+    }
+    if (!message || message.length < 5) {
+      return res.status(400).json({ success: false, error: 'Please enter a message describing how we can help.' });
+    }
+    if (!consent) {
+      return res.status(400).json({ success: false, error: 'Please check the consent box before submitting.' });
+    }
+
+    const ticketId = `CV-${Date.now().toString(36).toUpperCase()}`;
+    const supportRecipient = (process.env.CONTACT_NOTIFICATION_EMAIL || 'sharatbuchanalli4@gmail.com').trim();
+    const resendKey = (process.env.RESEND_API_KEY || '').trim();
+    const resendFrom = (process.env.RESEND_FROM_EMAIL || 'Churnveda <onboarding@resend.dev>').trim();
+
+    let emailDispatched = false;
+    if (resendKey) {
+      try {
+        const emailResp = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${resendKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            from: resendFrom,
+            to: [supportRecipient],
+            reply_to: email,
+            subject: `[Churnveda Support ${ticketId}] New inquiry from ${name}${company ? ` (${company})` : ''}`,
+            text: `Ticket: ${ticketId}\nName: ${name}\nEmail: ${email}\nCompany: ${company || 'N/A'}\n\nMessage:\n${message}`
+          })
+        });
+        emailDispatched = emailResp.ok;
+      } catch (mailErr: any) {
+        console.warn('[Contact Form] Resend dispatch skipped:', mailErr?.message || 'error');
+      }
+    }
+
+    contactSubmissions.unshift({
+      id: ticketId,
+      name,
+      email,
+      company,
+      message,
+      createdAt: new Date().toISOString(),
+      emailDispatched
+    });
+    if (contactSubmissions.length > 200) contactSubmissions.pop();
+
+    console.log(`[Contact Form] Recorded ticket ${ticketId} from ${email} (emailDispatched=${emailDispatched})`);
+    return res.json({
+      success: true,
+      ticketId,
+      emailDispatched,
+      message: `Support ticket ${ticketId} received. Our team responds within 2 business days.`
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: 'Failed to submit inquiry. Please try again.' });
+  }
+});
+
+// Validate auth environment on startup
 const serverAuthConfig = getValidatedAuthConfig();
 
 
@@ -888,6 +1108,14 @@ async function resolveAuthUser(req: express.Request): Promise<DbUser | null> {
       try {
         decodedToken = await firebaseAdminAuth.verifyIdToken(token, true);
       } catch (revocationCheckErr: any) {
+        const errCode = revocationCheckErr?.code || '';
+        if (
+          errCode === 'auth/id-token-expired' ||
+          errCode === 'auth/id-token-revoked' ||
+          errCode === 'auth/argument-error'
+        ) {
+          throw revocationCheckErr;
+        }
         // Fall back to cryptographic verification without revocation check if IAM credentials are not configured for admin user lookup
         decodedToken = await firebaseAdminAuth.verifyIdToken(token, false);
       }
@@ -960,7 +1188,11 @@ async function resolveAuthUser(req: express.Request): Promise<DbUser | null> {
         return user || null;
       }
     } catch (e: any) {
-      console.warn('[Auth] Firebase ID token verification failed:', e?.code || e?.message || 'invalid token');
+      const code = e?.code || '';
+      (req as any).authErrorCode = code || 'invalid-token';
+      if (code !== 'auth/id-token-expired') {
+        console.warn('[Auth] Firebase ID token verification failed:', code || e?.message || 'invalid token');
+      }
     }
   }
 
@@ -1065,10 +1297,17 @@ async function requireAuth(req: express.Request, res: express.Response, next: ex
   try {
     const user = await resolveAuthUser(req);
     if (!user) {
+      const authErrorCode = (req as any).authErrorCode;
+      if (authErrorCode === 'auth/id-token-expired') {
+        res.setHeader('X-Auth-Error', 'id-token-expired');
+      }
       return res.status(401).json({
         success: false,
-        error: 'Authentication required. Please sign in to access this resource.',
-        code: 'UNAUTHORIZED'
+        error:
+          authErrorCode === 'auth/id-token-expired'
+            ? 'Session token expired. Refreshing authentication...'
+            : 'Authentication required. Please sign in to access this resource.',
+        code: authErrorCode === 'auth/id-token-expired' ? 'ID_TOKEN_EXPIRED' : 'UNAUTHORIZED'
       });
     }
 
@@ -3572,44 +3811,189 @@ app.get('/api/storage/signed-url', requireAuth, async (req, res) => {
   });
 });
 
-// 13. Account Deletion (30-day grace period, Area 2, 5)
+// 12.2 GDPR/DPDP Complete Account Data Portability Export
+app.get('/api/auth/export-data', requireAuth, async (req, res) => {
+  const authUser = (req as any).user as DbUser;
+  const targetWorkspace = (req as any).workspaceId as string;
+  try {
+    const dbExport = await db.accountPrivacy.exportUserData({
+      userId: authUser.id,
+      workspaceId: targetWorkspace,
+      email: authUser.email
+    });
+    const workspaceCustomers = customersDatabase.filter(c => (c.workspaceId || 'ws-default') === targetWorkspace);
+    const mergedCustomers = dbExport.customers.length > 0 ? dbExport.customers : workspaceCustomers;
+
+    await db.auditLogs.record({
+      workspaceId: targetWorkspace,
+      actorId: authUser.id,
+      actorEmail: authUser.email,
+      action: 'account.data_exported',
+      targetType: 'account',
+      targetId: authUser.id,
+      metadata: { customerCount: mergedCustomers.length }
+    });
+
+    const payload = {
+      schemaVersion: '1.0',
+      platform: 'Churnveda',
+      exportedAt: dbExport.exportedAt,
+      account: dbExport.user || {
+        id: authUser.id,
+        email: authUser.email,
+        full_name: authUser.full_name,
+        company_name: authUser.company_name,
+        workspace_id: targetWorkspace,
+        selected_plan: authUser.selected_plan,
+        billing_status: authUser.billing_status,
+        created_at: authUser.created_at
+      },
+      workspace: dbExport.workspace,
+      customers: mergedCustomers,
+      csvImports: dbExport.csvImports,
+      retentionActions: dbExport.retentionActions,
+      subscriptions: dbExport.subscriptions,
+      auditLogs: dbExport.auditLogs
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="churnveda_account_export.json"');
+    return res.json(payload);
+  } catch (err: any) {
+    console.error('[Churnveda Export Error]:', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Failed to prepare account data export.' });
+  }
+});
+
+// 13. Account Deletion (Live DB + Third-Party Cleanup + Confirmation Email + 30-day Cloud Backup SLA)
 app.post('/api/auth/delete-account', requireAuth, async (req, res) => {
   const authUser = (req as any).user as DbUser;
   const targetWorkspace = (req as any).workspaceId as string;
   const gracePeriodEnd = new Date(Date.now() + 30 * 86400000).toISOString();
+  const servicesCleaned: string[] = [];
 
-  // Clean up private workspace files in Supabase Storage buckets
-  try {
-    await deleteWorkspaceStorageFiles(targetWorkspace);
-  } catch (err: any) {
-    console.warn('[Churnveda Storage Warning] Failed cleaning storage during account deletion:', err.message);
+  // 1. Cancel any active Razorpay subscription if credentials & subscription ID exist
+  const rzpKey = (process.env.RAZORPAY_KEY_ID || '').trim();
+  const rzpSecret = (process.env.RAZORPAY_KEY_SECRET || '').trim();
+  const activeSubId = authUser.razorpay_subscription_id;
+  if (rzpKey && rzpSecret && activeSubId && activeSubId.startsWith('sub_') && !activeSubId.startsWith('sub_sim')) {
+    try {
+      const authHeader = `Basic ${Buffer.from(`${rzpKey}:${rzpSecret}`).toString('base64')}`;
+      const cancelResp = await fetch(`https://api.razorpay.com/v1/subscriptions/${encodeURIComponent(activeSubId)}/cancel`, {
+        method: 'POST',
+        headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cancel_at_cycle_end: 0 })
+      });
+      if (cancelResp.ok) servicesCleaned.push('Razorpay Subscription Cancelled');
+    } catch (rzpErr: any) {
+      console.warn('[Account Deletion] Razorpay cancel skipped:', rzpErr?.message || 'error');
+    }
   }
 
-  await db.auditLogs.record({
-    workspaceId: targetWorkspace,
-    actorId: authUser.id,
-    actorEmail: authUser.email,
-    action: 'account.deletion_scheduled',
-    targetType: 'workspace',
-    targetId: targetWorkspace,
-    metadata: { scheduledDate: gracePeriodEnd }
-  });
+  // 2. Clean up private workspace storage files & outbound queue
+  try {
+    await deleteWorkspaceStorageFiles(targetWorkspace);
+    servicesCleaned.push('Workspace File Storage');
+  } catch (err: any) {
+    console.warn('[Churnveda Storage Warning] Failed cleaning storage during account deletion:', err?.message);
+  }
+  const removedQueue = removeWorkspaceQueueItems(targetWorkspace);
+  if (removedQueue >= 0) servicesCleaned.push('Outbound Messaging Queue');
+
+  // 3. Delete rows across PostgreSQL/SQLite tables & in-memory stores
+  let deletedTables: Record<string, number> = {};
+  try {
+    const dbRes = await db.accountPrivacy.deleteUserData({
+      userId: authUser.id,
+      workspaceId: targetWorkspace,
+      email: authUser.email
+    });
+    deletedTables = dbRes.deletedTables;
+    servicesCleaned.push('Primary Database Tables');
+  } catch (dbErr: any) {
+    console.error('[Account Deletion] DB cleanup error:', dbErr?.message || dbErr);
+  }
+
+  // Purge in-memory caches for this user/workspace
+  for (let i = usersDatabase.length - 1; i >= 0; i--) {
+    if (usersDatabase[i].id === authUser.id || usersDatabase[i].email.toLowerCase() === authUser.email.toLowerCase()) {
+      usersDatabase.splice(i, 1);
+    }
+  }
+  for (const [tok, sess] of sessionsDatabase.entries()) {
+    if (sess.userId === authUser.id || sess.email.toLowerCase() === authUser.email.toLowerCase()) {
+      sessionsDatabase.delete(tok);
+    }
+  }
+  if (targetWorkspace !== 'ws-default') {
+    for (let i = customersDatabase.length - 1; i >= 0; i--) {
+      if ((customersDatabase[i].workspaceId || 'ws-default') === targetWorkspace) {
+        customersDatabase.splice(i, 1);
+      }
+    }
+    for (let i = subscriptionsDatabase.length - 1; i >= 0; i--) {
+      if (subscriptionsDatabase[i].workspace_id === targetWorkspace) {
+        subscriptionsDatabase.splice(i, 1);
+      }
+    }
+  }
+
+  // 4. Send deletion confirmation email via Resend if configured
+  let confirmationEmailSent = false;
+  const resendKey = (process.env.RESEND_API_KEY || '').trim();
+  const resendFrom = (process.env.RESEND_FROM_EMAIL || 'Churnveda <onboarding@resend.dev>').trim();
+  if (resendKey && authUser.email) {
+    try {
+      const emailResp = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: resendFrom,
+          to: [authUser.email],
+          subject: 'Churnveda Account Deletion Confirmation',
+          text: `Hello ${authUser.full_name || 'there'},\n\nThis email confirms that your Churnveda account (${authUser.email}) and live workspace records have been permanently deleted from our active application database.\n\nEncrypted database backups are automatically purged on a 30-day rolling schedule (complete by ${gracePeriodEnd.slice(0, 10)}).\n\nIf you did not request this deletion, please contact sharatbuchanalli4@gmail.com immediately.\n\n— Churnveda Privacy Team`
+        })
+      });
+      confirmationEmailSent = emailResp.ok;
+      if (confirmationEmailSent) servicesCleaned.push('Confirmation Email Sent');
+    } catch (mailErr: any) {
+      console.warn('[Account Deletion] Confirmation email skipped:', mailErr?.message || 'error');
+    }
+  }
+
+  clearAuthCookies(res);
 
   res.json({
     success: true,
-    message: 'Account deletion initiated. Your account will enter a 30-day grace period. You can reactivate before this date.',
-    scheduledDeletionDate: gracePeriodEnd
+    message: confirmationEmailSent
+      ? 'Your account and live workspace data have been deleted. A confirmation email has been sent, and automated backups purge within 30 days.'
+      : 'Your account and live workspace data have been deleted. Encrypted cloud backups are purged within 30 days.',
+    scheduledDeletionDate: gracePeriodEnd,
+    deletedTables,
+    servicesCleaned,
+    confirmationEmailSent
   });
 });
 
+// 13.1 Opt-Out & Unsubscribe Management (Persisted in DB + Memory Suppression List)
+app.get('/api/communications/unsubscribe', async (req, res) => {
+  const email = typeof req.query.email === 'string' ? req.query.email.trim().toLowerCase() : '';
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).type('text/html').send('<h1>Invalid unsubscribe link</h1><p>A valid email address is required.</p>');
+  }
+  markEmailUnsubscribed(email);
+  await db.unsubscribes.add('email', email).catch(() => {});
+  res.type('text/html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unsubscribed | Churnveda</title></head><body style="font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:60px auto;padding:24px;color:#111827;"><h1 style="font-size:20px;margin-bottom:8px;">You are unsubscribed</h1><p style="font-size:14px;color:#4b5563;line-height:1.6;"><strong>${email.replace(/[<>&"']/g, '')}</strong> has been permanently removed from Churnveda outbound emails. No further emails will be sent to this address.</p></body></html>`);
+});
 
-// 13.1 Opt-Out & Unsubscribe Management (Requirement 13 & 18)
-app.post('/api/communications/unsubscribe', (req, res) => {
-  const { email, channel = 'email' } = req.body;
-  if (!email || typeof email !== 'string') {
+app.post('/api/communications/unsubscribe', async (req, res) => {
+  const { email, channel = 'email' } = req.body || {};
+  if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
     return res.status(400).json({ error: 'Valid email address is required.' });
   }
   const emailNorm = email.toLowerCase().trim();
+  markEmailUnsubscribed(emailNorm);
+  await db.unsubscribes.add('email', emailNorm).catch(() => {});
   res.json({
     success: true,
     message: `Recipient ${emailNorm} has been unsubscribed from outbound ${channel} notifications.`,
@@ -3619,11 +4003,13 @@ app.post('/api/communications/unsubscribe', (req, res) => {
   });
 });
 
-app.post('/api/communications/whatsapp-stop', (req, res) => {
-  const { phone } = req.body;
+app.post('/api/communications/whatsapp-stop', async (req, res) => {
+  const { phone } = req.body || {};
   if (!phone || typeof phone !== 'string') {
     return res.status(400).json({ error: 'Valid phone number is required.' });
   }
+  markPhoneOptedOut(phone);
+  await db.unsubscribes.add('whatsapp', phone).catch(() => {});
   res.json({
     success: true,
     message: `Phone number ${phone} has been opted out of WhatsApp retention messages.`,
@@ -4560,10 +4946,10 @@ app.post('/api/auth/forgot-password', authRateLimiter, async (req, res) => {
 });
 
 // 14F. Reset Password Endpoint (/api/auth/reset-password) (Area 17, 5)
-app.post('/api/auth/reset-password', async (req, res) => {
-  const { token, newPassword } = req.body;
+app.post('/api/auth/reset-password', authRateLimiter, async (req, res) => {
+  const { token, newPassword } = req.body || {};
 
-  if (!token) {
+  if (!token || typeof token !== 'string') {
     return res.status(400).json({ error: 'Password reset token is required.' });
   }
 
@@ -4834,7 +5220,7 @@ export let trialVerificationsDatabase: DbTrialVerification[] = [
     tier: 'growth',
     billing_cycle: 'monthly',
     billing_plan_id: 'plan_tier_growth_monthly',
-    razorpay_plan_id: 'plan_TeZQFjmJoxrnKM',
+    razorpay_plan_id: process.env.RAZORPAY_GROWTH_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_U1vtzGKxsZRAT2',
     razorpay_order_id: 'order_test_init_001',
     amount_cents: 100,
     amount_paise: 100,
@@ -4856,7 +5242,7 @@ export let subscriptionsDatabase: DbSubscription[] = [
     tier: 'growth',
     billing_cycle: 'monthly',
     billing_plan_id: 'plan_tier_growth_monthly',
-    razorpay_plan_id: 'plan_TeZQFjmJoxrnKM',
+    razorpay_plan_id: process.env.RAZORPAY_GROWTH_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_U1vtzGKxsZRAT2',
     status: 'trialing',
     trial_started_at: new Date(Date.now() - 2 * 86400000).toISOString(),
     trial_ends_at: new Date(Date.now() + 12 * 86400000).toISOString(),
@@ -5992,11 +6378,10 @@ app.post('/api/billing/upgrade', requireAuth, async (req, res) => {
   });
 });
 
-// 15B4. Add / Save Payment Method (Area 2, 3)
+// 15B4. Add / Save Payment Method (PCI-DSS Safe: Disallows raw PAN/CVC)
 app.post('/api/billing/payment-method', requireAuth, (req, res) => {
   const authUser = (req as any).user as DbUser;
   const user = authUser;
-
 
   if (!user) {
     return res.status(401).json({ error: 'Please log in to add a payment method.' });
@@ -6007,10 +6392,21 @@ app.post('/api/billing/payment-method', requireAuth, (req, res) => {
     cardholderName = '',
     expMonth = 12,
     expYear = 2028,
-    cvc = '123',
-    zip = '94103',
-    isDefault = true
-  } = req.body;
+    cvc = '',
+    isDefault = true,
+    razorpayTokenId = ''
+  } = req.body || {};
+
+  // Reject raw primary account numbers or CVC codes — payment tokenization must happen via Razorpay Checkout
+  if (String(cardNumber).replace(/\D/g, '').length > 4 || String(cvc).trim().length > 0) {
+    return res.status(400).json({
+      error: 'Raw card numbers and CVV/CVC must never be sent to Churnveda servers. Please complete payment setup through Razorpay Hosted Checkout.'
+    });
+  }
+
+  if (!razorpayTokenId && !String(cardNumber).trim()) {
+    return res.status(400).json({ error: 'Razorpay payment token or masked last4 metadata is required.' });
+  }
 
   const rawDigits = String(cardNumber).replace(/\D/g, '');
   const last4 = rawDigits.length >= 4 ? rawDigits.slice(-4) : '4242';
@@ -8454,6 +8850,32 @@ async function startServer() {
         const distIndexPath = path.join(distPath, 'index.html');
         const shouldUseViteDev = process.env.NODE_ENV !== 'production' || !fs.existsSync(distIndexPath);
 
+        const serveProdStaticAndSpa = () => {
+          app.use(
+            express.static(distPath, {
+              index: false,
+              maxAge: '7d',
+              setHeaders: (res, filePath) => {
+                if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+                  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+                } else if (filePath.endsWith('.html')) {
+                  res.setHeader('Cache-Control', 'no-cache');
+                }
+              }
+            })
+          );
+          app.get('*', (req, res) => {
+            try {
+              const rawHtml = fs.readFileSync(distIndexPath, 'utf8');
+              const html = injectSeoAndAnalytics(rawHtml, req);
+              res.setHeader('Cache-Control', 'no-cache');
+              res.type('text/html').send(html);
+            } catch {
+              res.sendFile(distIndexPath);
+            }
+          });
+        };
+
         if (shouldUseViteDev) {
           try {
             const vite = await createViteServer({
@@ -8461,27 +8883,57 @@ async function startServer() {
               appType: 'spa'
             });
             viteServer = vite;
+
+            // Serve static public assets explicitly before SPA fallback (ensures /og-image.jpg always serves image/jpeg for WhatsApp previews)
+            app.use(express.static(path.join(process.cwd(), 'public'), { index: false, maxAge: '7d' }));
+
+            // Inject dynamic absolute OpenGraph/Twitter/GA4 tags for page requests in dev/preview too
+            app.get('*', async (req, res, next) => {
+              if (
+                req.path.startsWith('/api/') ||
+                req.path.startsWith('/@') ||
+                req.path.startsWith('/src/') ||
+                req.path.startsWith('/node_modules/') ||
+                path.extname(req.path) !== ''
+              ) {
+                return next();
+              }
+              try {
+                const rawTemplate = fs.readFileSync(path.join(process.cwd(), 'index.html'), 'utf8');
+                const transformed = await vite.transformIndexHtml(req.originalUrl, rawTemplate);
+                const finalHtml = injectSeoAndAnalytics(transformed, req);
+                res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8').send(finalHtml);
+              } catch {
+                return next();
+              }
+            });
+
             app.use(vite.middlewares);
           } catch (viteErr: any) {
             console.error('[Server] Failed to initialize Vite middleware:', viteErr?.message || viteErr);
             if (fs.existsSync(distIndexPath)) {
-              app.use(express.static(distPath));
-              app.get('*', (_req, res) => {
-                res.sendFile(distIndexPath);
-              });
+              serveProdStaticAndSpa();
             }
           }
         } else {
-          app.use(express.static(distPath));
-          app.get('*', (_req, res) => {
-            res.sendFile(distIndexPath);
-          });
+          serveProdStaticAndSpa();
         }
       })()
     ]);
   } finally {
     isBootComplete = true;
     resolveBootReady();
+  }
+
+  // Hydrate persistent email & WhatsApp opt-out suppression lists
+  try {
+    const optOuts = await db.unsubscribes.listAll();
+    for (const row of optOuts) {
+      if (row.channel === 'email') markEmailUnsubscribed(row.contact_value);
+      else if (row.channel === 'whatsapp') markPhoneOptedOut(row.contact_value);
+    }
+  } catch (unsubErr: any) {
+    console.warn('[Unsubscribe] Failed hydrating opt-out list:', unsubErr?.message || unsubErr);
   }
 
   // Verify storage buckets asynchronously without delaying port readiness

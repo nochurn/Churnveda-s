@@ -54,6 +54,42 @@ const completedIdempotencyMap: Map<string, { providerMessageId: string; sentAt: 
 let duplicateSuppressedCount = 0;
 let isProcessingQueue = false;
 
+// Opt-out suppression lists (hydrated from DB + live API opt-outs)
+const unsubscribedEmails = new Set<string>();
+const optedOutPhones = new Set<string>();
+
+export function markEmailUnsubscribed(email: string): void {
+  const norm = String(email || '').trim().toLowerCase();
+  if (norm) unsubscribedEmails.add(norm);
+}
+
+export function isEmailUnsubscribed(email?: string | null): boolean {
+  if (!email) return false;
+  return unsubscribedEmails.has(String(email).trim().toLowerCase());
+}
+
+export function markPhoneOptedOut(phone: string): void {
+  const norm = String(phone || '').replace(/[\s\(\)\-\.]/g, '').replace(/^\+/, '');
+  if (norm) optedOutPhones.add(norm);
+}
+
+export function isPhoneOptedOut(phone?: string | null): boolean {
+  if (!phone) return false;
+  const norm = String(phone).replace(/[\s\(\)\-\.]/g, '').replace(/^\+/, '');
+  return optedOutPhones.has(norm);
+}
+
+export function removeWorkspaceQueueItems(workspaceId: string): number {
+  let removed = 0;
+  for (const [key, item] of queueItems.entries()) {
+    if (item.workspaceId === workspaceId) {
+      queueItems.delete(key);
+      removed++;
+    }
+  }
+  return removed;
+}
+
 /**
  * Strips secret tokens from error messages so they never reach client bundles or logs.
  */
@@ -290,6 +326,14 @@ async function dispatchQueueItem(item: OutboundQueueItem): Promise<{ success: bo
       };
     }
 
+    if (isPhoneOptedOut(phoneValidation.normalized)) {
+      return {
+        success: false,
+        error: 'Recipient has opted out of WhatsApp retention messages (STOP).',
+        isPermanentError: true
+      };
+    }
+
     const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID!.trim();
     const token = process.env.WHATSAPP_ACCESS_TOKEN!.trim();
     const waEndpoint = `https://graph.facebook.com/v18.0/${phoneId}/messages`;
@@ -361,9 +405,35 @@ async function dispatchQueueItem(item: OutboundQueueItem): Promise<{ success: bo
       };
     }
 
+    const recipientEmailClean = item.recipientEmail!.trim().toLowerCase();
+    if (isEmailUnsubscribed(recipientEmailClean)) {
+      return {
+        success: false,
+        error: 'Recipient has unsubscribed from outbound emails.',
+        isPermanentError: true
+      };
+    }
+
     const apiKey = process.env.RESEND_API_KEY!.trim();
     const fromAddress = process.env.RESEND_FROM_EMAIL?.trim() || 'Churnveda <onboarding@resend.dev>';
     const emailSubject = item.subject || `Checking in regarding your ${item.customerName || 'account'}`;
+    const siteBase = (process.env.APP_URL || process.env.VITE_SITE_URL || 'https://churnveda.com').trim().replace(/\/+$/, '');
+    const unsubscribeUrl = `${siteBase}/api/communications/unsubscribe?email=${encodeURIComponent(recipientEmailClean)}`;
+    const postalAddress = (process.env.POSTAL_ADDRESS || 'Churnveda Support · [Business Postal Address Required for CAN-SPAM — Set POSTAL_ADDRESS env var]').trim();
+
+    const textWithFooter = item.content.includes('/unsubscribe')
+      ? item.content
+      : `${item.content}\n\n---\nUnsubscribe: ${unsubscribeUrl}\n${postalAddress}`;
+
+    const htmlBody = `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #111827;">
+  <div style="white-space: pre-wrap;">${escapeHtml(item.content)}</div>
+  <hr style="margin: 24px 0 12px; border: 0; border-top: 1px solid #e5e7eb;" />
+  <div style="font-size: 12px; color: #6b7280; line-height: 1.5;">
+    <p style="margin: 0 0 4px;">You are receiving this retention outreach email because you are an active or recent customer.</p>
+    <p style="margin: 0 0 4px;"><a href="${unsubscribeUrl}" style="color: #1e3a8a; text-decoration: underline;">Unsubscribe from future emails</a></p>
+    <p style="margin: 0;">${escapeHtml(postalAddress)}</p>
+  </div>
+</div>`;
 
     try {
       const response = await fetch('https://api.resend.com/emails', {
@@ -374,10 +444,14 @@ async function dispatchQueueItem(item: OutboundQueueItem): Promise<{ success: bo
         },
         body: JSON.stringify({
           from: fromAddress,
-          to: [item.recipientEmail!.trim().toLowerCase()],
+          to: [recipientEmailClean],
           subject: emailSubject,
-          text: item.content,
-          html: `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #111827; white-space: pre-wrap;">${escapeHtml(item.content)}</div>`
+          headers: {
+            'List-Unsubscribe': `<${unsubscribeUrl}>`,
+            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'
+          },
+          text: textWithFooter,
+          html: htmlBody
         })
       });
 

@@ -9,6 +9,8 @@ import {
   Mail
 } from 'lucide-react';
 
+import { openCookieSettings } from './legal/CookieConsentBanner';
+
 interface FooterProps {
   onNavigate: (view: string) => void;
 }
@@ -41,56 +43,63 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
             <button
               type="button"
               onClick={() => onNavigate('terms')}
-              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs"
+              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs cursor-pointer"
             >
               Terms of Service
             </button>
             <button
               type="button"
               onClick={() => onNavigate('privacy')}
-              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs"
+              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs cursor-pointer"
             >
               Privacy Policy
             </button>
             <button
               type="button"
               onClick={() => onNavigate('refund')}
-              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs"
+              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs cursor-pointer"
             >
-              Refund & Cancellation
+              Refund &amp; Cancellation
             </button>
             <button
               type="button"
               onClick={() => onNavigate('cookies')}
-              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs"
+              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs cursor-pointer"
             >
               Cookie Policy
             </button>
             <button
               type="button"
+              onClick={() => openCookieSettings()}
+              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs font-semibold text-blue-900 cursor-pointer"
+            >
+              Cookie Settings / Opt-Out
+            </button>
+            <button
+              type="button"
               onClick={() => onNavigate('dpa')}
-              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs"
+              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs cursor-pointer"
             >
               DPA
             </button>
             <button
               type="button"
               onClick={() => onNavigate('deletion')}
-              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs"
+              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs cursor-pointer"
             >
               Data Deletion
             </button>
             <button
               type="button"
               onClick={() => onNavigate('acceptable-use')}
-              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs"
+              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs cursor-pointer"
             >
               Acceptable Use
             </button>
             <button
               type="button"
               onClick={() => onNavigate('contact')}
-              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs"
+              className="hover:text-blue-900 transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-900 rounded-xs cursor-pointer"
             >
               Contact
             </button>
@@ -116,6 +125,15 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
               Mobile:{' '}
               <a href="tel:+919620262041" className="text-blue-900 hover:underline">
                 +91 96202 62041
+              </a>
+              {' · '}
+              <a
+                href="https://wa.me/919620262041?text=Hi%20Churnveda%20team%2C%20I%20have%20a%20question%20about%20Churnveda."
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-emerald-700 font-semibold hover:underline"
+              >
+                Chat on WhatsApp
               </a>
             </span>
             <span className="block text-gray-500">Response SLA: Within 2 business days</span>

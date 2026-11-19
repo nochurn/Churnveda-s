@@ -508,6 +508,7 @@ export interface AuthoritativeBillingPlanRecord {
 
 export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord[] {
   const now = new Date().toISOString();
+  const env = (typeof process !== 'undefined' && process.env) ? process.env : ({} as Record<string, string | undefined>);
   return [
     // 1. Starter Monthly: $29 USD / ₹2,756 INR
     {
@@ -527,7 +528,7 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       checkout_label: '$29 USD / month',
       checkout_label_inr: '₹2,756 INR / month',
       discountDescription: 'Fixed monthly billing in USD (International) / INR (India)',
-      razorpay_plan_id: process.env.RAZORPAY_STARTER_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_STARTER_MONTHLY || 'plan_TeZlsQOQaeAWAw',
+      razorpay_plan_id: env.RAZORPAY_STARTER_MONTHLY_PLAN_ID || env.RAZORPAY_PLAN_STARTER_MONTHLY || 'plan_U1vm4YhuBfkHU6',
       is_active: true,
       is_founding_offer: true,
       created_at: now,
@@ -551,7 +552,7 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       checkout_label: '$290 USD / year (2 months free)',
       checkout_label_inr: '₹27,562 INR / year (2 months free)',
       discountDescription: '2 months free — 10 months of monthly founding price',
-      razorpay_plan_id: process.env.RAZORPAY_STARTER_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_STARTER_ANNUAL || 'plan_TeZMQYLVPEtQuj',
+      razorpay_plan_id: env.RAZORPAY_STARTER_ANNUAL_PLAN_ID || env.RAZORPAY_PLAN_STARTER_YEARLY || env.RAZORPAY_PLAN_STARTER_ANNUAL || 'plan_U1vpfqbMX7PrvO',
       is_active: true,
       is_founding_offer: true,
       created_at: now,
@@ -575,7 +576,7 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       checkout_label: '$79 USD / month',
       checkout_label_inr: '₹7,508 INR / month',
       discountDescription: 'Fixed monthly billing in USD (International) / INR (India)',
-      razorpay_plan_id: process.env.RAZORPAY_GROWTH_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_TeZQFjmJoxrnKM',
+      razorpay_plan_id: env.RAZORPAY_GROWTH_MONTHLY_PLAN_ID || env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_U1vtzGKxsZRAT2',
       is_active: true,
       is_founding_offer: true,
       created_at: now,
@@ -599,7 +600,7 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       checkout_label: '$790 USD / year (2 months free)',
       checkout_label_inr: '₹75,082 INR / year (2 months free)',
       discountDescription: '2 months free — 10 months of monthly founding price',
-      razorpay_plan_id: process.env.RAZORPAY_GROWTH_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_ANNUAL || 'plan_TfXxPsAOqPYklF',
+      razorpay_plan_id: env.RAZORPAY_GROWTH_ANNUAL_PLAN_ID || env.RAZORPAY_PLAN_GROWTH_YEARLY || env.RAZORPAY_PLAN_GROWTH_ANNUAL || 'plan_U1vvXZFmhM3XK2',
       is_active: true,
       is_founding_offer: true,
       created_at: now,
@@ -623,7 +624,7 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       checkout_label: '$349 USD / month',
       checkout_label_inr: '₹33,169 INR / month',
       discountDescription: 'Fixed monthly billing in USD (International) / INR (India)',
-      razorpay_plan_id: process.env.RAZORPAY_ENTERPRISE_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_PRO_MONTHLY || 'plan_TeZraPPrYthtEk',
+      razorpay_plan_id: env.RAZORPAY_ENTERPRISE_MONTHLY_PLAN_ID || env.RAZORPAY_PLAN_ENTERPRISE_MONTHLY || env.RAZORPAY_PLAN_PRO_MONTHLY || 'plan_U1vwty43aSFOmP',
       is_active: true,
       is_founding_offer: true,
       created_at: now,
@@ -647,7 +648,7 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       checkout_label: '$3,490 USD / year (2 months free)',
       checkout_label_inr: '₹331,690 INR / year (2 months free)',
       discountDescription: '2 months free — 10 months of monthly founding price',
-      razorpay_plan_id: process.env.RAZORPAY_ENTERPRISE_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_PRO_ANNUAL || 'plan_Tea17dB6H4EHdn',
+      razorpay_plan_id: env.RAZORPAY_ENTERPRISE_ANNUAL_PLAN_ID || env.RAZORPAY_PLAN_ENTERPRISE_YEARLY || env.RAZORPAY_PLAN_PRO_ANNUAL || 'plan_U1w0VddfSIKKQG',
       is_active: true,
       is_founding_offer: true,
       created_at: now,

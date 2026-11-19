@@ -30,6 +30,8 @@ import {
 } from 'lucide-react';
 import { aiEmployeeService } from '../services/aiEmployeeService';
 import { apiService, OutboundStatusResponse, TestOutboundConfigResponse } from '../services/api';
+import { auth as firebaseAuth, db as firestoreDb } from '../lib/firebaseClient';
+import { deleteDoc, doc } from 'firebase/firestore';
 
 interface SettingsViewProps {
   currentUser: UserProfile | null;
@@ -89,6 +91,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [deleteConfirmText, setDeleteConfirmText] = useState<string>('');
   const [isDeletingAccount, setIsDeletingAccount] = useState<boolean>(false);
 
+  const [isExportingAccount, setIsExportingAccount] = useState<boolean>(false);
+
+  const handleExportMyData = async () => {
+    setIsExportingAccount(true);
+    try {
+      const blob = await apiService.exportAccountData();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `churnveda_account_export_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+      onShowToast('Your full account & workspace data export has been downloaded.', 'success');
+    } catch (err: any) {
+      onShowToast(err?.message || 'Failed to export account data.', 'error');
+    } finally {
+      setIsExportingAccount(false);
+    }
+  };
+
   const handleDeleteAccount = async () => {
     if (deleteConfirmText.trim().toUpperCase() !== 'DELETE') {
       onShowToast('Please type DELETE to confirm permanent account erasure.', 'error');
@@ -96,8 +120,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
     setIsDeletingAccount(true);
     try {
+      const fbUser = firebaseAuth.currentUser;
+      if (fbUser) {
+        await deleteDoc(doc(firestoreDb, 'users', fbUser.uid)).catch(() => {});
+      }
       const res = await apiService.requestAccountDeletion();
-      onShowToast(res.message || 'Account deletion initiated. 30-day backup erasure SLA active.', 'success');
+      if (fbUser) {
+        await fbUser.delete().catch(() => {});
+      }
+      const cleanedSummary = res.servicesCleaned?.length
+        ? ` Cleaned: ${res.servicesCleaned.join(', ')}.`
+        : '';
+      onShowToast(
+        `${res.message || 'Account deleted.'}${cleanedSummary}`,
+        'success'
+      );
       setShowDeleteModal(false);
       setDeleteConfirmText('');
       if (onLoggedOut) {
@@ -495,14 +532,38 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               )}
             </div>
 
+            {/* Self-Serve Account Data Export (GDPR Art. 15/20, India DPDP) */}
+            <div className="p-4 bg-blue-50/50 rounded-xl border border-blue-200 space-y-3">
+              <div className="flex items-start gap-2.5">
+                <Download className="w-4 h-4 text-blue-900 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <strong className="text-blue-950 font-bold block">Download My Data (GDPR / DPDP Portability)</strong>
+                  <p className="text-gray-600 text-[11px] leading-relaxed">
+                    Export a complete machine-readable JSON archive of your account profile, workspace, customer telemetry, retention drafts, subscription records, and audit logs.
+                  </p>
+                </div>
+              </div>
+              <div className="pt-1 flex items-center justify-between">
+                <span className="text-[11px] text-gray-500">Format: JSON (excludes password hashes)</span>
+                <button
+                  type="button"
+                  disabled={isExportingAccount}
+                  onClick={handleExportMyData}
+                  className="px-3 py-1.5 bg-blue-900 hover:bg-blue-800 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                >
+                  {isExportingAccount ? 'Preparing Export...' : 'Download My Data'}
+                </button>
+              </div>
+            </div>
+
             {/* Self-Serve Account & Data Deletion (Requirement 15) */}
             <div className="p-4 bg-red-50/50 rounded-xl border border-red-200 space-y-3">
               <div className="flex items-start gap-2.5">
                 <Trash2 className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
                 <div className="space-y-1">
-                  <strong className="text-red-950 font-bold block">Data Deletion & Account Erasure</strong>
+                  <strong className="text-red-950 font-bold block">Delete Account &amp; Data Erasure</strong>
                   <p className="text-gray-600 text-[11px] leading-relaxed">
-                    Under GDPR Article 17 and CCPA, you have the right to permanent erasure. Live customer records and credentials are removed immediately upon confirmation. Backup archives are permanently purged within 30 days per our Deletion SLA.
+                    Under GDPR Article 17, India DPDP Act, and CCPA, permanent erasure removes live records from our database, cancels active Razorpay billing mandates, clears outbound queues/storage, and emails confirmation. Backups purge within 30 days.
                   </p>
                 </div>
               </div>
@@ -513,7 +574,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   onClick={() => setShowDeleteModal(true)}
                   className="px-3 py-1.5 bg-white hover:bg-red-50 border border-red-300 text-red-700 rounded-lg text-xs font-bold transition-colors cursor-pointer"
                 >
-                  Delete Account & Data...
+                  Delete My Account...
                 </button>
               </div>
             </div>
@@ -916,7 +977,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <ul className="text-[11px] text-gray-600 space-y-1 list-disc list-inside">
                   <li>React 19 + Vite 6 + Tailwind CSS v4</li>
                   <li>All 35+ components, pages &amp; legal templates</li>
-                  <li>Supabase auth client &amp; Postgres SQL migrations</li>
+                  <li>Firebase Auth &amp; Cloud Firestore + SQL migrations</li>
                 </ul>
               </div>
 
@@ -1018,9 +1079,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <div className="p-3 bg-white rounded-lg border border-gray-200 space-y-1">
                 <span className="w-5 h-5 rounded-full bg-blue-900 text-white text-[10px] font-bold flex items-center justify-center">3</span>
-                <span className="font-bold text-gray-900 block pt-1">Add Supabase Keys</span>
+                <span className="font-bold text-gray-900 block pt-1">Add Environment Secrets</span>
                 <p className="text-[11px] text-gray-500">
-                  In Lovable project settings, enter your Supabase URL &amp; Anon Key from <code className="font-mono text-[10px]">.env.example</code>.
+                  In your hosting settings, enter your server secrets from <code className="font-mono text-[10px]">.env.example</code>.
                 </p>
               </div>
             </div>

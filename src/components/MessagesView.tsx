@@ -18,7 +18,8 @@ import {
   AlertTriangle,
   Shield,
   Sliders,
-  CheckCheck
+  CheckCheck,
+  Sparkles
 } from 'lucide-react';
 import { aiEmployeeService } from '../services/aiEmployeeService';
 import { authService } from '../services/authService';
@@ -528,6 +529,11 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
                         ⭐ Top 5 Priority
                       </span>
                     )}
+
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-900 border border-indigo-200 flex items-center gap-1">
+                      <Sparkles className="w-2.5 h-2.5 text-indigo-700" />
+                      <span>AI-Generated Draft</span>
+                    </span>
 
                     {/* Strict Status Badges (READY, APPROVED, SENDING, SENT, COPIED, FAILED) */}
                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${

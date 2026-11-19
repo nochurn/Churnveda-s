@@ -32,6 +32,7 @@ import {
   buildRazorpaySubscriptionOptions
 } from '../services/razorpayConfig';
 import { CENTRAL_PRICING, normalizePlanTier } from '../config/pricing';
+import { ensureRazorpaySdk } from '../services/razorpaySdk';
 
 interface BillingSettingsViewProps {
   currentUser: UserProfile | null;
@@ -331,7 +332,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         authService.setCurrentUser(res.user);
         if (onUpdateUser) onUpdateUser(res.user);
       }
-      onShowToast(`Upgraded to ${targetPlan === 'growth' ? 'Growth ($149/mo)' : 'Enterprise ($499/mo)'} plan.`, 'success');
+      onShowToast(`Upgraded to ${targetPlan === 'growth' ? 'Growth ($149/mo)' : 'Enterprise ($349/mo)'} plan.`, 'success');
     } catch (err: any) {
       onNavigate('pricing', { plan: targetPlan });
     } finally {
@@ -383,7 +384,8 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
       }
 
       if (subRes.success && subRes.subscriptionId) {
-        if (typeof (window as any).Razorpay !== 'undefined') {
+        const sdkReady = await ensureRazorpaySdk();
+        if (sdkReady && typeof (window as any).Razorpay !== 'undefined') {
           const options = buildRazorpaySubscriptionOptions({
             keyId: subRes.keyId,
             subscriptionId: subRes.subscriptionId,
@@ -442,7 +444,8 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         throw new Error(orderRes.error || 'Could not generate Razorpay order');
       }
 
-      if (typeof (window as any).Razorpay !== 'undefined') {
+      const sdkReady = await ensureRazorpaySdk();
+      if (sdkReady && typeof (window as any).Razorpay !== 'undefined') {
         const options = buildRazorpayOneTimeOptions({
           keyId: orderRes.keyId,
           orderId: orderRes.orderId,
@@ -731,11 +734,12 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
 
           <button
             type="button"
-            onClick={() => setShowAddCardModal(true)}
-            className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-900 text-xs font-bold rounded-lg transition-colors cursor-pointer flex items-center gap-1.5"
+            onClick={() => handlePayWithRazorpay(normTier, 'monthly')}
+            disabled={isProcessing}
+            className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-900 text-xs font-bold rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>Add New Card</span>
+            <span>Add via Razorpay Checkout</span>
           </button>
         </div>
 
@@ -747,17 +751,17 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
             <div>
               <div className="text-sm font-bold text-gray-900">No payment methods on file</div>
               <p className="text-xs text-gray-500 max-w-sm mx-auto mt-1">
-                You are currently in demo trial mode. Add a credit card to ensure uninterrupted churn monitoring after
-                your trial ends.
+                Complete secure payment setup directly through Razorpay&apos;s PCI-DSS Level 1 Checkout (cards, UPI AutoPay, netbanking, or wallets). Churnveda never collects or stores raw card numbers or CVV codes.
               </p>
             </div>
             <button
               type="button"
-              onClick={() => setShowAddCardModal(true)}
-              className="px-4 py-2 bg-blue-900 hover:bg-blue-800 text-white text-xs font-bold rounded-xl shadow-xs transition-colors inline-flex items-center gap-2"
+              onClick={() => handlePayWithRazorpay(normTier, 'monthly')}
+              disabled={isProcessing}
+              className="px-4 py-2 bg-blue-900 hover:bg-blue-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-xs transition-colors inline-flex items-center gap-2 cursor-pointer"
             >
-              <Plus className="w-4 h-4" />
-              <span>Add Payment Method Now</span>
+              <Lock className="w-4 h-4" />
+              <span>{isProcessing ? 'Opening Razorpay...' : 'Set Up Payment via Razorpay'}</span>
             </button>
           </div>
         ) : (
@@ -877,7 +881,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
               <div className="flex items-center gap-2">
                 <span className="text-base font-bold text-gray-900">Enterprise</span>
                 <span className="text-xs text-indigo-900 font-bold bg-indigo-50 px-2 py-0.5 rounded">
-                  $499/month
+                  $349/month
                 </span>
               </div>
               <p className="text-xs text-gray-600 mt-1">
@@ -1108,187 +1112,42 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
               </button>
             </div>
 
-            <div className="p-6 space-y-5 text-xs">
-              {/* Live Interactive Card Visualization */}
-              <div className="bg-gradient-to-tr from-slate-900 via-slate-800 to-indigo-950 text-white p-5 rounded-2xl shadow-lg border border-slate-700 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="w-10 h-7 rounded-md bg-amber-200/90 border border-amber-300 flex items-center justify-center shadow-xs">
-                    <div className="w-6 h-4 border border-amber-400/80 rounded-xs grid grid-cols-2 gap-0.5">
-                      <div className="bg-amber-300/60" />
-                      <div className="bg-amber-300/60" />
-                    </div>
-                  </div>
-                  <div className="text-sm font-black tracking-wider uppercase text-blue-200">
-                    {detectBrand(cardNumber)}
-                  </div>
+            <div className="p-6 space-y-4 text-xs">
+              <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-blue-950 space-y-2 leading-relaxed">
+                <div className="flex items-center gap-2 font-bold">
+                  <ShieldCheck className="w-4 h-4 text-blue-800 shrink-0" />
+                  <span>Hosted PCI-DSS Level 1 Checkout via Razorpay</span>
                 </div>
-
-                <div className="font-mono text-base tracking-widest text-slate-100 font-bold py-1">
-                  {cardNumber || '•••• •••• •••• 4242'}
-                </div>
-
-                <div className="flex items-end justify-between text-[11px] pt-1">
-                  <div>
-                    <div className="text-[9px] uppercase tracking-wider text-slate-400 font-semibold">
-                      Cardholder
-                    </div>
-                    <div className="font-medium truncate max-w-[180px]">
-                      {cardholderName || currentUser?.name || 'Jane Doe'}
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="text-[9px] uppercase tracking-wider text-slate-400 font-semibold">
-                      Expires
-                    </div>
-                    <div className="font-medium">{cardExpiry || '12/28'}</div>
-                  </div>
-                </div>
+                <p>
+                  For your security, Churnveda never collects raw card numbers, expiry dates, or CVC codes on our servers. All cards, UPI AutoPay mandates, netbanking, and wallets are tokenized directly inside Razorpay&apos;s hosted checkout window.
+                </p>
               </div>
 
-              {/* Instant Autofill Test Cards */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="text-gray-500 font-medium">Quick Test Autofill:</span>
-                  <span className="text-[10px] text-gray-400">Sandbox Test Cards</span>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => applyTestCard('visa')}
-                    className="p-2 border border-blue-200 bg-blue-50/60 hover:bg-blue-100/70 text-blue-950 rounded-xl font-semibold text-center transition-colors cursor-pointer"
-                  >
-                    <div className="font-bold">Visa Test</div>
-                    <div className="text-[10px] text-blue-800">4242 •••• 4242</div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applyTestCard('mastercard')}
-                    className="p-2 border border-orange-200 bg-orange-50/60 hover:bg-orange-100/70 text-orange-950 rounded-xl font-semibold text-center transition-colors cursor-pointer"
-                  >
-                    <div className="font-bold">Mastercard</div>
-                    <div className="text-[10px] text-orange-800">5555 •••• 4444</div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applyTestCard('amex')}
-                    className="p-2 border border-sky-200 bg-sky-50/60 hover:bg-sky-100/70 text-sky-950 rounded-xl font-semibold text-center transition-colors cursor-pointer"
-                  >
-                    <div className="font-bold">Amex Test</div>
-                    <div className="text-[10px] text-sky-800">3782 •••• 005</div>
-                  </button>
-                </div>
+              <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl text-gray-700 text-[11px] leading-relaxed">
+                <strong>Plan:</strong> {normTier.toUpperCase()} (${currentPlanMonthlyPrice}/mo) · Cancels anytime online under Billing Settings.
               </div>
 
-              {/* Form Inputs */}
-              <form onSubmit={handleSavePaymentMethod} className="space-y-4">
-                <div>
-                  <label className="block font-semibold text-gray-700 mb-1">Name on Card</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Jane Doe"
-                    value={cardholderName}
-                    onChange={(e) => setCardholderName(e.target.value)}
-                    className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-gray-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-900/20"
-                  />
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="font-semibold text-gray-700">Card Number</label>
-                    <span className="text-[10px] text-gray-500 font-medium">{detectBrand(cardNumber)}</span>
-                  </div>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      required
-                      placeholder="4242 4242 4242 4242"
-                      value={cardNumber}
-                      onChange={handleCardNumberChange}
-                      className="w-full pl-10 pr-3.5 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-gray-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-900/20 font-mono"
-                    />
-                    <CreditCard className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2.5">
-                  <div>
-                    <label className="block font-semibold text-gray-700 mb-1">Expires</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="MM/YY"
-                      value={cardExpiry}
-                      onChange={handleExpiryChange}
-                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-gray-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-900/20 font-mono text-center"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-gray-700 mb-1">CVC / CVV</label>
-                    <input
-                      type="password"
-                      required
-                      maxLength={4}
-                      placeholder="123"
-                      value={cardCvc}
-                      onChange={(e) => setCardCvc(e.target.value.replace(/\D/g, ''))}
-                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-gray-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-900/20 font-mono text-center"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-gray-700 mb-1">Billing ZIP</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="94103"
-                      value={cardZip}
-                      onChange={(e) => setCardZip(e.target.value)}
-                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-gray-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-900/20 text-center"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 pt-1">
-                  <input
-                    type="checkbox"
-                    id="set-as-default"
-                    checked={isDefault}
-                    onChange={(e) => setIsDefault(e.target.checked)}
-                    className="w-4 h-4 text-blue-900 rounded border-gray-300 focus:ring-blue-900 cursor-pointer"
-                  />
-                  <label htmlFor="set-as-default" className="text-gray-700 cursor-pointer text-[11px] font-medium">
-                    Set as default payment method for recurring renewals
-                  </label>
-                </div>
-
-                <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-blue-950 text-[11px] leading-relaxed flex items-start gap-2">
-                  <ShieldCheck className="w-4 h-4 text-blue-800 shrink-0 mt-0.5" />
-                  <div>
-                    <strong>$0.00 will be charged today.</strong> Your card will only be billed{' '}
-                    <strong>${currentPlanMonthlyPrice}</strong> at the conclusion of your trial on{' '}
-                    <strong>{formattedTrialEnd}</strong>. You can cancel at any time.
-                  </div>
-                </div>
-
-                <div className="pt-2 flex items-center justify-end gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => setShowAddCardModal(false)}
-                    className="px-4 py-2.5 border border-gray-300 rounded-xl text-gray-700 font-semibold hover:bg-gray-50 cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isProcessing}
-                    className="px-5 py-2.5 bg-blue-900 hover:bg-blue-800 text-white font-bold rounded-xl shadow-xs transition-colors cursor-pointer flex items-center gap-2"
-                  >
-                    <Lock className="w-3.5 h-3.5" />
-                    <span>{isProcessing ? 'Securing...' : 'Save Payment Method'}</span>
-                  </button>
-                </div>
-              </form>
+              <div className="pt-2 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setShowAddCardModal(false)}
+                  className="px-4 py-2.5 border border-gray-300 rounded-xl text-gray-700 font-semibold hover:bg-gray-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isProcessing}
+                  onClick={() => {
+                    setShowAddCardModal(false);
+                    void handlePayWithRazorpay(normTier, 'monthly');
+                  }}
+                  className="px-5 py-2.5 bg-blue-900 hover:bg-blue-800 disabled:opacity-50 text-white font-bold rounded-xl shadow-xs transition-colors cursor-pointer flex items-center gap-2"
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>{isProcessing ? 'Opening Checkout...' : 'Continue to Razorpay Checkout'}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

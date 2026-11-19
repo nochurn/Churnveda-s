@@ -420,7 +420,7 @@ service cloud.firestore {
             )
           )
         );
-      allow delete: if false;
+      allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
     }
 
     // 3. Tenant Workspaces

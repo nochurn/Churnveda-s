@@ -2,21 +2,65 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Churnveda - Your AI Retention Employee</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Churnveda – AI Customer Retention & Churn Prevention</title>
+    <meta
+      name="description"
+      content="Predict SaaS churn 30–60 days early, spot at-risk revenue, and send human-approved WhatsApp and email retention outreach with Churnveda."
+    />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/favicon.svg" />
+    <link rel="canonical" href="/" />
     <meta name="theme-color" content="#1E3A8A" />
-    <meta name="description" content="Your AI Employee that checks customer risk every morning, identifies accounts worth saving, and prepares personalized retention outreach." />
-    <meta property="og:title" content="Churnveda - Your AI Retention Employee" />
-    <meta property="og:description" content="Your AI Employee that checks customer risk every morning, identifies accounts worth saving, and prepares personalized retention outreach." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+
+    <!-- OpenGraph / WhatsApp / LinkedIn / Facebook Preview -->
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Churnveda" />
+    <meta property="og:title" content="Churnveda – AI Customer Retention & Churn Prevention" />
+    <meta
+      property="og:description"
+      content="Predict SaaS churn 30–60 days early, spot at-risk revenue, and send human-approved WhatsApp and email retention outreach with Churnveda."
+    />
+    <meta property="og:image" content="/og-image.jpg" />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Churnveda — AI Customer Retention & Churn Prevention" />
+
+    <!-- Twitter / X Social Card -->
     <meta name="twitter:card" content="summary_large_image" />
-    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <meta name="twitter:title" content="Churnveda – AI Customer Retention & Churn Prevention" />
+    <meta
+      name="twitter:description"
+      content="Predict SaaS churn 30–60 days early, spot at-risk revenue, and send human-approved WhatsApp and email retention outreach with Churnveda."
+    />
+    <meta name="twitter:image" content="/og-image.jpg" />
+
+    <!-- Schema.org Structured Data -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Churnveda",
+        "applicationCategory": "BusinessApplication",
+        "operatingSystem": "Web",
+        "description": "AI retention employee that monitors SaaS customer churn risk daily and prepares human-approved WhatsApp and email outreach.",
+        "offers": {
+          "@type": "Offer",
+          "price": "29",
+          "priceCurrency": "USD"
+        }
+      }
+    </script>
+
+    <!-- Preconnect & non-blocking Checkout SDK -->
+    <link rel="preconnect" href="https://checkout.razorpay.com" crossorigin />
+    <script defer src="https://checkout.razorpay.com/v1/checkout.js"></script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

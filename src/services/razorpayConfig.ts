@@ -54,7 +54,7 @@ export const RECURRING_MANDATE_DISCLOSURE = MONTHLY_RECURRING_DISCLOSURE;
  * Authoritative pricing lookup (USD) derived directly from centralized pricing
  * Starter: $49/mo, $468/yr ($39/mo)
  * Growth: $149/mo, $1,428/yr ($119/mo)
- * Enterprise: $499/mo, $4,788/yr ($399/mo)
+ * Enterprise: $349/mo, $3,490/yr ($291/mo)
  */
 export const AUTHORITATIVE_PLANS: Record<
   string,

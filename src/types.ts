@@ -507,7 +507,7 @@ export const PRICING_TIERS: PricingTier[] = [
   {
     id: 'enterprise',
     name: 'Enterprise',
-    monthlyPrice: 499,
+    monthlyPrice: 349,
     customersIncluded: 'Unlimited customers',
     features: [
       'Unlimited customers monitored',

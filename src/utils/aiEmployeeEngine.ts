@@ -273,7 +273,7 @@ export function generatePersonalizedDrafts(
   }
 
   // Append compliant unsubscribe footer to emails and opt-out instruction to WhatsApp (Requirement 13 & 18)
-  const emailUnsubscribeFooter = `\n\n---\nTo unsubscribe or manage email preferences, visit: https://churnveda.com/unsubscribe?email=${encodeURIComponent(customer.email || '')}`;
+  const emailUnsubscribeFooter = `\n\n---\nTo unsubscribe or manage email preferences, visit: /api/communications/unsubscribe?email=${encodeURIComponent(customer.email || '')}`;
   const whatsappOptOutSuffix = `\n\n(Reply STOP to unsubscribe from WhatsApp updates)`;
 
   return {

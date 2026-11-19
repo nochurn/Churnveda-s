@@ -383,7 +383,7 @@ export const SignupView: React.FC<SignupViewProps> = ({
           <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-2.5 text-xs text-amber-900 shadow-xs">
             <Terminal className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
             <div>
-              <div className="font-bold">Supabase Configuration Notice:</div>
+              <div className="font-bold">Authentication Configuration Notice:</div>
               <p className="mt-0.5 text-[11px] text-amber-800">{authConfig.developerError}</p>
             </div>
           </div>

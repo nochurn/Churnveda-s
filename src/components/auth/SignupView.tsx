@@ -896,7 +896,7 @@ export const SignupView: React.FC<SignupViewProps> = ({
             </div>
 
             <p className="text-xs text-gray-600 leading-relaxed mb-4">
-              A confirmation email has been dispatched by Supabase to <strong className="text-gray-900">{verificationPending.email}</strong>.
+              A confirmation email has been dispatched by Churnveda to <strong className="text-gray-900">{verificationPending.email}</strong>.
               Please check your inbox (and spam folder) and click the confirmation link to activate your account. Once confirmed, you can log in directly with your email and password.
             </p>
 

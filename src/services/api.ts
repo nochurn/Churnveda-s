@@ -30,6 +30,60 @@ export function apiUrl(path: string): string {
   return `${baseUrl}${cleanPath}`;
 }
 
+const PUBLIC_API_PREFIXES = [
+  '/api/auth/login',
+  '/api/auth/signup',
+  '/api/auth/forgot-password',
+  '/api/auth/reset-password',
+  '/api/auth/config',
+  '/api/health',
+  '/api/billing/plans'
+];
+
+let firebaseClientModulePromise: Promise<typeof import('../lib/firebaseClient')> | null = null;
+function getFirebaseClientModule() {
+  if (!firebaseClientModulePromise) {
+    firebaseClientModulePromise = import('../lib/firebaseClient');
+  }
+  return firebaseClientModulePromise;
+}
+
+async function withFreshFirebaseToken(path: string, init?: RequestInit): Promise<RequestInit | undefined> {
+  if (typeof window === 'undefined') return init;
+  const cleanPath = path.split('?')[0];
+  if (PUBLIC_API_PREFIXES.some((prefix) => cleanPath === prefix || cleanPath.startsWith(`${prefix}/`))) {
+    return init;
+  }
+
+  try {
+    const { auth: fbAuth } = await getFirebaseClientModule();
+    const currentUser = fbAuth?.currentUser;
+    if (!currentUser) return init;
+
+    const headers = new Headers(init?.headers || {});
+    const existingAuth = headers.get('Authorization') || headers.get('authorization');
+    const storedToken = getStoredAuthToken();
+    const isUsingFirebaseJwt =
+      !existingAuth ||
+      (existingAuth.startsWith('Bearer ey') && existingAuth.includes('.')) ||
+      (storedToken && storedToken.startsWith('ey') && storedToken.includes('.'));
+
+    if (isUsingFirebaseJwt) {
+      const freshIdToken = await currentUser.getIdToken();
+      if (freshIdToken) {
+        if (storedToken !== freshIdToken) {
+          setStoredAuthToken(freshIdToken);
+        }
+        headers.set('Authorization', `Bearer ${freshIdToken}`);
+        return { ...init, headers };
+      }
+    }
+  } catch {
+    // Non-fatal; proceed with caller's existing headers
+  }
+  return init;
+}
+
 // When frontend is hosted separately (e.g. Catalyst Slate / Netlify) and VITE_API_URL points to the backend,
 // transparently route /api requests to the backend domain with credentials without mutating window.fetch.
 export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -37,12 +91,22 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
   const baseUrl = getApiBaseUrl();
   if (typeof input === 'string' && input.startsWith('/api')) {
     const targetUrl = apiUrl(input);
+    const enrichedInit = await withFreshFirebaseToken(input, init);
     const requestInit: RequestInit = {
-      ...init,
-      ...(baseUrl ? { credentials: init?.credentials || 'include' } : {})
+      ...enrichedInit,
+      ...(baseUrl ? { credentials: enrichedInit?.credentials || 'include' } : {})
     };
     try {
-      return await nativeFetch(targetUrl, requestInit);
+      const response = await nativeFetch(targetUrl, requestInit);
+      const contentType = response.headers.get('content-type') || '';
+      const isTransientHtmlGateway =
+        contentType.includes('text/html') &&
+        (response.status === 502 || response.status === 503 || response.status === 504 || response.status === 200);
+      if (isTransientHtmlGateway) {
+        await new Promise(resolve => setTimeout(resolve, 800));
+        return await nativeFetch(targetUrl, requestInit);
+      }
+      return response;
     } catch (err) {
       if (baseUrl) {
         // Retry once after brief delay for cross-origin backend cold-start / transient network hiccups
@@ -53,6 +117,51 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
     }
   }
   return nativeFetch(input, init);
+}
+
+export async function parseJsonResponse<T = any>(
+  res: Response,
+  fallbackError: string = 'Unexpected response from server. Please try again.'
+): Promise<T> {
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const rawText = await res.text();
+  const trimmed = rawText.trim();
+
+  if (!trimmed) {
+    if (!res.ok) {
+      throw new Error(`${fallbackError} (HTTP ${res.status})`);
+    }
+    return {} as T;
+  }
+
+  const looksLikeHtml =
+    contentType.includes('text/html') ||
+    /^<!doctype\s+html/i.test(trimmed) ||
+    /^<html[\s>]/i.test(trimmed);
+
+  if (looksLikeHtml) {
+    throw new Error(
+      `Server returned an HTML page instead of JSON (HTTP ${res.status}). Please refresh or try again in a moment.`
+    );
+  }
+
+  let data: any;
+  try {
+    data = JSON.parse(trimmed);
+  } catch {
+    throw new Error(
+      res.ok ? `${fallbackError} (Invalid JSON response)` : `${fallbackError} (HTTP ${res.status})`
+    );
+  }
+
+  if (!res.ok) {
+    const err: any = new Error(data?.error || data?.message || `${fallbackError} (HTTP ${res.status})`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+
+  return data as T;
 }
 
 export interface SafeJsonOptions<T> {
@@ -136,10 +245,23 @@ export async function safeJson<T = any>(
 export function getStoredAuthToken(): string | null {
   if (typeof localStorage === 'undefined') return null;
   return (
-    localStorage.getItem('churnveda_auth_token') ||
     localStorage.getItem('cs_auth_token') ||
+    localStorage.getItem('churnveda_auth_token') ||
     localStorage.getItem('churnshield_auth_token')
   );
+}
+
+export function setStoredAuthToken(token: string | null): void {
+  if (typeof localStorage === 'undefined') return;
+  if (token) {
+    localStorage.setItem('cs_auth_token', token);
+    localStorage.removeItem('churnveda_auth_token');
+    localStorage.removeItem('churnshield_auth_token');
+  } else {
+    localStorage.removeItem('cs_auth_token');
+    localStorage.removeItem('churnveda_auth_token');
+    localStorage.removeItem('churnshield_auth_token');
+  }
 }
 
 export function getAuthHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
@@ -193,17 +315,20 @@ export async function fetchCustomers(params?: {
   const res = await apiFetch(`/api/customers?${query.toString()}`, {
     headers: getAuthHeaders()
   });
-  if (!res.ok) {
-    return { customers: [], total: 0, page: params?.page || 1, limit: params?.limit || 25, totalPages: 1 };
-  }
-  return res.json();
+  return await safeJson(res, {
+    customers: [],
+    total: 0,
+    page: params?.page || 1,
+    limit: params?.limit || 25,
+    totalPages: 1
+  });
 }
 
 export async function fetchCustomerById(id: string): Promise<Customer> {
   const res = await apiFetch(`/api/customers/${id}`, {
     headers: getAuthHeaders()
   });
-  return res.json();
+  return await parseJsonResponse<Customer>(res, 'Failed to load customer');
 }
 
 export async function updateCustomerStatus(
@@ -220,7 +345,7 @@ export async function updateCustomerStatus(
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
   });
-  return res.json();
+  return await parseJsonResponse<Customer>(res, 'Failed to update customer status');
 }
 
 export async function predictCustomerChurn(customerId: string): Promise<{
@@ -234,7 +359,7 @@ export async function predictCustomerChurn(customerId: string): Promise<{
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ customerId })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to run churn prediction');
 }
 
 export async function recommendCustomerRetention(customerId: string): Promise<{
@@ -247,7 +372,7 @@ export async function recommendCustomerRetention(customerId: string): Promise<{
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ customerId })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to generate retention recommendation');
 }
 
 export async function batchPredictChurn(customerIds?: string[]): Promise<{
@@ -260,7 +385,7 @@ export async function batchPredictChurn(customerIds?: string[]): Promise<{
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ customerIds })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to run batch churn analysis');
 }
 
 export const DEFAULT_INTEGRATIONS: IntegrationStatus[] = [
@@ -397,7 +522,7 @@ export async function triggerDailyAlert(): Promise<{ success: boolean; alert: Da
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to trigger daily alert');
 }
 
 export async function testSlackAlert(channel?: string): Promise<{ success: boolean; message: string; payload: any }> {
@@ -406,7 +531,7 @@ export async function testSlackAlert(channel?: string): Promise<{ success: boole
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ channel })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to send test Slack alert');
 }
 
 export async function fetchRoiMetrics(): Promise<{
@@ -420,7 +545,14 @@ export async function fetchRoiMetrics(): Promise<{
   const res = await apiFetch('/api/roi', {
     headers: getAuthHeaders()
   });
-  return res.json();
+  return await safeJson(res, {
+    savedCustomersCount: 0,
+    savedMrr: 0,
+    subscriptionCost: 0,
+    netGain: 0,
+    roiMultiplier: 0,
+    summaryText: ''
+  });
 }
 
 export async function requestAccountDeletion(): Promise<{ success: boolean; message: string; scheduledDeletionDate: string }> {
@@ -428,7 +560,7 @@ export async function requestAccountDeletion(): Promise<{ success: boolean; mess
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to request account deletion');
 }
 
 // Auth API Calls
@@ -446,17 +578,10 @@ export async function signupUser(payload: {
 }) {
   const res = await apiFetch('/api/auth/signup', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify(payload)
   });
-  const data = await res.json();
-  if (!res.ok) {
-    const err: any = new Error(data.error || data.message || 'Failed to sign up');
-    err.status = res.status;
-    err.data = data;
-    throw err;
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to sign up');
 }
 
 export async function cancelTrial(email?: string) {
@@ -465,7 +590,7 @@ export async function cancelTrial(email?: string) {
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ email })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to cancel trial');
 }
 
 export async function cancelRazorpaySubscription() {
@@ -473,7 +598,7 @@ export async function cancelRazorpaySubscription() {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to cancel subscription');
 }
 
 export async function upgradePlan(plan: string, email?: string) {
@@ -482,7 +607,7 @@ export async function upgradePlan(plan: string, email?: string) {
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ plan, email })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to upgrade plan');
 }
 
 export async function addPaymentMethod(payload: {
@@ -495,57 +620,35 @@ export async function addPaymentMethod(payload: {
   email?: string;
   isDefault?: boolean;
 }) {
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('cs_auth_token') : null;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
   const res = await apiFetch('/api/billing/payment-method', {
     method: 'POST',
-    headers,
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to add payment method');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to add payment method');
 }
 
 export async function fetchPaymentMethods() {
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('cs_auth_token') : null;
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
-  const res = await apiFetch('/api/billing/payment-methods', { headers });
-  return res.json();
+  const res = await apiFetch('/api/billing/payment-methods', {
+    headers: getAuthHeaders()
+  });
+  return await safeJson(res, { paymentMethods: [] });
 }
 
 export async function deletePaymentMethod(id: string) {
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('cs_auth_token') : null;
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
   const res = await apiFetch(`/api/billing/payment-method/${id}`, {
     method: 'DELETE',
-    headers
+    headers: getAuthHeaders()
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to delete payment method');
 }
 
 export async function setDefaultPaymentMethod(id: string) {
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('cs_auth_token') : null;
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
   const res = await apiFetch(`/api/billing/payment-method/${id}/default`, {
     method: 'POST',
-    headers
+    headers: getAuthHeaders()
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to update default payment method');
 }
 
 export async function loginUser(payload: {
@@ -555,55 +658,49 @@ export async function loginUser(payload: {
 }) {
   const res = await apiFetch('/api/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify(payload)
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Invalid credentials');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Invalid credentials');
 }
 
 export async function fetchCurrentUser(token?: string) {
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  const resolvedToken = token || getStoredAuthToken();
+  const headers: Record<string, string> = { 'Accept': 'application/json' };
+  if (resolvedToken) {
+    headers['Authorization'] = `Bearer ${resolvedToken}`;
   }
   const res = await apiFetch('/api/auth/me', { headers });
   if (!res.ok) return null;
-  return res.json();
+  return await safeJson<any>(res, null);
 }
 
 export async function logoutUser(token?: string) {
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  const resolvedToken = token || getStoredAuthToken();
+  const headers: Record<string, string> = { 'Accept': 'application/json' };
+  if (resolvedToken) {
+    headers['Authorization'] = `Bearer ${resolvedToken}`;
   }
   const res = await apiFetch('/api/auth/logout', { method: 'POST', headers });
-  return res.json();
+  return await safeJson(res, { success: true, message: 'Logged out.' });
 }
 
 export async function forgotPassword(email: string) {
   const res = await apiFetch('/api/auth/forgot-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify({ email })
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to request password reset');
 }
 
 export async function resetPassword(token: string, newPassword: string) {
   const res = await apiFetch('/api/auth/reset-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify({ token, newPassword })
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to reset password');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to reset password');
 }
 
 export async function setupWorkspace(payload: {
@@ -611,9 +708,9 @@ export async function setupWorkspace(payload: {
   companyName?: string;
   selectedPlan?: string;
   billingCycle?: string;
-}) {
-  const token = getStoredAuthToken();
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+}, tokenOverride?: string) {
+  const token = tokenOverride || getStoredAuthToken();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
@@ -622,7 +719,7 @@ export async function setupWorkspace(payload: {
     headers,
     body: JSON.stringify(payload)
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to set up workspace');
 }
 
 export async function setPendingPlan(payload: {
@@ -630,7 +727,7 @@ export async function setPendingPlan(payload: {
   billing_cycle: string;
 }) {
   const token = getStoredAuthToken();
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
@@ -639,7 +736,7 @@ export async function setPendingPlan(payload: {
     headers,
     body: JSON.stringify(payload)
   });
-  return res.json();
+  return await safeJson(res, { success: false });
 }
 
 export async function resolvePostLoginRedirect(next?: string): Promise<{
@@ -647,7 +744,7 @@ export async function resolvePostLoginRedirect(next?: string): Promise<{
   pendingPlan?: { tier: string; billing_cycle: string };
 }> {
   const token = getStoredAuthToken();
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { 'Accept': 'application/json' };
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
@@ -656,7 +753,7 @@ export async function resolvePostLoginRedirect(next?: string): Promise<{
   if (!res.ok) {
     return { redirectTo: '/dashboard' };
   }
-  return res.json();
+  return await safeJson(res, { redirectTo: '/dashboard' });
 }
 
 export async function getAuthConfig(): Promise<{
@@ -674,11 +771,11 @@ export async function getAuthConfig(): Promise<{
 }> {
   let backendData: any = null;
   try {
-    const res = await apiFetch('/api/auth/config');
+    const res = await apiFetch('/api/auth/config', { headers: { 'Accept': 'application/json' } });
     if (res.ok) {
-      backendData = await res.json();
+      backendData = await safeJson<any>(res, null);
     }
-  } catch (e) {
+  } catch {
     // backend offline or unconfigured
   }
 
@@ -871,10 +968,7 @@ export async function fetchImportHistory() {
   const res = await apiFetch('/api/imports/history', {
     headers: getAuthHeaders()
   });
-  if (!res.ok) {
-    return { history: [] };
-  }
-  return res.json();
+  return await safeJson(res, { history: [] });
 }
 
 export async function clearImportHistory(): Promise<{ success: boolean; message: string }> {
@@ -882,7 +976,7 @@ export async function clearImportHistory(): Promise<{ success: boolean; message:
     method: 'DELETE',
     headers: getAuthHeaders()
   });
-  return res.json();
+  return await parseJsonResponse(res, 'Failed to clear import history');
 }
 
 export async function deleteCustomer(id: string): Promise<{ success: boolean; message: string; deletedCustomer?: Customer }> {
@@ -890,11 +984,7 @@ export async function deleteCustomer(id: string): Promise<{ success: boolean; me
     method: 'DELETE',
     headers: getAuthHeaders()
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to delete customer');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to delete customer');
 }
 
 export async function deleteCustomers(ids: string[]): Promise<{ success: boolean; deletedCount: number; message: string; deletedCustomers?: Customer[] }> {
@@ -903,11 +993,7 @@ export async function deleteCustomers(ids: string[]): Promise<{ success: boolean
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ ids })
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to bulk delete customers');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to bulk delete customers');
 }
 
 export async function clearDemoData(): Promise<{ success: boolean; removedCount: number; message: string }> {
@@ -915,11 +1001,7 @@ export async function clearDemoData(): Promise<{ success: boolean; removedCount:
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to clear demo data');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to clear demo data');
 }
 
 export async function loadDemoData(): Promise<{ success: boolean; count: number; message: string }> {
@@ -927,11 +1009,7 @@ export async function loadDemoData(): Promise<{ success: boolean; count: number;
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' })
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to load demo data');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to load demo data');
 }
 
 export async function restoreDeletedCustomers(customers: Customer[]): Promise<{ success: boolean; restoredCount: number; message: string; restored?: Customer[] }> {
@@ -940,11 +1018,7 @@ export async function restoreDeletedCustomers(customers: Customer[]): Promise<{ 
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ customers })
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to restore customers');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to restore customers');
 }
 
 export async function importCustomersData(payload: {
@@ -984,7 +1058,7 @@ export async function importCustomersData(payload: {
     headers: authHeaders,
     body: JSON.stringify(payload)
   });
-  const data = await res.json().catch(() => ({}));
+  const data = await safeJson<any>(res, {});
   if (!res.ok) {
     const err: any = new Error(
       res.status === 401
@@ -1020,11 +1094,7 @@ export async function addCustomerManual(payload: {
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to add customer manually');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to add customer manually');
 }
 
 export async function fetchRazorpayConfig(): Promise<{
@@ -1092,7 +1162,7 @@ export async function createRazorpayOrder(payload: {
 }> {
   const res = await apiFetch('/api/razorpay/create-order', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
   });
   return res.json();
@@ -1124,7 +1194,7 @@ export async function verifyRazorpayPayment(payload: {
 }> {
   const res = await apiFetch('/api/razorpay/verify-payment', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
   });
   return res.json();
@@ -1268,47 +1338,70 @@ export async function fetchSubscriptionDetails(): Promise<{
   return res.json();
 }
 
-export async function fetchSupabaseStatus(): Promise<{
+export async function fetchFirebaseStatus(): Promise<{
   success: boolean;
   url: string;
+  projectId?: string;
+  databaseId?: string;
+  authDomain?: string;
   isConfigured: boolean;
   isConnected: boolean;
   responseCode: number;
   statusText: string;
+  latencyMs?: number;
+  firebaseLatencyMs?: number;
+  firebaseMode?: string;
+  checklist?: {
+    projectId: string;
+    databaseId: string;
+    authDomain: string;
+    activeMode: string;
+    steps: { id: string; label: string; status: string; details: string }[];
+  };
   tables: { name: string; recordsCount: number; lastSync: string }[];
 }> {
-  const res = await apiFetch('/api/supabase/status');
+  const res = await apiFetch('/api/firebase/status', {
+    headers: getAuthHeaders()
+  });
   return res.json();
 }
 
-export async function syncSupabase(action = 'export', table = 'customers'): Promise<{
+export async function syncFirebase(action = 'export', table = 'customers'): Promise<{
   success: boolean;
   action: string;
   table: string;
   syncedRecordsCount: number;
+  firebaseSynced?: boolean;
   timestamp: string;
   message: string;
 }> {
-  const res = await apiFetch('/api/supabase/sync', {
+  const res = await apiFetch('/api/firebase/sync', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ action, table })
   });
   return res.json();
 }
 
-export async function testSupabase(): Promise<{
+export async function testFirebase(): Promise<{
   success: boolean;
   url: string;
   status: string;
   latencyMs: number;
+  firebaseLatencyMs?: number;
+  firebaseMode?: string;
   message: string;
 }> {
-  const res = await apiFetch('/api/supabase/test', {
-    method: 'POST'
+  const res = await apiFetch('/api/firebase/test', {
+    method: 'POST',
+    headers: getAuthHeaders()
   });
   return res.json();
 }
+
+export const fetchSupabaseStatus = fetchFirebaseStatus;
+export const syncSupabase = syncFirebase;
+export const testSupabase = testFirebase;
 
 // ----------------------------------------------------
 // Real Outbound Integrations (WhatsApp & Resend Email)
@@ -1611,6 +1704,9 @@ export const apiService = {
   verifyTrialPayment,
   activateSubscription,
   fetchSubscriptionDetails,
+  fetchFirebaseStatus,
+  syncFirebase,
+  testFirebase,
   fetchSupabaseStatus,
   syncSupabase,
   testSupabase,

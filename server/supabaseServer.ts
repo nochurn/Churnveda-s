@@ -89,8 +89,13 @@ export function setAuthCookies(res: Response, accessToken: string, _refreshToken
 }
 
 export function clearAuthCookies(res: Response) {
+  const isProd = process.env.NODE_ENV === 'production' || Boolean(process.env.APP_URL?.startsWith('https'));
+  const baseOpts = { path: '/', httpOnly: true, sameSite: 'lax' as const };
+  res.clearCookie('cs-access-token', { ...baseOpts, secure: isProd });
   res.clearCookie('cs-access-token', { path: '/' });
+  res.clearCookie('sb-access-token', { ...baseOpts, secure: isProd });
   res.clearCookie('sb-access-token', { path: '/' });
+  res.clearCookie('sb-refresh-token', { ...baseOpts, secure: isProd });
   res.clearCookie('sb-refresh-token', { path: '/' });
 }
 

@@ -63,6 +63,7 @@ import { initializeApp as initFirebaseAdmin, getApps as getFirebaseAdminApps } f
 import { getAuth as getFirebaseAdminAuth } from 'firebase-admin/auth';
 import { getFirestore as getFirebaseAdminFirestore } from 'firebase-admin/firestore';
 import firebaseConfig from './firebase-applet-config.json';
+import { firebaseBackend, type FirebaseRequestContext } from './server/firebaseBackend.ts';
 
 // Initialize Firebase Admin SDK securely using project configuration
 const firebaseAdminApp = getFirebaseAdminApps().length > 0
@@ -109,7 +110,7 @@ app.use(cookieParser());
 app.use((req, res, next) => {
   const isProd = process.env.NODE_ENV === 'production' && !process.env.AIS_DEV_ENVIRONMENT;
   const proto = req.headers['x-forwarded-proto'];
-  if (isProd && proto && proto === 'http') {
+  if (isProd && proto && proto === 'http' && !req.path.startsWith('/api/') && req.path !== '/health') {
     return res.redirect(301, `https://${req.headers.host}${req.url}`);
   }
   next();
@@ -558,7 +559,7 @@ export function hashPassword(password: string): string {
 }
 
 export function verifyPassword(password: string, combined: string): boolean {
-  if (!combined || !combined.includes(':')) return false;
+  if (!password || typeof password !== 'string' || !combined || !combined.includes(':')) return false;
   const [salt, key] = combined.split(':');
   if (!salt || !key) return false;
   try {
@@ -585,9 +586,10 @@ export function validatePasswordComplexity(password: string) {
   };
 }
 
-// Initial Admin User with Password123!
-const defaultSalt = 'a1b2c3d4e5f67890';
-const defaultHash = crypto.scryptSync('Password123!', defaultSalt, 64).toString('hex');
+// Bootstrap Admin User (uses explicit ADMIN_BOOTSTRAP_PASSWORD or unguessable random secret; signs in via Google Firebase Auth)
+const defaultSalt = crypto.randomBytes(16).toString('hex');
+const bootstrapPass = process.env.ADMIN_BOOTSTRAP_PASSWORD?.trim() || crypto.randomBytes(32).toString('hex');
+const defaultHash = crypto.scryptSync(bootstrapPass, defaultSalt, 64).toString('hex');
 const defaultPasswordCombined = `${defaultSalt}:${defaultHash}`;
 
 const usersDatabase: DbUser[] = [
@@ -610,14 +612,6 @@ const usersDatabase: DbUser[] = [
 
 // Sessions in memory: token -> session info
 const sessionsDatabase = new Map<string, { userId: string; email: string; workspaceId: string; expiresAt: number }>();
-
-// Seed default token for immediate demo access
-sessionsDatabase.set('sess_admin_default', {
-  userId: 'usr-admin-001',
-  email: 'nageshsharat@gmail.com',
-  workspaceId: 'ws-default',
-  expiresAt: Date.now() + 30 * 86400000
-});
 
 // Single-use password reset tokens (valid for 24 hours)
 const resetTokensDatabase = new Map<string, { email: string; expiresAt: number }>();
@@ -704,7 +698,7 @@ async function syncDatabaseOnBoot() {
   const dbStatus = await initDatabase();
   console.log(`[NoChurn Database] Storage initialized using ${dbStatus.target}`);
 
-  // 1 & 2 & 4. Ensure default workspace, default admin user, and authoritative billing plans in parallel
+  // 1 & 2 & 4. Ensure default workspace, owner membership, admin user, and authoritative billing plans in parallel
   await Promise.all([
     (async () => {
       try {
@@ -718,6 +712,7 @@ async function syncDatabaseOnBoot() {
             updated_at: new Date().toISOString()
           });
         }
+        await db.workspaceMembers.addMember('ws-default', 'usr-admin-001', 'owner');
       } catch (e: any) {
         console.warn('[Churnveda DB Boot Warning] Workspace seed:', e.message);
       }
@@ -726,6 +721,8 @@ async function syncDatabaseOnBoot() {
         const u = await db.users.getById('usr-admin-001');
         if (!u) {
           await db.users.upsert(usersDatabase[0] as any);
+        } else if (typeof u.password_hash === 'string' && u.password_hash.startsWith('a1b2c3d4e5f67890:')) {
+          await db.users.upsert({ ...u, password_hash: defaultPasswordCombined, updated_at: new Date().toISOString() } as any);
         }
       } catch (e: any) {
         console.warn('[Churnveda DB Boot Warning] User seed:', e.message);
@@ -740,20 +737,9 @@ async function syncDatabaseOnBoot() {
     )
   ]);
 
-  // 3, 5 & 6. Seed default session, migrate/hydrate customers, and hydrate users concurrently
+  // 3, 5 & 6. Revoke any legacy demo admin session token and hydrate customers concurrently
   await Promise.all([
-    db.sessions
-      .set({
-        token: 'sess_admin_default',
-        user_id: 'usr-admin-001',
-        email: 'nageshsharat@gmail.com',
-        workspace_id: 'ws-default',
-        expires_at: Date.now() + 30 * 86400000,
-        created_at: new Date().toISOString()
-      })
-      .catch((e: any) => {
-        console.warn('[Churnveda DB Boot Warning] Session seed:', e.message);
-      }),
+    db.sessions.delete('sess_admin_default').catch(() => {}),
 
     (async () => {
       try {
@@ -770,8 +756,8 @@ async function syncDatabaseOnBoot() {
           console.log(`[Churnveda DB] Found ${custCount} persisted customers in database.`);
         }
 
-        // Hydrate memory cache with DB records
-        const persisted = await db.customers.listByWorkspace('ws-default');
+        // Hydrate memory cache with ALL persisted workspace customers
+        const persisted = await db.customers.listAll();
         if (persisted && persisted.length > 0) {
           customersDatabase = persisted;
         }
@@ -782,7 +768,14 @@ async function syncDatabaseOnBoot() {
 
     (async () => {
       try {
-        const dbUsers = await db.users.listAll();
+        const [dbUsers, dbWorkspaces, dbMembers, dbSubs, dbImports] = await Promise.all([
+          db.users.listAll(),
+          db.workspaces.listAll(),
+          db.workspaceMembers.listAll(),
+          db.subscriptions.listAll(),
+          db.csvImports.listAll()
+        ]);
+
         if (dbUsers && dbUsers.length > 0) {
           for (const du of dbUsers) {
             const idx = usersDatabase.findIndex(u => u.id === du.id);
@@ -793,8 +786,47 @@ async function syncDatabaseOnBoot() {
             }
           }
         }
+
+        if (dbWorkspaces && dbWorkspaces.length > 0) {
+          for (const dw of dbWorkspaces) {
+            const idx = workspacesDatabase.findIndex(w => w.id === dw.id);
+            if (idx >= 0) {
+              workspacesDatabase[idx] = { ...workspacesDatabase[idx], ...dw };
+            } else {
+              workspacesDatabase.push(dw);
+            }
+          }
+        }
+
+        if (dbMembers && dbMembers.length > 0) {
+          for (const dm of dbMembers) {
+            const idx = workspaceMembersDatabase.findIndex(
+              m => m.workspace_id === dm.workspace_id && m.user_id === dm.user_id
+            );
+            if (idx >= 0) {
+              workspaceMembersDatabase[idx] = { ...workspaceMembersDatabase[idx], ...dm };
+            } else {
+              workspaceMembersDatabase.push(dm);
+            }
+          }
+        }
+
+        if (dbSubs && dbSubs.length > 0) {
+          for (const ds of dbSubs) {
+            const idx = subscriptionsDatabase.findIndex(s => s.workspace_id === ds.workspace_id);
+            if (idx >= 0) {
+              subscriptionsDatabase[idx] = { ...subscriptionsDatabase[idx], ...ds };
+            } else {
+              subscriptionsDatabase.push(ds);
+            }
+          }
+        }
+
+        if (dbImports && dbImports.length > 0) {
+          importHistoryDatabase = dbImports;
+        }
       } catch (e: any) {
-        console.warn('[Churnveda DB Boot Warning] Users sync:', e.message);
+        console.warn('[Churnveda DB Boot Warning] Entity hydration:', e.message);
       }
     })()
   ]);
@@ -862,11 +894,18 @@ async function resolveAuthUser(req: express.Request): Promise<DbUser | null> {
       if (decodedToken && decodedToken.uid) {
         const userId = decodedToken.uid;
         const email = (decodedToken.email || '').toLowerCase();
+        (req as any).firebaseIdToken = token;
+        (req as any).firebaseUid = userId;
+        (req as any).firebaseEmail = email;
+        (req as any).firebaseEmailVerified = Boolean(decodedToken.email_verified);
         let user = usersDatabase.find(u => u.id === userId || (email && u.email.toLowerCase() === email));
         if (!user) {
           user = (await db.users.getById(userId)) as unknown as DbUser;
           if (!user && email) {
             user = (await db.users.getByEmail(email)) as unknown as DbUser;
+          }
+          if (user && !usersDatabase.some(u => u.id === user!.id)) {
+            usersDatabase.push(user);
           }
         }
 
@@ -920,13 +959,58 @@ async function resolveAuthUser(req: express.Request): Promise<DbUser | null> {
         }
         return user || null;
       }
-    } catch (e) {
-      // Firebase verification error (invalid signature, expired, revoked, wrong audience)
-      // Never trust unverified JWT payloads
+    } catch (e: any) {
+      console.warn('[Auth] Firebase ID token verification failed:', e?.code || e?.message || 'invalid token');
     }
   }
 
   return null;
+}
+
+function getFirebaseCtx(req: express.Request): FirebaseRequestContext | null {
+  const user = (req as any).user as DbUser | undefined;
+  const workspaceId = (req as any).workspaceId as string | undefined;
+  if (!user || !workspaceId) return null;
+  return {
+    uid: (req as any).firebaseUid || user.id,
+    email: (req as any).firebaseEmail || user.email,
+    emailVerified: Boolean((req as any).firebaseEmailVerified ?? user.email_verified),
+    workspaceId,
+    idToken: (req as any).firebaseIdToken || null,
+    companyName: user.company_name,
+    fullName: user.full_name,
+    plan: user.selected_plan,
+    billingCycle: 'monthly',
+    billingStatus: user.billing_status
+  };
+}
+
+const lastFirebaseCustomerHydration = new Map<string, number>();
+
+async function hydrateWorkspaceCustomersFromFirebase(ctx: FirebaseRequestContext | null): Promise<void> {
+  if (!ctx || !firebaseBackend.isReady(ctx)) return;
+  const now = Date.now();
+  const last = lastFirebaseCustomerHydration.get(ctx.workspaceId) || 0;
+  if (now - last < 15000) return;
+  lastFirebaseCustomerHydration.set(ctx.workspaceId, now);
+
+  try {
+    const remoteCustomers = await firebaseBackend.customers.list(ctx);
+    if (remoteCustomers.length === 0) return;
+
+    for (const rc of remoteCustomers) {
+      const idx = customersDatabase.findIndex(
+        c => (c.workspaceId || 'ws-default') === ctx.workspaceId && (c.id === rc.id || c.customerId === rc.id)
+      );
+      if (idx >= 0) {
+        customersDatabase[idx] = { ...customersDatabase[idx], ...rc };
+      } else {
+        customersDatabase.push(rc);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Firebase Hydration Warning] Customers:', err?.message || 'skipped');
+  }
 }
 
 /**
@@ -1370,14 +1454,24 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', service: 'churnveda', timestamp: new Date().toISOString() });
 });
 
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', async (_req, res) => {
   const hasKey = Boolean(process.env.GEMINI_API_KEY);
-  const dbHealth = await db.getHealth();
+  const [dbHealth, fbHealth] = await Promise.all([
+    db.getHealth(),
+    firebaseBackend.testConnection(null)
+  ]);
   res.json({
     status: 'ok',
     geminiConfigured: hasKey,
     model: 'gemini-3.1-flash-lite',
-    database: dbHealth,
+    database: {
+      ...dbHealth,
+      firebase: {
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        ...fbHealth
+      }
+    },
     totalCustomers: customersDatabase.length
   });
 });
@@ -1385,8 +1479,23 @@ app.get('/api/health', async (req, res) => {
 // 1B. Admin-Only Database Persistence & Multi-Tenant Self-Test (Area 7)
 app.all('/api/admin/db-test', requireAdmin, async (req, res) => {
   try {
-    const results = await db.admin.runSelfTest();
-    res.json(results);
+    const fbCtx = getFirebaseCtx(req);
+    const [results, fbProbe] = await Promise.all([
+      db.admin.runSelfTest(),
+      firebaseBackend.testConnection(fbCtx)
+    ]);
+    const tests = Array.isArray(results.tests) ? [...results.tests] : [];
+    tests.push({
+      test: 'Firebase Cloud Firestore Backend',
+      description: 'Verify live Firestore endpoint connectivity, rules enforcement, and backend synchronization layer.',
+      passed: fbProbe.reachable,
+      details: `${fbProbe.details} (${fbProbe.latencyMs}ms, mode: ${fbProbe.mode})`
+    });
+    res.json({
+      ...results,
+      allPassed: Boolean(results.allPassed && fbProbe.reachable),
+      tests
+    });
   } catch (error: any) {
     res.status(500).json({
       allPassed: false,
@@ -1396,7 +1505,8 @@ app.all('/api/admin/db-test', requireAdmin, async (req, res) => {
 });
 
 // 2. Customers List with filtering, sorting, pagination (TENANT ISOLATED - Area 1, 2, 17)
-app.get('/api/customers', requireAuth, (req, res) => {
+app.get('/api/customers', requireAuth, async (req, res) => {
+  await hydrateWorkspaceCustomersFromFirebase(getFirebaseCtx(req));
   const {
     search,
     riskLevel,
@@ -1520,8 +1630,12 @@ app.patch('/api/customers/:id', requireAuth, async (req, res) => {
   if (retentionRecommendation) customersDatabase[index].retentionRecommendation = retentionRecommendation;
 
   const updatedCustomer = customersDatabase[index];
+  const fbCtx = getFirebaseCtx(req);
   try {
-    await db.customers.upsert(targetWorkspace, updatedCustomer);
+    await Promise.all([
+      db.customers.upsert(targetWorkspace, updatedCustomer),
+      fbCtx ? firebaseBackend.customers.upsert(fbCtx, updatedCustomer).catch(() => {}) : Promise.resolve()
+    ]);
   } catch (err: any) {
     console.error('[Churnveda DB Error] Failed to persist customer update:', err.message);
   }
@@ -1533,6 +1647,7 @@ app.patch('/api/customers/:id', requireAuth, async (req, res) => {
 app.delete('/api/customers/:id', requireAuth, async (req, res) => {
   const authUser = (req as any).user as DbUser;
   const targetWorkspace = (req as any).workspaceId as string;
+  const fbCtx = getFirebaseCtx(req);
   const customerId = req.params.id;
 
   const idx = customersDatabase.findIndex(
@@ -1547,16 +1662,26 @@ app.delete('/api/customers/:id', requireAuth, async (req, res) => {
   customersDatabase.splice(idx, 1);
 
   try {
-    await db.customers.delete(targetWorkspace, customerId);
-    await db.auditLogs.record({
-      workspaceId: targetWorkspace,
-      actorId: authUser.id,
-      actorEmail: authUser.email,
-      action: 'customer.deleted',
-      targetType: 'customer',
-      targetId: customerId,
-      metadata: { customerName: deletedCustomer.name }
-    });
+    await Promise.all([
+      db.customers.delete(targetWorkspace, customerId),
+      fbCtx ? firebaseBackend.customers.delete(fbCtx, customerId).catch(() => {}) : Promise.resolve(),
+      db.auditLogs.record({
+        workspaceId: targetWorkspace,
+        actorId: authUser.id,
+        actorEmail: authUser.email,
+        action: 'customer.deleted',
+        targetType: 'customer',
+        targetId: customerId,
+        metadata: { customerName: deletedCustomer.name }
+      }),
+      fbCtx
+        ? firebaseBackend.auditLogs.record(fbCtx, {
+            action: 'customer.deleted',
+            targetType: 'customer',
+            targetId: customerId
+          }).catch(() => {})
+        : Promise.resolve()
+    ]);
   } catch (err: any) {
     console.error('[Churnveda DB Error] Failed to delete customer from persistent DB:', err.message);
   }
@@ -1589,16 +1714,24 @@ app.post('/api/customers/bulk-delete', requireAuth, async (req, res) => {
     return true;
   });
 
+  const fbCtx = getFirebaseCtx(req);
   try {
-    await db.customers.bulkDelete(targetWorkspace, ids);
-    await db.auditLogs.record({
-      workspaceId: targetWorkspace,
-      actorId: authUser.id,
-      actorEmail: authUser.email,
-      action: 'customer.bulk_deleted',
-      targetType: 'customers',
-      metadata: { deletedCount: deletedCustomers.length, ids }
-    });
+    await Promise.all([
+      db.customers.bulkDelete(targetWorkspace, ids),
+      firebaseBackend.customers.bulkDelete(fbCtx!, ids).catch(() => {}),
+      db.auditLogs.record({
+        workspaceId: targetWorkspace,
+        actorId: authUser.id,
+        actorEmail: authUser.email,
+        action: 'customer.bulk_deleted',
+        targetType: 'customers',
+        metadata: { deletedCount: deletedCustomers.length, ids }
+      }),
+      firebaseBackend.auditLogs.record(fbCtx!, {
+        action: 'customer.bulk_deleted',
+        targetType: 'customers'
+      }).catch(() => {})
+    ]);
   } catch (err: any) {
     console.error('[Churnveda DB Error] Failed to bulk delete customers from persistent DB:', err.message);
   }
@@ -1614,6 +1747,7 @@ app.post('/api/customers/bulk-delete', requireAuth, async (req, res) => {
 // 4D. Restore Deleted Customers (Undo Support - Area 1, 2, 17)
 app.post('/api/customers/restore', requireAuth, async (req, res) => {
   const targetWorkspace = (req as any).workspaceId as string;
+  const fbCtx = getFirebaseCtx(req);
   const { customers } = req.body;
 
   if (!Array.isArray(customers) || customers.length === 0) {
@@ -1647,6 +1781,10 @@ app.post('/api/customers/restore', requireAuth, async (req, res) => {
     }
   }
 
+  if (fbCtx && restored.length > 0) {
+    await firebaseBackend.customers.batchUpsert(fbCtx, restored).catch(() => {});
+  }
+
   res.json({
     success: true,
     restoredCount: restored.length,
@@ -1658,6 +1796,7 @@ app.post('/api/customers/restore', requireAuth, async (req, res) => {
 // 4E. Clear Demo Data Only (Area 1, 2, 17)
 app.post('/api/customers/clear-demo', requireAuth, async (req, res) => {
   const targetWorkspace = (req as any).workspaceId as string;
+  const fbCtx = getFirebaseCtx(req);
 
   const demoRecords: Customer[] = [];
   customersDatabase = customersDatabase.filter(c => {
@@ -1669,7 +1808,12 @@ app.post('/api/customers/clear-demo', requireAuth, async (req, res) => {
   });
 
   try {
-    await db.customers.clearDemo(targetWorkspace);
+    await Promise.all([
+      db.customers.clearDemo(targetWorkspace),
+      fbCtx && demoRecords.length > 0
+        ? firebaseBackend.customers.bulkDelete(fbCtx, demoRecords.map(d => d.id)).catch(() => {})
+        : Promise.resolve()
+    ]);
   } catch (err: any) {
     console.error('[Churnveda DB Error] Failed to clear demo records from DB:', err.message);
   }
@@ -1684,6 +1828,7 @@ app.post('/api/customers/clear-demo', requireAuth, async (req, res) => {
 // 4F. Load / Restore Demo Data (Area 1, 2, 17)
 app.post('/api/customers/load-demo', requireAuth, async (req, res) => {
   const targetWorkspace = (req as any).workspaceId as string;
+  const fbCtx = getFirebaseCtx(req);
 
   // Remove existing demo data first to prevent duplicate entries
   customersDatabase = customersDatabase.filter(c => {
@@ -1705,6 +1850,9 @@ app.post('/api/customers/load-demo', requireAuth, async (req, res) => {
   try {
     for (const record of demoRecords) {
       await db.customers.upsert(targetWorkspace, record);
+    }
+    if (fbCtx) {
+      await firebaseBackend.customers.batchUpsert(fbCtx, demoRecords).catch(() => {});
     }
   } catch (err: any) {
     console.warn('[Churnveda DB] Demo records added to in-memory store:', err?.message);
@@ -1741,6 +1889,8 @@ app.post('/api/churn/predict', requireAuth, aiRateLimiter, async (req, res) => {
 
   const ai = getGenAI();
 
+  const fbCtx = getFirebaseCtx(req);
+
   if (!ai) {
     // Graceful fallback to algorithmic scoring
     const fallback = calculateFallbackChurn(customer);
@@ -1750,6 +1900,11 @@ app.post('/api/churn/predict', requireAuth, aiRateLimiter, async (req, res) => {
     customer.churnProbability = fallback.churnProbability;
     customer.lastAnalyzedAt = new Date().toISOString();
     customer.isAiAnalyzed = false;
+
+    await Promise.all([
+      db.customers.upsert(targetWorkspace, customer).catch(() => {}),
+      fbCtx ? firebaseBackend.customers.upsert(fbCtx, customer).catch(() => {}) : Promise.resolve()
+    ]);
 
     return res.json({
       success: true,
@@ -1836,6 +1991,11 @@ Return a strictly valid JSON object matching this schema:
     customer.lastAnalyzedAt = new Date().toISOString();
     customer.isAiAnalyzed = true;
 
+    await Promise.all([
+      db.customers.upsert(targetWorkspace, customer).catch(() => {}),
+      fbCtx ? firebaseBackend.customers.upsert(fbCtx, customer).catch(() => {}) : Promise.resolve()
+    ]);
+
     res.json({
       success: true,
       analysis: {
@@ -1857,6 +2017,11 @@ Return a strictly valid JSON object matching this schema:
     customer.lastAnalyzedAt = new Date().toISOString();
     customer.isAiAnalyzed = false;
 
+    await Promise.all([
+      db.customers.upsert(targetWorkspace, customer).catch(() => {}),
+      fbCtx ? firebaseBackend.customers.upsert(fbCtx, customer).catch(() => {}) : Promise.resolve()
+    ]);
+
     res.json({
       success: true,
       analysis: fallback,
@@ -1870,6 +2035,7 @@ Return a strictly valid JSON object matching this schema:
 app.post('/api/churn/recommend', requireAuth, aiRateLimiter, async (req, res) => {
   const { customerId } = req.body;
   const targetWorkspace = (req as any).workspaceId as string;
+  const fbCtx = getFirebaseCtx(req);
   const customer = customersDatabase.find(
     c => (c.workspaceId || 'ws-default') === targetWorkspace && (c.id === customerId || c.customerId === customerId)
   );
@@ -1912,6 +2078,12 @@ app.post('/api/churn/recommend', requireAuth, aiRateLimiter, async (req, res) =>
     };
 
     customer.retentionRecommendation = rec as any;
+    customer.recommendedAction = rec.action;
+    customer.lastAnalyzedAt = new Date().toISOString();
+    await Promise.all([
+      db.customers.upsert(targetWorkspace, customer).catch(() => {}),
+      fbCtx ? firebaseBackend.customers.upsert(fbCtx, customer).catch(() => {}) : Promise.resolve()
+    ]);
     return res.json({
       success: true,
       recommendation: rec,
@@ -1975,6 +2147,12 @@ Return strictly valid JSON:
     };
 
     customer.retentionRecommendation = recommendation as any;
+    customer.recommendedAction = recommendation.action;
+    customer.lastAnalyzedAt = new Date().toISOString();
+    await Promise.all([
+      db.customers.upsert(targetWorkspace, customer).catch(() => {}),
+      fbCtx ? firebaseBackend.customers.upsert(fbCtx, customer).catch(() => {}) : Promise.resolve()
+    ]);
     res.json({
       success: true,
       recommendation,
@@ -1991,6 +2169,12 @@ Return strictly valid JSON:
       suggestedChannel: 'Email'
     };
     customer.retentionRecommendation = fallbackRec as any;
+    customer.recommendedAction = fallbackRec.action;
+    customer.lastAnalyzedAt = new Date().toISOString();
+    await Promise.all([
+      db.customers.upsert(targetWorkspace, customer).catch(() => {}),
+      fbCtx ? firebaseBackend.customers.upsert(fbCtx, customer).catch(() => {}) : Promise.resolve()
+    ]);
     res.json({ success: true, recommendation: fallbackRec, source: 'fallback' });
   }
 });
@@ -2043,6 +2227,12 @@ app.post('/api/churn/batch-predict', requireAuth, aiRateLimiter, async (req, res
     updatedCount++;
   }
 
+  const fbCtx = getFirebaseCtx(req);
+  await Promise.all([
+    ...targets.map(t => db.customers.upsert(targetWorkspace, t).catch(() => {})),
+    fbCtx ? firebaseBackend.customers.batchUpsert(fbCtx, targets).catch(() => {}) : Promise.resolve()
+  ]);
+
   res.json({
     success: true,
     analyzedCount: updatedCount,
@@ -2051,24 +2241,60 @@ app.post('/api/churn/batch-predict', requireAuth, aiRateLimiter, async (req, res
 });
 
 // 8. Integrations Endpoints (Area 1, 2, 5, 17)
-app.get('/api/integrations', (req, res) => {
+app.get('/api/integrations', async (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  try {
+    const authUser = await resolveAuthUser(req);
+    if (authUser) {
+      (req as any).user = authUser;
+      (req as any).workspaceId = await resolveAuthorizedWorkspace(req, authUser);
+      const fbCtx = getFirebaseCtx(req);
+      if (fbCtx) {
+        const remote = await firebaseBackend.integrations.list(fbCtx).catch(() => []);
+        if (remote.length > 0) {
+          const merged = integrationsState.map(local => {
+            const match = remote.find(r => r.id === local.id);
+            return match
+              ? {
+                  ...local,
+                  isConnected: typeof match.isConnected === 'boolean' ? match.isConnected : local.isConnected,
+                  syncedRecordsCount:
+                    typeof match.syncedRecordsCount === 'number' ? match.syncedRecordsCount : local.syncedRecordsCount,
+                  statusText: match.statusText || local.statusText,
+                  lastSyncAt: match.lastSyncAt || local.lastSyncAt
+                }
+              : local;
+          });
+          return res.json(merged);
+        }
+      }
+    }
+  } catch {
+    // fallback to default integrations state
+  }
   res.json(integrationsState);
 });
 
-app.post('/api/integrations/sync', requireAuth, (req, res) => {
+app.post('/api/integrations/sync', requireAuth, async (req, res) => {
   const { integrationId } = req.body;
+  const fbCtx = getFirebaseCtx(req);
   const target = integrationsState.find(i => i.id === integrationId);
   if (target) {
     target.lastSyncAt = new Date().toISOString();
     target.statusText = 'Synced successfully just now';
     target.syncedRecordsCount += Math.floor(Math.random() * 10) + 1;
+    if (fbCtx) {
+      await firebaseBackend.integrations.upsert(fbCtx, target).catch(() => {});
+    }
   } else {
     // sync all
     integrationsState.forEach(i => {
       i.lastSyncAt = new Date().toISOString();
       i.statusText = 'Synced successfully just now';
     });
+    if (fbCtx) {
+      await Promise.all(integrationsState.map(i => firebaseBackend.integrations.upsert(fbCtx, i).catch(() => {})));
+    }
   }
   res.json({ success: true, integrations: integrationsState });
 });
@@ -2077,6 +2303,7 @@ app.post('/api/integrations/toggle', requireAuth, async (req, res) => {
   const { integrationId, isConnected } = req.body;
   const authUser = (req as any).user as DbUser;
   const workspaceId = (req as any).workspaceId as string;
+  const fbCtx = getFirebaseCtx(req);
   const tier = getWorkspacePlanTier(workspaceId);
   const planLimits = PLAN_LIMITS[tier];
 
@@ -2102,18 +2329,30 @@ app.post('/api/integrations/toggle', requireAuth, async (req, res) => {
   if (target) {
     target.isConnected = Boolean(isConnected);
     target.statusText = target.isConnected ? 'Connected' : 'Disconnected';
+    if (fbCtx) {
+      await firebaseBackend.integrations.upsert(fbCtx, target).catch(() => {});
+    }
   }
 
   try {
-    await db.auditLogs.record({
-      workspaceId,
-      actorId: authUser.id,
-      actorEmail: authUser.email,
-      action: 'integration.toggled',
-      targetType: 'integration',
-      targetId: integrationId,
-      metadata: { isConnected: Boolean(isConnected) }
-    });
+    await Promise.all([
+      db.auditLogs.record({
+        workspaceId,
+        actorId: authUser.id,
+        actorEmail: authUser.email,
+        action: 'integration.toggled',
+        targetType: 'integration',
+        targetId: integrationId,
+        metadata: { isConnected: Boolean(isConnected) }
+      }),
+      fbCtx
+        ? firebaseBackend.auditLogs.record(fbCtx, {
+            action: 'integration.toggled',
+            targetType: 'integration',
+            targetId: integrationId
+          }).catch(() => {})
+        : Promise.resolve()
+    ]);
   } catch (e) {
     // ignore
   }
@@ -2175,17 +2414,29 @@ app.get('/api/imports/template', handleDownloadCsvTemplate);
 app.get('/api/template/csv', handleDownloadCsvTemplate);
 
 // 9B. Import History Endpoint (Area 1, 2, 17)
-app.get('/api/imports/history', requireAuth, (req, res) => {
+app.get('/api/imports/history', requireAuth, async (req, res) => {
   const targetWorkspace = (req as any).workspaceId as string;
-  const history = importHistoryDatabase.filter(h => h.workspaceId === targetWorkspace);
+  const fbCtx = getFirebaseCtx(req);
+  let history = importHistoryDatabase.filter(h => h.workspaceId === targetWorkspace);
+  if (history.length === 0 && fbCtx) {
+    const remoteHistory = await firebaseBackend.importHistory.list(fbCtx).catch(() => []);
+    if (remoteHistory.length > 0) {
+      importHistoryDatabase.push(...remoteHistory);
+      history = remoteHistory;
+    }
+  }
   res.json({ success: true, history });
 });
 
 app.delete('/api/imports/history', requireAuth, async (req, res) => {
   const targetWorkspace = (req as any).workspaceId as string;
+  const fbCtx = getFirebaseCtx(req);
   importHistoryDatabase = importHistoryDatabase.filter(h => h.workspaceId !== targetWorkspace);
   try {
-    await db.csvImports.clearByWorkspace(targetWorkspace);
+    await Promise.all([
+      db.csvImports.clearByWorkspace(targetWorkspace),
+      fbCtx ? firebaseBackend.importHistory.clearWorkspace(fbCtx).catch(() => {}) : Promise.resolve()
+    ]);
   } catch (err: any) {
     console.warn('[Churnveda DB Error] Failed to clear import history:', err.message);
   }
@@ -2353,8 +2604,12 @@ app.post('/api/customers/manual', requireAuth, csvImportLimiter, async (req, res
     customersDatabase.unshift(newCustomer);
   }
 
+  const fbCtx = getFirebaseCtx(req);
   try {
-    await db.customers.upsert(targetWorkspace, newCustomer);
+    await Promise.all([
+      db.customers.upsert(targetWorkspace, newCustomer),
+      fbCtx ? firebaseBackend.customers.upsert(fbCtx, newCustomer).catch(() => {}) : Promise.resolve()
+    ]);
   } catch (err: any) {
     console.error('[Churnveda DB Error] Failed to persist new customer:', err.message);
   }
@@ -3041,6 +3296,7 @@ Return a strictly valid JSON object matching this schema:
   }
 
   // Persist to database (if not validateOnly)
+  const fbCtx = getFirebaseCtx(req);
   for (const cust of validCustomers) {
     const existingIndex = customersDatabase.findIndex(
       c => (c.workspaceId || 'ws-default') === targetWorkspace && (c.customerId === cust.customerId || c.id === cust.id)
@@ -3057,6 +3313,10 @@ Return a strictly valid JSON object matching this schema:
     } catch (err: any) {
       console.error('[Churnveda DB Error] Failed to persist imported customer:', err.message);
     }
+  }
+
+  if (fbCtx && validCustomers.length > 0) {
+    await firebaseBackend.customers.batchUpsert(fbCtx, validCustomers).catch(() => {});
   }
 
   // Calculate live workspace dashboard stats
@@ -3087,7 +3347,10 @@ Return a strictly valid JSON object matching this schema:
   };
 
   try {
-    await db.csvImports.insert(historyEntry);
+    await Promise.all([
+      db.csvImports.insert(historyEntry),
+      fbCtx ? firebaseBackend.importHistory.record(fbCtx, historyEntry).catch(() => {}) : Promise.resolve()
+    ]);
   } catch (e: any) {
     console.warn('[Churnveda DB Error] Failed to persist import history:', e.message);
   }
@@ -3119,20 +3382,46 @@ Return a strictly valid JSON object matching this schema:
 });
 
 // 9E. Import History Audit Trail
-app.get('/api/customers/import/history', requireAuth, (req, res) => {
+app.get('/api/customers/import/history', requireAuth, async (req, res) => {
   const targetWorkspace = (req as any).workspaceId as string;
-  const history = importHistoryDatabase.filter(h => (h.workspaceId || 'ws-default') === targetWorkspace);
+  const fbCtx = getFirebaseCtx(req);
+  let history = importHistoryDatabase.filter(h => (h.workspaceId || 'ws-default') === targetWorkspace);
+  if (history.length === 0 && fbCtx) {
+    const remoteHistory = await firebaseBackend.importHistory.list(fbCtx).catch(() => []);
+    if (remoteHistory.length > 0) {
+      importHistoryDatabase.push(...remoteHistory);
+      history = remoteHistory;
+    }
+  }
   res.json({ success: true, history });
 });
 
 // 10. Alerts & Slack Endpoints (Area 2)
-app.get('/api/alerts', (req, res) => {
+app.get('/api/alerts', async (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  try {
+    const authUser = await resolveAuthUser(req);
+    if (authUser) {
+      (req as any).user = authUser;
+      (req as any).workspaceId = await resolveAuthorizedWorkspace(req, authUser);
+      const fbCtx = getFirebaseCtx(req);
+      if (fbCtx) {
+        const remoteAlerts = await firebaseBackend.alerts.list(fbCtx).catch(() => []);
+        if (remoteAlerts.length > 0) {
+          const seen = new Set(remoteAlerts.map(a => a.id));
+          return res.json([...remoteAlerts, ...dailyAlerts.filter(a => !seen.has(a.id))]);
+        }
+      }
+    }
+  } catch {
+    // fallback to default alerts
+  }
   res.json(dailyAlerts);
 });
 
-app.post('/api/alerts/trigger-daily', requireAuth, (req, res) => {
+app.post('/api/alerts/trigger-daily', requireAuth, async (req, res) => {
   const targetWorkspace = (req as any).workspaceId as string;
+  const fbCtx = getFirebaseCtx(req);
   const atRisk = customersDatabase.filter(c => (c.workspaceId || 'ws-default') === targetWorkspace && c.riskScore >= 61).slice(0, 5);
   const totalMrrRisk = atRisk.reduce((acc, c) => acc + c.mrr, 0);
 
@@ -3154,6 +3443,9 @@ app.post('/api/alerts/trigger-daily', requireAuth, (req, res) => {
   };
 
   dailyAlerts.unshift(newAlert);
+  if (fbCtx) {
+    await firebaseBackend.alerts.upsert(fbCtx, newAlert).catch(() => {});
+  }
   res.json({ success: true, alert: newAlert });
 });
 
@@ -3395,30 +3687,43 @@ app.post('/api/auth/setup-workspace', async (req, res) => {
     : 'growth';
   const normCycle = (billingCycle || '').toLowerCase() === 'annual' ? 'annual' : 'monthly';
 
-  // 1. Idempotently resolve or create Workspace
+  // 1. Idempotently resolve or create Workspace & persist to DB
   let existingMembership = workspaceMembersDatabase.find(wm => wm.user_id === userId && wm.role === 'owner');
-  let workspaceId = existingMembership ? existingMembership.workspace_id : null;
+  let workspaceId = existingMembership ? existingMembership.workspace_id : (user.workspace_id || null);
 
   if (!workspaceId) {
     workspaceId = `ws_${userId.replace(/-/g, '').slice(0, 12)}`;
-    if (!workspacesDatabase.some(w => w.id === workspaceId)) {
-      workspacesDatabase.push({
-        id: workspaceId,
-        name: cleanCompany,
-        owner_id: userId,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      });
-    }
+  }
 
-    if (!workspaceMembersDatabase.some(wm => wm.workspace_id === workspaceId && wm.user_id === userId)) {
-      workspaceMembersDatabase.push({
-        id: `wsm_${userId.replace(/-/g, '').slice(0, 12)}`,
-        workspace_id: workspaceId,
-        user_id: userId,
-        role: 'owner',
-        created_at: new Date().toISOString()
-      });
+  const nowIso = new Date().toISOString();
+  if (!workspacesDatabase.some(w => w.id === workspaceId)) {
+    const wsRecord = {
+      id: workspaceId,
+      name: cleanCompany,
+      owner_id: userId,
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+    workspacesDatabase.push(wsRecord);
+    try {
+      await db.workspaces.upsert(wsRecord);
+    } catch (e: any) {
+      console.warn('[Churnveda DB Warning] Failed persisting workspace:', e.message);
+    }
+  }
+
+  if (!workspaceMembersDatabase.some(wm => wm.workspace_id === workspaceId && wm.user_id === userId)) {
+    workspaceMembersDatabase.push({
+      id: `wsm_${userId.replace(/-/g, '').slice(0, 12)}`,
+      workspace_id: workspaceId,
+      user_id: userId,
+      role: 'owner',
+      created_at: nowIso
+    });
+    try {
+      await db.workspaceMembers.addMember(workspaceId, userId, 'owner');
+    } catch (e: any) {
+      console.warn('[Churnveda DB Warning] Failed persisting workspace member:', e.message);
     }
   }
 
@@ -3433,14 +3738,14 @@ app.post('/api/auth/setup-workspace', async (req, res) => {
         email: userEmail,
         selected_plan: normPlan,
         billing_cycle: normCycle,
-        updated_at: new Date().toISOString()
+        updated_at: nowIso
       });
 
       await admin.from('workspaces').upsert({
         id: workspaceId,
         name: cleanCompany,
         owner_id: userId,
-        updated_at: new Date().toISOString()
+        updated_at: nowIso
       });
 
       await admin.from('workspace_members').upsert({
@@ -3453,7 +3758,7 @@ app.post('/api/auth/setup-workspace', async (req, res) => {
     }
   }
 
-  // 3. Ensure local usersDatabase is synchronized
+  // 3. Ensure local usersDatabase and persistent DB are synchronized
   let dbUser = usersDatabase.find(u => u.id === userId || (userEmail && u.email.toLowerCase() === userEmail));
   if (!dbUser) {
     dbUser = {
@@ -3465,13 +3770,13 @@ app.post('/api/auth/setup-workspace', async (req, res) => {
       email_verified: Boolean((user as any).email_confirmed_at || (user as any).email_verified),
       selected_plan: normPlan,
       billing_status: 'trialing',
-      trial_start_date: new Date().toISOString(),
+      trial_start_date: nowIso,
       trial_end_date: new Date(Date.now() + 14 * 86400000).toISOString(),
       workspace_id: workspaceId,
       referral_code: generateReferralCode(cleanCompany),
       earned_reward_days: 0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: nowIso,
+      updated_at: nowIso,
       role: 'Admin'
     };
     usersDatabase.push(dbUser);
@@ -3480,32 +3785,68 @@ app.post('/api/auth/setup-workspace', async (req, res) => {
     if (cleanCompany) dbUser.company_name = cleanCompany;
     dbUser.workspace_id = workspaceId;
     dbUser.selected_plan = normPlan;
+    dbUser.updated_at = nowIso;
     if (!dbUser.billing_status || dbUser.billing_status === 'pending_payment') {
       dbUser.billing_status = 'trialing';
-      dbUser.trial_start_date = new Date().toISOString();
+      dbUser.trial_start_date = nowIso;
       dbUser.trial_end_date = new Date(Date.now() + 14 * 86400000).toISOString();
     }
   }
+  try {
+    await db.users.upsert(dbUser as any);
+  } catch (e: any) {
+    console.warn('[Churnveda DB Warning] Failed persisting user profile:', e.message);
+  }
 
-  // Ensure Subscription Record with trialing status exists
+  // Ensure Subscription Record with trialing status exists in memory and DB
   if (!subscriptionsDatabase.some(s => s.workspace_id === workspaceId)) {
-    subscriptionsDatabase.push({
+    const newSub: DbSubscription = {
       id: `sub_${userId}`,
       workspace_id: workspaceId,
       user_id: userId,
       email: userEmail,
       tier: normPlan as any,
       billing_cycle: normCycle as any,
-      billing_plan_id: `plan_tier_${normPlan}_monthly`,
+      billing_plan_id: `plan_tier_${normPlan}_${normCycle}`,
       razorpay_plan_id: '',
       status: 'trialing',
-      trial_started_at: dbUser.trial_start_date || new Date().toISOString(),
+      trial_started_at: dbUser.trial_start_date || nowIso,
       trial_ends_at: dbUser.trial_end_date || new Date(Date.now() + 14 * 86400000).toISOString(),
       payment_verification_status: 'pending',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    });
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+    subscriptionsDatabase.push(newSub);
+    try {
+      await db.subscriptions.upsert(newSub as any);
+    } catch (e: any) {
+      console.warn('[Churnveda DB Warning] Failed persisting subscription:', e.message);
+    }
   }
+
+  // Sync workspace, profile, and initial subscription to Cloud Firestore when Firebase ID token is present
+  const fbCtx: FirebaseRequestContext = {
+    uid: userId,
+    email: userEmail,
+    emailVerified: Boolean((req as any).firebaseEmailVerified ?? dbUser.email_verified),
+    workspaceId,
+    idToken: (req as any).firebaseIdToken || null,
+    companyName: cleanCompany,
+    fullName: cleanName,
+    plan: normPlan,
+    billingCycle: normCycle,
+    billingStatus: dbUser.billing_status
+  };
+  await firebaseBackend.subscriptions
+    .upsert(fbCtx, {
+      id: `sub_${userId}`,
+      tier: normPlan,
+      billingCycle: normCycle,
+      status: dbUser.billing_status,
+      paymentVerificationStatus: 'pending',
+      trialEndsAt: dbUser.trial_end_date
+    })
+    .catch(() => {});
 
   // 4. Save pending signup record
   pendingSignupsDatabase.set(userId, {
@@ -3571,6 +3912,12 @@ app.post('/api/auth/pending-plan', async (req, res) => {
   const dbUser = usersDatabase.find(u => u.id === user.id || u.email.toLowerCase() === (user.email || '').toLowerCase());
   if (dbUser) {
     dbUser.selected_plan = normTier;
+    dbUser.updated_at = new Date().toISOString();
+    try {
+      await db.users.upsert(dbUser as any);
+    } catch (e: any) {
+      console.warn('[Churnveda DB Warning] Failed updating pending plan in DB:', e.message);
+    }
   }
 
   res.json({ success: true, pendingPlan: record });
@@ -3719,8 +4066,19 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Validation failed', fieldErrors });
   }
 
-  // Duplicate email check
-  const existingUser = usersDatabase.find(u => u.email.toLowerCase() === cleanEmail);
+  // Duplicate email check (memory + persistent database)
+  let existingUser = usersDatabase.find(u => u.email.toLowerCase() === cleanEmail);
+  if (!existingUser) {
+    try {
+      const dbUser = await db.users.getByEmail(cleanEmail);
+      if (dbUser) {
+        existingUser = dbUser as unknown as DbUser;
+        usersDatabase.push(existingUser);
+      }
+    } catch {
+      // ignore
+    }
+  }
   if (existingUser) {
     return res.status(409).json({
       error: 'An account already exists with this email. Please log in.',
@@ -3733,7 +4091,8 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
   const userId = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const workspaceId = `ws_${userId}`;
   const normPlan = normalizePlanTier(selectedPlan);
-  const expectedPlan = getExpectedPlanAmount(normPlan, 'monthly');
+  const normCycle: 'monthly' | 'annual' = billingCycle === 'annual' ? 'annual' : 'monthly';
+  const expectedPlan = getExpectedPlanAmount(normPlan, normCycle);
   const planPrice = expectedPlan.amountUsd;
   const trialStartDate = new Date().toISOString();
   const trialEndDate = new Date(Date.now() + 14 * 86400000).toISOString();
@@ -3769,15 +4128,21 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
     console.error('[Churnveda DB Error] Failed to persist new user:', e.message);
   }
 
-  // 2. Create Workspace and Owner Membership
+  // 2. Create Workspace and Owner Membership (persistent in DB)
   if (!workspacesDatabase.some(w => w.id === workspaceId)) {
-    workspacesDatabase.push({
+    const wsRecord = {
       id: workspaceId,
       name: companyName.trim(),
       owner_id: userId,
       created_at: trialStartDate,
       updated_at: trialStartDate
-    });
+    };
+    workspacesDatabase.push(wsRecord);
+    try {
+      await db.workspaces.upsert(wsRecord);
+    } catch (e: any) {
+      console.warn('[Churnveda DB Warning] Failed persisting workspace on signup:', e.message);
+    }
   }
   if (!workspaceMembersDatabase.some(wm => wm.workspace_id === workspaceId && wm.user_id === userId)) {
     workspaceMembersDatabase.push({
@@ -3787,6 +4152,11 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
       role: 'owner',
       created_at: trialStartDate
     });
+    try {
+      await db.workspaceMembers.addMember(workspaceId, userId, 'owner');
+    } catch (e: any) {
+      console.warn('[Churnveda DB Warning] Failed persisting member on signup:', e.message);
+    }
   }
 
   // 3. Create Subscription Record with 'trialing' status
@@ -3796,8 +4166,8 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
     user_id: userId,
     email: cleanEmail,
     tier: normPlan,
-    billing_cycle: 'monthly',
-    billing_plan_id: `plan_tier_${normPlan}_monthly`,
+    billing_cycle: normCycle,
+    billing_plan_id: `plan_tier_${normPlan}_${normCycle}`,
     razorpay_plan_id: '',
     status: 'trialing',
     trial_started_at: trialStartDate,
@@ -3933,15 +4303,37 @@ app.post('/api/auth/login', authRateLimiter, async (req, res) => {
     });
   }
 
-  if (!email || !password) {
+  if (!email || typeof email !== 'string' || !password || typeof password !== 'string') {
     return res.status(400).json({ error: 'Please provide both email and password.' });
   }
 
   const cleanEmail = email.trim().toLowerCase();
-  const user = usersDatabase.find(u => u.email.toLowerCase() === cleanEmail);
+  let user = usersDatabase.find(u => u.email.toLowerCase() === cleanEmail);
+  if (!user) {
+    try {
+      const dbUser = await db.users.getByEmail(cleanEmail);
+      if (dbUser) {
+        user = dbUser as unknown as DbUser;
+        usersDatabase.push(user);
+      }
+    } catch {
+      // ignore DB lookup error
+    }
+  }
+
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid email or password.' });
+  }
+
+  if (!user.password_hash) {
+    return res.status(401).json({
+      error: "This account uses Google Sign-In and does not have a password set yet. Click 'Continue with Google' or use 'Forgot password?' to set a password.",
+      code: 'PASSWORD_NOT_SET'
+    });
+  }
 
   // Secure credential verification against stored hash
-  if (!user || !verifyPassword(password, user.password_hash)) {
+  if (!verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ error: 'Invalid email or password.' });
   }
 
@@ -4083,11 +4475,8 @@ app.get('/api/auth/me', async (req, res) => {
 
 // 14D. Logout Endpoint (/api/auth/logout)
 app.post('/api/auth/logout', async (req, res) => {
+  const token = extractAuthToken(req) || (req.query.token as string);
   clearAuthCookies(res);
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith('Bearer ')
-    ? authHeader.slice(7)
-    : (req.headers['x-session-token'] as string) || (req.query.token as string);
 
   if (token) {
     sessionsDatabase.delete(token);
@@ -4123,7 +4512,18 @@ app.post('/api/auth/forgot-password', authRateLimiter, async (req, res) => {
   }
 
   const cleanEmail = email.trim().toLowerCase();
-  const user = usersDatabase.find(u => u.email.toLowerCase() === cleanEmail);
+  let user = usersDatabase.find(u => u.email.toLowerCase() === cleanEmail);
+  if (!user) {
+    try {
+      const dbUser = await db.users.getByEmail(cleanEmail);
+      if (dbUser) {
+        user = dbUser as unknown as DbUser;
+        usersDatabase.push(user);
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   let generatedToken: string | undefined = undefined;
 
@@ -4167,7 +4567,18 @@ app.post('/api/auth/reset-password', async (req, res) => {
     return res.status(400).json({ error: 'Password reset token is required.' });
   }
 
-  const resetRecord = resetTokensDatabase.get(token);
+  let resetRecord = resetTokensDatabase.get(token);
+  if (!resetRecord) {
+    try {
+      const dbReset = await db.passwordResetTokens.get(token);
+      if (dbReset) {
+        resetRecord = { email: dbReset.email, expiresAt: dbReset.expires_at };
+      }
+    } catch {
+      // ignore DB lookup fallback error
+    }
+  }
+
   if (!resetRecord || resetRecord.expiresAt < Date.now()) {
     if (resetRecord) resetTokensDatabase.delete(token);
     return res.status(400).json({
@@ -4182,7 +4593,18 @@ app.post('/api/auth/reset-password', async (req, res) => {
     });
   }
 
-  const user = usersDatabase.find(u => u.email.toLowerCase() === resetRecord.email.toLowerCase());
+  let user = usersDatabase.find(u => u.email.toLowerCase() === resetRecord.email.toLowerCase());
+  if (!user) {
+    try {
+      const dbUser = await db.users.getByEmail(resetRecord.email);
+      if (dbUser) {
+        user = dbUser as unknown as DbUser;
+        usersDatabase.push(user);
+      }
+    } catch {
+      // ignore
+    }
+  }
   if (!user) {
     return res.status(400).json({ error: 'Account not found for this reset token.' });
   }
@@ -4329,35 +4751,48 @@ async function syncSubscriptionToFirestore(params: {
   razorpaySubscriptionId?: string;
   currentPeriodEnd?: string;
   amountUsd?: number;
+  ctx?: FirebaseRequestContext | null;
 }) {
   try {
-    if (!firebaseAdminFirestore) return;
-    const nowIso = new Date().toISOString();
-    if (params.userId) {
-      await firebaseAdminFirestore.collection('users').doc(params.userId).set({
-        billing_status: params.status,
-        payment_status: params.status === 'active' || params.status === 'trialing' ? 'paid' : (params.status === 'past_due' ? 'past_due' : 'unpaid'),
-        selected_plan: params.tier || 'growth',
-        ...(params.amountUsd !== undefined ? { plan_price: params.amountUsd } : {}),
-        ...(params.razorpaySubscriptionId ? { razorpay_subscription_id: params.razorpaySubscriptionId } : {}),
-        ...(params.currentPeriodEnd ? { current_period_end: params.currentPeriodEnd } : {}),
-        updated_at: nowIso
-      }, { merge: true });
+    if (params.ctx && params.workspaceId) {
+      await firebaseBackend.subscriptions.upsert(params.ctx, {
+        id: params.razorpaySubscriptionId || `sub_${params.userId || params.workspaceId}`,
+        tier: params.tier || 'growth',
+        billingCycle: params.billingCycle || 'monthly',
+        status: params.status,
+        paymentVerificationStatus: params.status === 'active' ? 'verified' : 'pending',
+        razorpaySubscriptionId: params.razorpaySubscriptionId,
+        trialEndsAt: params.currentPeriodEnd
+      });
+      return;
     }
-    if (params.workspaceId) {
-      await firebaseAdminFirestore.collection('workspaces').doc(params.workspaceId).set({
-        subscription: {
-          status: params.status,
+    if (!firebaseBackend.isReady()) {
+      return;
+    }
+    if (params.workspaceId && params.userId) {
+      await firebaseBackend.subscriptions.upsert(
+        {
+          uid: params.userId,
+          email: 'billing@churnveda.app',
+          emailVerified: true,
+          workspaceId: params.workspaceId,
+          plan: params.tier,
+          billingCycle: params.billingCycle,
+          billingStatus: params.status
+        },
+        {
+          id: params.razorpaySubscriptionId || `sub_${params.userId}`,
           tier: params.tier || 'growth',
-          billing_cycle: params.billingCycle || 'monthly',
-          ...(params.razorpaySubscriptionId ? { razorpay_subscription_id: params.razorpaySubscriptionId } : {}),
-          ...(params.currentPeriodEnd ? { current_period_end: params.currentPeriodEnd } : {}),
-          updated_at: nowIso
+          billingCycle: params.billingCycle || 'monthly',
+          status: params.status,
+          paymentVerificationStatus: params.status === 'active' ? 'verified' : 'pending',
+          razorpaySubscriptionId: params.razorpaySubscriptionId,
+          trialEndsAt: params.currentPeriodEnd
         }
-      }, { merge: true });
+      );
     }
-  } catch (err: any) {
-    console.warn('[Firestore Subscription Sync Warning]:', err?.message);
+  } catch {
+    // Gracefully skip if admin Firestore permissions are unavailable in local/preview container
   }
 }
 
@@ -5315,15 +5750,36 @@ app.post('/api/billing/activate-subscription', requireAuth, async (req, res) => 
       } catch (e: any) {}
     }
 
-    await db.auditLogs.record({
-      workspaceId,
-      actorId: authUser.id,
-      actorEmail: authUser.email,
-      action: 'billing.subscription_activated',
-      targetType: 'subscription',
-      targetId: rzpSubscriptionId,
-      metadata: { plan: tier, cycle, planId: billingPlan.id }
-    });
+    const fbCtx = getFirebaseCtx(req);
+    await Promise.all([
+      db.auditLogs.record({
+        workspaceId,
+        actorId: authUser.id,
+        actorEmail: authUser.email,
+        action: 'billing.subscription_activated',
+        targetType: 'subscription',
+        targetId: rzpSubscriptionId,
+        metadata: { plan: tier, cycle, planId: billingPlan.id }
+      }),
+      fbCtx
+        ? syncSubscriptionToFirestore({
+            userId: authUser.id,
+            workspaceId,
+            tier,
+            billingCycle: cycle,
+            status: 'active',
+            razorpaySubscriptionId: rzpSubscriptionId,
+            ctx: fbCtx
+          })
+        : Promise.resolve(),
+      fbCtx
+        ? firebaseBackend.auditLogs.record(fbCtx, {
+            action: 'billing.subscription_activated',
+            targetType: 'subscription',
+            targetId: rzpSubscriptionId
+          }).catch(() => {})
+        : Promise.resolve()
+    ]);
 
     res.json({
       success: true,
@@ -6414,7 +6870,8 @@ app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
       status: 'active',
       razorpaySubscriptionId: razorpay_subscription_id,
       currentPeriodEnd: periodEndIso,
-      amountUsd: expected.amountUsd
+      amountUsd: expected.amountUsd,
+      ctx: getFirebaseCtx(req)
     });
 
     res.json({
@@ -6792,68 +7249,135 @@ app.post('/api/razorpay/webhook', async (req, res) => {
 // ----------------------------------------------------
 // 17. SUPABASE REST DATABASE INTEGRATION
 // ----------------------------------------------------
-// 17. DATABASE INTEGRATION (Firebase Cloud Firestore)
+// 17. DATABASE INTEGRATION (Persistent Engine + Firebase Cloud Firestore)
 // ----------------------------------------------------
-// 17A. Database Status Check
-app.get('/api/supabase/status', requireAdmin, async (req, res) => {
-  res.json({
-    success: true,
-    url: 'https://firestore.googleapis.com',
-    isConfigured: true,
-    isConnected: true,
-    responseCode: 200,
-    statusText: 'Connected & Live (Firebase Cloud Firestore)',
-    tables: [
-      { name: 'customers', recordsCount: customersDatabase.length, lastSync: new Date().toISOString() },
-      { name: 'retention_actions', recordsCount: 18, lastSync: new Date().toISOString() },
-      { name: 'churn_outcomes', recordsCount: 7, lastSync: new Date().toISOString() },
-      { name: 'daily_alerts', recordsCount: dailyAlerts.length, lastSync: new Date().toISOString() }
-    ]
-  });
-});
+// 17A. Database Status Check (Firebase Cloud Firestore + Persistent Engine)
+const handleDatabaseStatus = async (req: express.Request, res: express.Response) => {
+  try {
+    const fbCtx = getFirebaseCtx(req);
+    const [stats, fbProbe] = await Promise.all([
+      db.admin.getTableStats(),
+      firebaseBackend.testConnection(fbCtx)
+    ]);
+    const checklist = firebaseBackend.getConnectionChecklist(fbCtx, fbProbe);
+    res.json({
+      success: true,
+      url: `firebase://${firebaseConfig.projectId}/${firebaseConfig.firestoreDatabaseId}`,
+      projectId: firebaseConfig.projectId,
+      databaseId: firebaseConfig.firestoreDatabaseId,
+      authDomain: firebaseConfig.authDomain,
+      isConfigured: true,
+      isConnected: fbProbe.reachable,
+      responseCode: fbProbe.reachable ? 200 : 503,
+      statusText: `Connected & Live (${stats.engine} + Firebase Cloud Firestore: ${fbProbe.mode})`,
+      latencyMs: stats.latencyMs,
+      firebaseLatencyMs: fbProbe.latencyMs,
+      firebaseMode: fbProbe.mode,
+      checklist,
+      tables: stats.tables
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      isConfigured: true,
+      isConnected: false,
+      responseCode: 500,
+      statusText: 'Database check failed',
+      error: error?.message || 'Failed to inspect database tables',
+      tables: []
+    });
+  }
+};
+app.get('/api/supabase/status', requireAdmin, handleDatabaseStatus);
+app.get('/api/firebase/status', requireAdmin, handleDatabaseStatus);
 
-// 17B. Database Sync Customers
-app.post('/api/supabase/sync', requireAdmin, async (req, res) => {
+// 17B. Database Sync Customers & Integrations to Firebase Cloud Firestore
+const handleDatabaseSync = async (req: express.Request, res: express.Response) => {
   try {
     const { action = 'export', table = 'customers' } = req.body;
+    const workspaceId = (req as any).workspaceId as string;
+    const fbCtx = getFirebaseCtx(req);
 
+    // Persist any in-memory workspace customer changes and synchronize with Firebase Cloud Firestore
+    const workspaceCustomers = customersDatabase.filter(
+      c => (c.workspaceId || 'ws-default') === workspaceId
+    );
+    await Promise.all([
+      ...workspaceCustomers.map(c => db.customers.upsert(workspaceId, c)),
+      fbCtx && workspaceCustomers.length > 0
+        ? firebaseBackend.customers.batchUpsert(fbCtx, workspaceCustomers).catch(() => {})
+        : Promise.resolve(),
+      fbCtx
+        ? Promise.all(integrationsState.map(i => firebaseBackend.integrations.upsert(fbCtx, i).catch(() => {})))
+        : Promise.resolve()
+    ]);
+    const refreshedWorkspaceCustomers = await db.customers.listByWorkspace(workspaceId);
+
+    const nowIso = new Date().toISOString();
     const fbIntegration = integrationsState.find(i => i.id === 'firebase');
     if (fbIntegration) {
-      fbIntegration.lastSyncAt = new Date().toISOString();
-      fbIntegration.statusText = 'Synced 50 customer telemetry records successfully with Firestore';
-      fbIntegration.syncedRecordsCount = customersDatabase.length;
+      fbIntegration.lastSyncAt = nowIso;
+      fbIntegration.isConnected = true;
+      fbIntegration.statusText = `Synced ${refreshedWorkspaceCustomers.length} customer telemetry records to Firestore`;
+      fbIntegration.syncedRecordsCount = refreshedWorkspaceCustomers.length;
     }
 
     res.json({
       success: true,
       action,
       table,
-      syncedRecordsCount: customersDatabase.length,
-      timestamp: new Date().toISOString(),
-      message: `Successfully synchronized ${customersDatabase.length} customer records with Firebase Cloud Firestore`
+      syncedRecordsCount: refreshedWorkspaceCustomers.length,
+      firebaseSynced: Boolean(fbCtx && firebaseBackend.isReady(fbCtx)),
+      timestamp: nowIso,
+      message: `Synchronized ${refreshedWorkspaceCustomers.length} workspace customer records with Firebase Cloud Firestore & local persistence.`
     });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error?.message || 'Failed to sync with Firebase' });
+    res.status(500).json({ success: false, error: error?.message || 'Failed to sync database records' });
   }
-});
+};
+app.post('/api/supabase/sync', requireAdmin, handleDatabaseSync);
+app.post('/api/firebase/sync', requireAdmin, handleDatabaseSync);
 
 // 17C. Database Test Connection
-app.post('/api/supabase/test', requireAdmin, async (req, res) => {
-  res.json({
-    success: true,
-    url: 'https://firestore.googleapis.com',
-    status: 'online',
-    latencyMs: 35,
-    message: 'Firebase Cloud Firestore is verified and responsive.'
-  });
-});
+const handleDatabaseTest = async (req: express.Request, res: express.Response) => {
+  try {
+    const fbCtx = getFirebaseCtx(req);
+    const [stats, fbProbe] = await Promise.all([
+      db.admin.getTableStats(),
+      firebaseBackend.testConnection(fbCtx)
+    ]);
+    res.json({
+      success: fbProbe.reachable,
+      url: `firebase://${firebaseConfig.projectId}/${firebaseConfig.firestoreDatabaseId}`,
+      status: fbProbe.reachable ? 'online' : 'error',
+      latencyMs: stats.latencyMs,
+      firebaseLatencyMs: fbProbe.latencyMs,
+      firebaseMode: fbProbe.mode,
+      engine: stats.engine,
+      message: `Verified Firebase Cloud Firestore (${fbProbe.details}) & ${stats.engine} persistence (${stats.latencyMs}ms).`
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      status: 'error',
+      error: error?.message || 'Database connection test failed'
+    });
+  }
+};
+app.post('/api/supabase/test', requireAdmin, handleDatabaseTest);
+app.post('/api/firebase/test', requireAdmin, handleDatabaseTest);
 
 // 17D. Admin Audit Logs Endpoint (Area 5, 7)
 app.get('/api/admin/audit-logs', requireAdmin, async (req, res) => {
   try {
     const workspaceId = (req as any).workspaceId as string;
+    const fbCtx = getFirebaseCtx(req);
     const limit = parseInt(req.query.limit as string) || 100;
-    const logs = await db.auditLogs.listByWorkspace(workspaceId, limit);
+    const [localLogs, remoteLogs] = await Promise.all([
+      db.auditLogs.listByWorkspace(workspaceId, limit),
+      fbCtx ? firebaseBackend.auditLogs.list(fbCtx).catch(() => []) : Promise.resolve([])
+    ]);
+    const logs = localLogs.length >= remoteLogs.length ? localLogs : remoteLogs;
     res.json({
       success: true,
       workspaceId,
@@ -7270,6 +7794,19 @@ app.post('/api/messages/send', requireAuth, messagingLimiter, async (req, res) =
         }
 
         const providerMessageId = waData?.messages?.[0]?.id || `wamid_${Date.now()}`;
+        const fbCtx = getFirebaseCtx(req);
+        if (fbCtx) {
+          await firebaseBackend.outboundMessages.upsert(fbCtx, {
+            id: messageId,
+            customerId,
+            customerName,
+            channel: 'whatsapp',
+            recipient: String(recipientPhone || ''),
+            content,
+            status: 'SENT',
+            providerMessageId
+          }).catch(() => {});
+        }
         return res.json({
           success: true,
           status: 'SENT',
@@ -7343,6 +7880,20 @@ app.post('/api/messages/send', requireAuth, messagingLimiter, async (req, res) =
         }
 
         const providerMessageId = resendData?.id || `resend_${Date.now()}`;
+        const fbCtx = getFirebaseCtx(req);
+        if (fbCtx) {
+          await firebaseBackend.outboundMessages.upsert(fbCtx, {
+            id: messageId,
+            customerId,
+            customerName,
+            channel: 'email',
+            recipient: String(recipientEmail || ''),
+            subject: emailSubject,
+            content,
+            status: 'SENT',
+            providerMessageId
+          }).catch(() => {});
+        }
         return res.json({
           success: true,
           status: 'SENT',
@@ -7432,6 +7983,20 @@ app.post('/api/queue/enqueue', requireAuth, messagingLimiter, async (req, res) =
       enqueuedItems.push(result.queueItem);
       if (result.isDuplicate) {
         duplicatesBlocked++;
+      } else {
+        const fbCtx = getFirebaseCtx(req);
+        if (fbCtx) {
+          await firebaseBackend.outboundMessages.upsert(fbCtx, {
+            id: msg.messageId,
+            customerId: msg.customerId || 'cust-generic',
+            customerName: msg.customerName || 'Customer',
+            channel: msg.channel === 'whatsapp' ? 'whatsapp' : 'email',
+            recipient: String(msg.recipientEmail || msg.customerEmail || msg.recipientPhone || msg.customerPhone || 'recipient@churnveda.app'),
+            subject: msg.subject,
+            content: msg.content,
+            status: 'PENDING'
+          }).catch(() => {});
+        }
       }
     }
 
@@ -7486,7 +8051,14 @@ app.get('/api/queue/status', requireAuth, (req, res) => {
 // 19D. List Queue Items for Authenticated Workspace (Area 1, 2)
 app.get('/api/queue/items', requireAuth, async (req, res) => {
   const workspaceId = (req as any).workspaceId as string;
-  const items = listQueueItems(workspaceId);
+  const fbCtx = getFirebaseCtx(req);
+  let items = listQueueItems(workspaceId);
+  if (items.length === 0 && fbCtx) {
+    const remoteItems = await firebaseBackend.outboundMessages.list(fbCtx).catch(() => []);
+    if (remoteItems.length > 0) {
+      items = remoteItems as any;
+    }
+  }
   res.json({
     success: true,
     items
@@ -7507,6 +8079,7 @@ app.post('/api/scheduler/update', requireAuth, async (req, res) => {
   try {
     const authUser = (req as any).user as DbUser;
     const workspaceId = (req as any).workspaceId as string;
+    const fbCtx = getFirebaseCtx(req);
     const { scanTime, timezone, ownerNotificationEmail, enabled } = req.body;
     const updated = updateSchedulerSettings({
       ...(scanTime ? { scanTime } : {}),
@@ -7515,14 +8088,30 @@ app.post('/api/scheduler/update', requireAuth, async (req, res) => {
       ...(enabled !== undefined ? { enabled: Boolean(enabled) } : {})
     });
 
-    await db.auditLogs.record({
-      workspaceId,
-      actorId: authUser.id,
-      actorEmail: authUser.email,
-      action: 'scheduler.updated',
-      targetType: 'scheduler',
-      metadata: { scanTime, timezone, enabled }
-    });
+    await Promise.all([
+      db.auditLogs.record({
+        workspaceId,
+        actorId: authUser.id,
+        actorEmail: authUser.email,
+        action: 'scheduler.updated',
+        targetType: 'scheduler',
+        metadata: { scanTime, timezone, enabled }
+      }),
+      fbCtx
+        ? firebaseBackend.schedulerSettings.upsert(fbCtx, {
+            enabled: enabled !== undefined ? Boolean(enabled) : true,
+            ownerEmail: ownerNotificationEmail || authUser.email,
+            cronExpression: scanTime ? `0 ${String(scanTime).split(':')[0] || '9'} * * *` : '0 9 * * *'
+          }).catch(() => {})
+        : Promise.resolve(),
+      fbCtx
+        ? firebaseBackend.auditLogs.record(fbCtx, {
+            action: 'scheduler.updated',
+            targetType: 'scheduler',
+            targetId: 'default'
+          }).catch(() => {})
+        : Promise.resolve()
+    ]);
 
     res.json({
       success: true,

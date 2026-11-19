@@ -57,11 +57,12 @@ async function migrate() {
       console.log('✅ [Churnveda Migration] Seeded default workspace (ws-default).');
     }
 
-    // 3. Seed default admin user if absent
+    // 3. Seed default admin user if absent (random/env password; uses Firebase Google Auth)
     const userRes = await pool.query("SELECT id FROM users WHERE id = 'usr-admin-001'");
     if (userRes.rowCount === 0) {
-      const defaultSalt = 'a1b2c3d4e5f67890';
-      const defaultHash = crypto.scryptSync('Password123!', defaultSalt, 64).toString('hex');
+      const defaultSalt = crypto.randomBytes(16).toString('hex');
+      const bootstrapPass = process.env.ADMIN_BOOTSTRAP_PASSWORD?.trim() || crypto.randomBytes(32).toString('hex');
+      const defaultHash = crypto.scryptSync(bootstrapPass, defaultSalt, 64).toString('hex');
       const defaultPasswordCombined = `${defaultSalt}:${defaultHash}`;
 
       await pool.query(
@@ -86,22 +87,8 @@ async function migrate() {
       console.log('✅ [Churnveda Migration] Seeded default admin user (nageshsharat@gmail.com).');
     }
 
-    // 4. Seed default session if absent
-    const sessRes = await pool.query("SELECT token FROM sessions WHERE token = 'sess_admin_default'");
-    if (sessRes.rowCount === 0) {
-      await pool.query(
-        `INSERT INTO sessions (token, user_id, email, workspace_id, expires_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())`,
-        [
-          'sess_admin_default',
-          'usr-admin-001',
-          'nageshsharat@gmail.com',
-          'ws-default',
-          Date.now() + 30 * 86400000
-        ]
-      );
-      console.log('✅ [Churnveda Migration] Seeded default session (sess_admin_default).');
-    }
+    // 4. Remove any legacy demo admin session token if present
+    await pool.query("DELETE FROM sessions WHERE token = 'sess_admin_default'");
 
     // 5. Seed authoritative billing plans if absent
     const plansToSeed = [

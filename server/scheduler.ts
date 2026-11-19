@@ -327,7 +327,7 @@ export function startSchedulerRunner(getCustomerDataCallback: (workspaceId: stri
     // Check if scheduled time matches and scan hasn't run yet today
     if (currentTimeStr === schedulerConfig.scanTime && schedulerConfig.lastRunDate !== currentDateStr) {
       try {
-        const workspaceId = 'ws-admin-001';
+        const workspaceId = 'ws-default';
         const customers = await getCustomerDataCallback(workspaceId);
         await executeDailyRetentionScan({
           workspaceId,

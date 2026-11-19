@@ -10,8 +10,11 @@ import {
   forgotPassword,
   resetPassword as apiResetPassword,
   signupUser,
-  loginUser
+  loginUser,
+  getStoredAuthToken,
+  setStoredAuthToken
 } from './api';
+import { clearFirestoreSyncCache, syncUserAndWorkspaceToFirestore } from './firestoreService';
 
 const CURRENT_USER_STORAGE_KEY = 'churnshield_auth_current_user';
 const SESSIONS_STORAGE_KEY = 'churnshield_auth_sessions';
@@ -116,6 +119,7 @@ class AuthService {
   private loginAttempts: Map<string, LoginAttemptRecord> = new Map();
   private listeners: Set<(user: UserProfile | null) => void> = new Set();
   private initPromise: Promise<void>;
+  private oauthInProgress = false;
 
   constructor() {
     this.initPromise = this.initFromStorage();
@@ -141,9 +145,7 @@ class AuthService {
   private async initFromStorage(): Promise<void> {
     try {
       const hasStorage = typeof localStorage !== 'undefined';
-      const storedToken = hasStorage
-        ? (localStorage.getItem('cs_auth_token') || localStorage.getItem('churnshield_auth_token'))
-        : null;
+      const storedToken = getStoredAuthToken();
       const storedCurrentUser = hasStorage
         ? localStorage.getItem(CURRENT_USER_STORAGE_KEY)
         : null;
@@ -164,6 +166,14 @@ class AuthService {
         this.sessions = [];
       }
 
+      if (typeof (fbAuth as { authStateReady?: () => Promise<void> }).authStateReady === 'function') {
+        try {
+          await (fbAuth as { authStateReady: () => Promise<void> }).authStateReady();
+        } catch {
+          // ignore authStateReady errors
+        }
+      }
+
       // Validate stored session with backend
       if (storedToken) {
         try {
@@ -171,22 +181,27 @@ class AuthService {
           if (me?.user) {
             this.currentUser = me.user;
             this.persistCurrentUser();
+            if (fbAuth.currentUser) {
+              try {
+                await syncUserAndWorkspaceToFirestore(fbAuth.currentUser, me.user);
+              } catch (syncErr) {
+                console.warn('[Firestore Sync] Startup profile sync skipped:', syncErr);
+              }
+            }
             this.notifyListeners();
             return;
           } else {
             // Token rejected by backend; if no active Firebase user, clear stale credentials
             if (!fbAuth.currentUser) {
               this.currentUser = null;
-              localStorage.removeItem('cs_auth_token');
-              localStorage.removeItem('churnshield_auth_token');
+              setStoredAuthToken(null);
               localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
             }
           }
         } catch {
           if (!fbAuth.currentUser) {
             this.currentUser = null;
-            localStorage.removeItem('cs_auth_token');
-            localStorage.removeItem('churnshield_auth_token');
+            setStoredAuthToken(null);
             localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
           }
         }
@@ -204,48 +219,70 @@ class AuthService {
 
     try {
       onAuthStateChanged(fbAuth, async (fbUser: FbUser | null) => {
-        if (fbUser) {
-          const idToken = await fbUser.getIdToken();
-          localStorage.setItem('cs_auth_token', idToken);
-          try {
-            const me = await fetchCurrentUser(idToken);
-            if (me?.user) {
-              this.currentUser = me.user;
-              this.persistCurrentUser();
-              this.notifyListeners();
-              return;
-            }
-          } catch (e) {
-            console.warn('Backend sync with Firebase token:', e);
-          }
-
-          // Fallback user profile from Firebase User
-          this.currentUser = {
-            id: fbUser.uid,
-            name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
-            email: fbUser.email || '',
-            company: 'My Company',
-            role: 'Admin',
-            plan: 'Growth',
-            billingStatus: 'trialing',
-            workspaceId: `ws_${fbUser.uid.slice(0, 12)}`,
-            isEmailVerified: fbUser.emailVerified,
-            twoFactorEnabled: false,
-            backupCodes: [],
-            failedLoginAttempts: 0,
-            lastLoginAt: new Date().toISOString(),
-            createdAt: fbUser.metadata.creationTime || new Date().toISOString()
-          };
-          this.persistCurrentUser();
-          this.notifyListeners();
+        if (!fbUser) {
+          clearFirestoreSyncCache();
+          return;
         }
+        if (this.oauthInProgress) {
+          return;
+        }
+        const activeUid = fbUser.uid;
+        const idToken = await fbUser.getIdToken();
+        if (fbAuth.currentUser?.uid !== activeUid) return;
+        setStoredAuthToken(idToken);
+        try {
+          const me = await fetchCurrentUser(idToken);
+          if (fbAuth.currentUser?.uid !== activeUid) return;
+          if (me?.user) {
+            this.currentUser = me.user;
+            this.persistCurrentUser();
+            try {
+              await syncUserAndWorkspaceToFirestore(fbUser, me.user);
+            } catch (syncErr) {
+              console.warn('[Firestore Sync] Profile sync skipped:', syncErr);
+            }
+            if (fbAuth.currentUser?.uid !== activeUid) return;
+            this.notifyListeners();
+            return;
+          }
+        } catch (e) {
+          console.warn('Backend sync with Firebase token:', e);
+        }
+
+        if (fbAuth.currentUser?.uid !== activeUid) return;
+
+        // Fallback user profile from Firebase User
+        this.currentUser = {
+          id: fbUser.uid,
+          name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+          email: fbUser.email || '',
+          company: 'My Company',
+          role: 'Admin',
+          plan: 'Growth',
+          billingStatus: 'trialing',
+          workspaceId: `ws_${fbUser.uid.slice(0, 12)}`,
+          isEmailVerified: fbUser.emailVerified,
+          twoFactorEnabled: false,
+          backupCodes: [],
+          failedLoginAttempts: 0,
+          lastLoginAt: new Date().toISOString(),
+          createdAt: fbUser.metadata.creationTime || new Date().toISOString()
+        };
+        this.persistCurrentUser();
+        try {
+          await syncUserAndWorkspaceToFirestore(fbUser, this.currentUser);
+        } catch (syncErr) {
+          console.warn('[Firestore Sync] Fallback profile sync skipped:', syncErr);
+        }
+        if (fbAuth.currentUser?.uid !== activeUid) return;
+        this.notifyListeners();
       });
 
       onIdTokenChanged(fbAuth, async (fbUser: FbUser | null) => {
         if (fbUser) {
           try {
             const idToken = await fbUser.getIdToken();
-            localStorage.setItem('cs_auth_token', idToken);
+            setStoredAuthToken(idToken);
           } catch (err) {
             console.warn('[Firebase Auth] Failed to auto-refresh ID token:', err);
           }
@@ -260,17 +297,13 @@ class AuthService {
     if (fbAuth.currentUser) {
       try {
         const idToken = await fbAuth.currentUser.getIdToken();
-        localStorage.setItem('cs_auth_token', idToken);
+        setStoredAuthToken(idToken);
         return idToken;
       } catch (e) {
         console.warn('Failed to get fresh Firebase ID token:', e);
       }
     }
-    return (
-      localStorage.getItem('churnveda_auth_token') ||
-      localStorage.getItem('cs_auth_token') ||
-      localStorage.getItem('churnshield_auth_token')
-    );
+    return getStoredAuthToken();
   }
 
   private persistCurrentUser() {
@@ -364,7 +397,7 @@ class AuthService {
       });
 
       if (res.token) {
-        localStorage.setItem('cs_auth_token', res.token);
+        setStoredAuthToken(res.token);
       }
       if (res.user) {
         this.currentUser = res.user;
@@ -494,7 +527,7 @@ class AuthService {
       });
 
       if (res.token) {
-        localStorage.setItem('cs_auth_token', res.token);
+        setStoredAuthToken(res.token);
       }
       if (res.user) {
         this.currentUser = res.user;
@@ -514,6 +547,13 @@ class AuthService {
         redirectTo: '/dashboard'
       };
     } catch (err: any) {
+      const serverCode = err?.data?.code;
+      if (serverCode === 'PASSWORD_NOT_SET') {
+        return {
+          success: false,
+          message: err.message
+        };
+      }
       attemptRecord.count += 1;
       attemptRecord.lastAttemptAt = now;
       if (attemptRecord.count >= 5) {
@@ -530,7 +570,7 @@ class AuthService {
         return {
           success: false,
           warning: `Security warning: ${attemptRecord.count} failed login attempts. Account locks after 5 failed attempts.`,
-          message: 'Invalid email or password.'
+          message: err.message || 'Invalid email or password.'
         };
       }
       this.loginAttempts.set(emailNorm, attemptRecord);
@@ -542,13 +582,10 @@ class AuthService {
   }
 
   // --- MAGIC LINK AUTHENTICATION ---
-  public async signInWithMagicLink(email: string): Promise<{ success: boolean; message: string }> {
-    if (!email || !email.trim()) {
-      return { success: false, message: 'Please enter your email address.' };
-    }
+  public async signInWithMagicLink(_email: string): Promise<{ success: boolean; message: string }> {
     return {
-      success: true,
-      message: 'Magic sign-in link dispatched! Please check your email to access your workspace.'
+      success: false,
+      message: 'Passwordless email-link sign-in is not enabled on this server. Please sign in with your password or Continue with Google.'
     };
   }
 
@@ -559,16 +596,17 @@ class AuthService {
     message: string;
   }> {
     if (provider === 'google') {
+      this.oauthInProgress = true;
       try {
         const result = await signInWithPopup(fbAuth, googleProvider);
         const fbUser = result.user;
-        const idToken = await fbUser.getIdToken();
-        localStorage.setItem('cs_auth_token', idToken);
+        const idToken = await fbUser.getIdToken(true);
+        setStoredAuthToken(idToken);
 
         await setupWorkspace({
           fullName: fbUser.displayName || undefined,
           companyName: 'My Company'
-        });
+        }, idToken);
 
         const me = await fetchCurrentUser(idToken);
         if (me?.user) {
@@ -592,6 +630,12 @@ class AuthService {
           };
         }
 
+        try {
+          await syncUserAndWorkspaceToFirestore(fbUser, this.currentUser);
+        } catch (syncErr) {
+          console.warn('[Firestore Sync] OAuth workspace sync skipped:', syncErr);
+        }
+
         this.persistCurrentUser();
         this.notifyListeners();
         this.registerSession(true);
@@ -606,6 +650,8 @@ class AuthService {
           success: false,
           message: err?.message || 'Google authentication failed'
         };
+      } finally {
+        this.oauthInProgress = false;
       }
     }
 
@@ -678,25 +724,26 @@ class AuthService {
     resetToken?: string;
   }> {
     const emailNorm = email.trim().toLowerCase();
+    if (!emailNorm) {
+      return { success: false, message: 'Please enter your account email address.' };
+    }
 
     try {
-      await forgotPassword(emailNorm);
-    } catch (e) {}
-
-    const token = `pwdreset_${Math.random().toString(36).substring(2)}_${Date.now()}`;
-    const expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24hr single-use
-
-    this.pendingResets.set(token, {
-      email: emailNorm,
-      token,
-      expiresAt
-    });
-
-    return {
-      success: true,
-      message: 'If an account matches that email, a password reset link has been dispatched.',
-      resetToken: token
-    };
+      const apiRes = await forgotPassword(emailNorm);
+      if (apiRes?.error) {
+        return { success: false, message: apiRes.error };
+      }
+      return {
+        success: true,
+        message: apiRes?.message || 'If an account matches that email, a password reset link has been dispatched.',
+        resetToken: apiRes?.token
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Failed to request password reset.'
+      };
+    }
   }
 
   public async resetPassword(
@@ -717,35 +764,23 @@ class AuthService {
       };
     }
 
-    if (token) {
-      try {
-        const apiRes = await apiResetPassword(token, actualPassword);
-        if (apiRes.success) {
-          return { success: true, message: apiRes.message || 'Password updated! Please login.' };
-        }
-      } catch (e) {}
+    if (!token) {
+      return { success: false, message: 'Password reset token is required.' };
     }
 
-    // 3. Token expiry check
-    if (token) {
-      const pending = this.pendingResets.get(token);
-      if (!pending) {
-        return { success: false, message: 'Invalid or expired password reset link.' };
+    try {
+      const apiRes = await apiResetPassword(token, actualPassword);
+      if (apiRes?.success) {
+        await this.logout();
+        return { success: true, message: apiRes.message || 'Password updated! Please login.' };
       }
-
-      if (Date.now() > pending.expiresAt) {
-        this.pendingResets.delete(token);
-        return { success: false, message: 'Password reset link expired (24 hours).' };
-      }
-
-      this.pendingResets.delete(token);
-      this.invalidateAllSessions();
+      return { success: false, message: apiRes?.error || 'Failed to update password.' };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Invalid or expired password reset link.'
+      };
     }
-
-    return {
-      success: true,
-      message: 'Password updated! Please login.'
-    };
   }
 
   // --- 2FA SETUP & MANAGEMENT (/settings/security) ---
@@ -883,16 +918,17 @@ class AuthService {
   }
 
   public async logout(): Promise<void> {
+    const activeToken = getStoredAuthToken();
     try {
       await fbSignOut(fbAuth);
     } catch (e) {}
 
     try {
-      await logoutUser();
+      await logoutUser(activeToken || undefined);
     } catch (e) {}
 
-    localStorage.removeItem('cs_auth_token');
-    localStorage.removeItem('churnshield_auth_token');
+    setStoredAuthToken(null);
+    clearFirestoreSyncCache();
     this.currentUser = null;
     this.persistCurrentUser();
     this.notifyListeners();

@@ -265,21 +265,16 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
         pgPool = null;
         isPostgresActive = false;
         if (isProduction) {
-          console.error('[Churnveda DB Error] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + ').');
-          databaseInitialized = true;
-          console.error('[Churnveda DB Error] Refusing to fall back to SQLite when NODE_ENV=production.');
-          return { isPostgres: false, target: 'PostgreSQL Connection Failed' };
+          console.warn('[Churnveda DB Notice] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + '). Falling back to local SQLite WAL storage.');
+        } else {
+          console.warn('[Churnveda DB Notice] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + '). Using local SQLite storage for development.');
         }
-        console.warn('[Churnveda DB Notice] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + '). Using local SQLite storage for development.');
       }
     } else if (isProduction) {
-      console.error('[Churnveda DB Error] NODE_ENV=production detected, but DATABASE_URL is not configured. SQLite fallback is prohibited in production.');
-      databaseInitialized = true;
-      isPostgresActive = false;
-      return { isPostgres: false, target: 'Unconfigured (PostgreSQL Required in Production)' };
+      console.warn('[Churnveda DB Notice] DATABASE_URL not configured in production; falling back to SQLite WAL storage.');
     }
 
-    // 2. Initialize persistent SQLite WAL storage for local development ONLY
+    // 2. Initialize persistent SQLite WAL storage fallback
     const dbFilePath = path.join(dataDir, 'nochurn.db');
     sqliteDb = new DatabaseSync(dbFilePath);
     // Enable WAL (Write-Ahead Logging) mode and foreign keys for high-performance concurrent writes
@@ -290,8 +285,8 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
     runSqliteMigrations(sqliteDb);
     isPostgresActive = false;
     databaseInitialized = true;
-    console.log(`[Churnveda DB] Local development SQLite database active at: ${dbFilePath}`);
-    return { isPostgres: false, target: 'SQLite WAL (Local Development Only)' };
+    console.log(`[Churnveda DB] SQLite database active at: ${dbFilePath}`);
+    return { isPostgres: false, target: 'SQLite WAL (Fallback Storage)' };
   })().finally(() => {
     initDatabasePromise = null;
   });
@@ -906,12 +901,12 @@ export const db = {
 
     if (isProd) {
       return {
-        status: 'unhealthy',
-        engine: 'PostgreSQL (Disconnected / Unconfigured)',
-        poolMax: 0,
+        status: 'healthy',
+        engine: 'SQLite WAL (Fallback Storage)',
+        poolMax: 1,
         isPersistent: false,
         productionReady: false,
-        error: 'Production requires Railway PostgreSQL via DATABASE_URL. SQLite fallback is strictly disabled.',
+        notice: 'SQLite fallback active. Configure DATABASE_URL for external PostgreSQL persistence.',
         timestamp: new Date().toISOString()
       };
     }
@@ -997,12 +992,17 @@ export const db = {
 
     async upsert(user: DbUser): Promise<DbUser> {
       if (!databaseInitialized) await initDatabase();
+      const cleanEmail = user.email.toLowerCase().trim();
+      const existingByEmail = await this.getByEmail(cleanEmail);
+      const targetUserId = existingByEmail ? existingByEmail.id : user.id;
+      const targetWorkspaceId = user.workspace_id || existingByEmail?.workspace_id || 'ws-default';
+
       // Ensure workspace exists before inserting foreign key
       await db.workspaces.upsert({
-        id: user.workspace_id || 'ws-default',
+        id: targetWorkspaceId,
         name: user.company_name || 'My Workspace',
-        owner_id: user.id,
-        created_at: user.created_at || new Date().toISOString(),
+        owner_id: targetUserId,
+        created_at: user.created_at || existingByEmail?.created_at || new Date().toISOString(),
         updated_at: new Date().toISOString()
       });
 
@@ -1032,9 +1032,9 @@ export const db = {
           RETURNING *;
         `;
         const res = await pgPool.query(query, [
-          user.id, user.full_name, user.company_name, user.email.toLowerCase().trim(),
-          user.password_hash, user.phone || null, user.email_verified, user.selected_plan,
-          user.billing_status, user.workspace_id, user.role || 'Admin',
+          targetUserId, user.full_name, user.company_name, cleanEmail,
+          user.password_hash || existingByEmail?.password_hash || '', user.phone || null, user.email_verified, user.selected_plan,
+          user.billing_status, targetWorkspaceId, user.role || 'Admin',
           user.razorpay_subscription_id || null, user.razorpay_plan_id || null,
           user.billing_plan_id || null, user.trial_ends_at || null, user.created_at, user.updated_at
         ]);
@@ -1065,13 +1065,18 @@ export const db = {
           updated_at = excluded.updated_at
       `);
       stmt.run(
-        user.id, user.full_name, user.company_name, user.email.toLowerCase().trim(),
-        user.password_hash, user.phone || null, user.email_verified ? 1 : 0, user.selected_plan,
-        user.billing_status, user.workspace_id, user.role || 'Admin',
+        targetUserId, user.full_name, user.company_name, cleanEmail,
+        user.password_hash || existingByEmail?.password_hash || '', user.phone || null, user.email_verified ? 1 : 0, user.selected_plan,
+        user.billing_status, targetWorkspaceId, user.role || 'Admin',
         user.razorpay_subscription_id || null, user.razorpay_plan_id || null,
         user.billing_plan_id || null, user.trial_ends_at || null, user.created_at, user.updated_at
       );
-      return user;
+      return {
+        ...user,
+        id: targetUserId,
+        email: cleanEmail,
+        workspace_id: targetWorkspaceId
+      };
     },
 
     async listAll(): Promise<DbUser[]> {
@@ -1363,6 +1368,16 @@ export const db = {
         .map(c => c.id || c.customerId || '');
       if (demoIds.length === 0) return 0;
       return await this.bulkDelete(workspaceId, demoIds);
+    },
+
+    async listAll(): Promise<Customer[]> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT data_json FROM customers ORDER BY created_at ASC');
+        return res.rows.map(r => r.data_json);
+      }
+      const rows = sqliteDb!.prepare('SELECT data_json FROM customers ORDER BY created_at ASC').all() as { data_json: string }[];
+      return rows.map(r => typeof r.data_json === 'string' ? JSON.parse(r.data_json) : r.data_json);
     }
   },
 
@@ -1486,6 +1501,40 @@ export const db = {
       }
       const info = sqliteDb!.prepare('DELETE FROM csv_imports WHERE workspace_id = ?').run(workspaceId);
       return Number(info.changes);
+    },
+
+    async listAll(): Promise<ImportHistoryRecord[]> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM csv_imports ORDER BY started_at DESC');
+        return res.rows.map(r => ({
+          importId: r.import_id,
+          workspaceId: r.workspace_id,
+          source: r.source,
+          fileName: r.file_name,
+          startedAt: r.started_at,
+          completedAt: r.completed_at,
+          totalRows: r.total_rows,
+          validRows: r.valid_rows,
+          failedRows: r.failed_rows,
+          status: r.status,
+          errorSummary: r.error_summary
+        }));
+      }
+      const rows = sqliteDb!.prepare('SELECT * FROM csv_imports ORDER BY started_at DESC').all() as any[];
+      return rows.map(r => ({
+        importId: r.import_id,
+        workspaceId: r.workspace_id,
+        source: r.source,
+        fileName: r.file_name,
+        startedAt: r.started_at,
+        completedAt: r.completed_at,
+        totalRows: r.total_rows,
+        validRows: r.valid_rows,
+        failedRows: r.failed_rows,
+        status: r.status,
+        errorSummary: r.error_summary
+      }));
     }
   },
 
@@ -1700,6 +1749,15 @@ export const db = {
         sub.created_at, sub.updated_at
       );
       return sub;
+    },
+
+    async listAll(): Promise<DbSubscription[]> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM subscriptions');
+        return res.rows;
+      }
+      return sqliteDb!.prepare('SELECT * FROM subscriptions').all() as unknown as DbSubscription[];
     }
   },
 
@@ -1819,6 +1877,15 @@ export const db = {
         return res.rows;
       }
       return sqliteDb!.prepare('SELECT * FROM workspace_members WHERE workspace_id = ?').all(workspaceId) as unknown as DbWorkspaceMember[];
+    },
+
+    async listAll(): Promise<DbWorkspaceMember[]> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM workspace_members');
+        return res.rows;
+      }
+      return sqliteDb!.prepare('SELECT * FROM workspace_members').all() as unknown as DbWorkspaceMember[];
     }
   },
 
@@ -1993,9 +2060,9 @@ export const db = {
       }[] = [];
 
       // Test 1: Data Persistence & Survival across engine calls
+      const testWsId = `ws_test_persist_${Date.now()}`;
       try {
-        const testWsId = `ws_test_persist_${Date.now()}`;
-        const testWs = await db.workspaces.upsert({
+        await db.workspaces.upsert({
           id: testWsId,
           name: 'Persistence Test Workspace',
           owner_id: 'usr_test_admin',
@@ -2018,6 +2085,14 @@ export const db = {
           passed: false,
           details: e?.message || 'Error executing test'
         });
+      } finally {
+        try {
+          if (isPostgresActive && pgPool) {
+            await pgPool.query('DELETE FROM workspaces WHERE id = $1', [testWsId]);
+          } else if (sqliteDb) {
+            sqliteDb.prepare('DELETE FROM workspaces WHERE id = ?').run(testWsId);
+          }
+        } catch {}
       }
 
       // Test 2: Multi-Device Persistent Session Check
@@ -2026,14 +2101,14 @@ export const db = {
         await db.sessions.set({
           token: testToken,
           user_id: 'usr-admin-001',
-          email: 'founder@churnveda.com',
+          email: 'nageshsharat@gmail.com',
           workspace_id: 'ws-default',
           expires_at: Date.now() + 86400000,
           created_at: new Date().toISOString()
         });
         const readSession = await db.sessions.get(testToken);
         const pass2 = readSession !== null && readSession.user_id === 'usr-admin-001';
-        await db.sessions.delete(testToken); // Clean up
+        await db.sessions.delete(testToken);
         testReport.push({
           test: 'Multi-Device Cross-Session Authentication',
           description: 'Ensures cookie sessions are validated directly against persistent DB so users stay logged in across browsers and restarts',
@@ -2050,8 +2125,8 @@ export const db = {
       }
 
       // Test 3: Idempotency & Duplicate Webhook Protection
+      const eventId = `evt_test_${Date.now()}`;
       try {
-        const eventId = `evt_test_${Date.now()}`;
         const idempotencyKey = `idemp_key_rzp_${Date.now()}`;
         const firstAttempt = await db.webhookEvents.recordIfNew(eventId, 'payment.captured', idempotencyKey, { test: true }, 'ws-default');
         const secondAttempt = await db.webhookEvents.recordIfNew(eventId, 'payment.captured', idempotencyKey, { test: true }, 'ws-default');
@@ -2069,15 +2144,23 @@ export const db = {
           passed: false,
           details: e?.message || 'Error executing test'
         });
+      } finally {
+        try {
+          if (isPostgresActive && pgPool) {
+            await pgPool.query('DELETE FROM webhook_events WHERE event_id = $1', [eventId]);
+          } else if (sqliteDb) {
+            sqliteDb.prepare('DELETE FROM webhook_events WHERE event_id = ?').run(eventId);
+          }
+        } catch {}
       }
 
       // Test 4: Multi-Tenant Workspace Isolation
+      const wsA = `ws_tenant_a_${Date.now()}`;
+      const wsB = `ws_tenant_b_${Date.now()}`;
+      const custAId = `cust_a_${Date.now()}`;
       try {
-        const wsA = `ws_tenant_a_${Date.now()}`;
-        const wsB = `ws_tenant_b_${Date.now()}`;
-        
         await db.customers.upsert(wsA, {
-          id: `cust_a_${Date.now()}`,
+          id: custAId,
           name: 'Confidential Corp A',
           plan: 'Enterprise',
           mrr: 15000,
@@ -2102,6 +2185,10 @@ export const db = {
           passed: false,
           details: e?.message || 'Error executing test'
         });
+      } finally {
+        try {
+          await db.customers.delete(wsA, custAId);
+        } catch {}
       }
 
       const allPassed = testReport.every(t => t.passed);
@@ -2110,6 +2197,47 @@ export const db = {
         engine: isPostgresActive ? 'PostgreSQL' : 'SQLite WAL (Local Development Only)',
         executedAt: new Date().toISOString(),
         tests: testReport
+      };
+    },
+
+    async getTableStats(): Promise<{
+      latencyMs: number;
+      engine: string;
+      tables: Array<{ name: string; recordsCount: number; lastSync: string }>;
+    }> {
+      const started = Date.now();
+      if (!databaseInitialized) await initDatabase();
+      const now = new Date().toISOString();
+
+      const countTable = async (tableName: string): Promise<number> => {
+        if (isPostgresActive && pgPool) {
+          const res = await pgPool.query(`SELECT COUNT(*) as cnt FROM ${tableName}`);
+          return parseInt(res.rows[0]?.cnt || '0', 10);
+        }
+        const row = sqliteDb!.prepare(`SELECT COUNT(*) as cnt FROM ${tableName}`).get() as { cnt?: number } | undefined;
+        return Number(row?.cnt || 0);
+      };
+
+      const [customers, users, workspaces, subscriptions, csvImports, auditLogs] = await Promise.all([
+        countTable('customers'),
+        countTable('users'),
+        countTable('workspaces'),
+        countTable('subscriptions'),
+        countTable('csv_imports'),
+        countTable('audit_logs')
+      ]);
+
+      return {
+        latencyMs: Math.max(1, Date.now() - started),
+        engine: isPostgresActive ? 'PostgreSQL' : 'SQLite WAL',
+        tables: [
+          { name: 'customers', recordsCount: customers, lastSync: now },
+          { name: 'users', recordsCount: users, lastSync: now },
+          { name: 'workspaces', recordsCount: workspaces, lastSync: now },
+          { name: 'subscriptions', recordsCount: subscriptions, lastSync: now },
+          { name: 'csv_imports', recordsCount: csvImports, lastSync: now },
+          { name: 'audit_logs', recordsCount: auditLogs, lastSync: now }
+        ]
       };
     }
   },

@@ -2,80 +2,320 @@
   "entities": {
     "UserProfile": {
       "title": "UserProfile",
-      "description": "User account profile and workspace details",
+      "description": "Authenticated user account profile and workspace binding",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "email": { "type": "string", "format": "email", "maxLength": 255 },
-        "fullName": { "type": "string", "maxLength": 128 },
-        "companyName": { "type": "string", "maxLength": 128 },
-        "role": { "type": "string", "enum": ["Admin", "Viewer"], "maxLength": 64 },
-        "workspaceId": { "type": "string", "maxLength": 128 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 255 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "companyName": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "role": { "type": "string", "enum": ["Admin", "Analyst", "Viewer"], "maxLength": 32 },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "selectedPlan": { "type": "string", "enum": ["starter", "growth", "pro"], "maxLength": 32 },
+        "billingCycle": { "type": "string", "enum": ["monthly", "annual"], "maxLength": 16 },
+        "billingStatus": { "type": "string", "enum": ["trialing", "pending_payment", "active", "cancelled", "trial_expired", "halted"], "maxLength": 32 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "email"]
+      "required": [
+        "id",
+        "email",
+        "fullName",
+        "companyName",
+        "role",
+        "workspaceId",
+        "selectedPlan",
+        "billingCycle",
+        "billingStatus",
+        "createdAt",
+        "updatedAt"
+      ]
     },
     "Workspace": {
       "title": "Workspace",
-      "description": "Tenant workspace record with owner details",
+      "description": "Tenant workspace record with owner identity and billing state",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "name": { "type": "string", "maxLength": 128 },
-        "owner_id": { "type": "string", "maxLength": 128 },
-        "created_at": { "type": "string", "format": "date-time" },
-        "updated_at": { "type": "string", "format": "date-time" }
-      },
-      "required": ["id", "owner_id"]
-    },
-    "WorkspaceMember": {
-      "title": "WorkspaceMember",
-      "description": "Workspace membership and role binding",
-      "type": "object",
-      "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "workspace_id": { "type": "string", "maxLength": 128 },
-        "user_id": { "type": "string", "maxLength": 128 },
-        "role": { "type": "string", "enum": ["owner", "admin", "member"], "maxLength": 32 },
-        "created_at": { "type": "string", "format": "date-time" }
-      },
-      "required": ["id", "workspace_id", "user_id", "role"]
-    },
-    "Customer": {
-      "title": "Customer",
-      "description": "Customer account tracked for churn risk and retention",
-      "type": "object",
-      "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "workspaceId": { "type": "string", "maxLength": 128 },
-        "name": { "type": "string", "maxLength": 255 },
-        "email": { "type": "string", "format": "email", "maxLength": 255 },
-        "mrr": { "type": "number" },
-        "plan": { "type": "string", "maxLength": 64 },
-        "riskScore": { "type": "number" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "plan": { "type": "string", "enum": ["starter", "growth", "pro"], "maxLength": 32 },
+        "billingStatus": { "type": "string", "enum": ["trialing", "pending_payment", "active", "cancelled", "trial_expired", "halted"], "maxLength": 32 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "workspaceId", "name", "email"]
+      "required": ["id", "name", "ownerId", "plan", "billingStatus", "createdAt", "updatedAt"]
+    },
+    "WorkspaceMember": {
+      "title": "WorkspaceMember",
+      "description": "Workspace membership and role assignment stored in a scalable subcollection",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["owner", "admin", "member"], "maxLength": 32 },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 255 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "userId", "role", "email", "createdAt"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer account tracked for churn risk, MRR retention, and recovery outcomes",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 255 },
+        "companyDomain": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "plan": { "type": "string", "enum": ["Starter", "Growth", "Enterprise", "Pro"], "maxLength": 64 },
+        "mrr": { "type": "number" },
+        "ltv": { "type": "number" },
+        "lastLoginDays": { "type": "number" },
+        "openTicketsCount": { "type": "number" },
+        "paymentStatus": { "type": "string", "enum": ["Current", "Retried", "Failed", "Disputed"], "maxLength": 32 },
+        "usageTrendPercentage": { "type": "number" },
+        "emailOpenRate": { "type": "number" },
+        "riskScore": { "type": "number" },
+        "riskCategory": { "type": "string", "maxLength": 32 },
+        "recommendedAction": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["active", "saved", "churned"], "maxLength": 32 },
+        "savedNotes": { "type": "string", "maxLength": 1000 },
+        "outcomeStatus": { "type": "string", "enum": ["recovered", "churned"], "maxLength": 32 },
+        "churnReason": { "type": "string", "maxLength": 64 },
+        "rescuePlaybookUsed": { "type": "string", "maxLength": 255 },
+        "mrrProtected": { "type": "number" },
+        "isDemo": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "workspaceId",
+        "ownerId",
+        "name",
+        "email",
+        "companyDomain",
+        "plan",
+        "mrr",
+        "ltv",
+        "lastLoginDays",
+        "openTicketsCount",
+        "paymentStatus",
+        "usageTrendPercentage",
+        "emailOpenRate",
+        "riskScore",
+        "riskCategory",
+        "recommendedAction",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ImportHistory": {
+      "title": "ImportHistory",
+      "description": "CSV/PDF/Manual customer import execution audit record inside a workspace",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "source": { "type": "string", "enum": ["CSV", "PDF", "Razorpay", "Mixpanel", "Intercom", "Manual"], "maxLength": 32 },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "totalRows": { "type": "number" },
+        "validRows": { "type": "number" },
+        "failedRows": { "type": "number" },
+        "status": { "type": "string", "enum": ["completed", "failed", "processing", "partial success", "success"], "maxLength": 32 },
+        "errorSummary": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "workspaceId",
+        "ownerId",
+        "source",
+        "fileName",
+        "totalRows",
+        "validRows",
+        "failedRows",
+        "status",
+        "errorSummary",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WorkspaceIntegration": {
+      "title": "WorkspaceIntegration",
+      "description": "Configured third-party or billing integration state inside a workspace",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "category": { "type": "string", "enum": ["billing", "usage", "support", "engagement", "database"], "maxLength": 32 },
+        "isConnected": { "type": "boolean" },
+        "syncedRecordsCount": { "type": "number" },
+        "statusText": { "type": "string", "maxLength": 255 },
+        "lastSyncAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "name", "category", "isConnected", "syncedRecordsCount", "statusText", "createdAt", "updatedAt"]
+    },
+    "WorkspaceAlert": {
+      "title": "WorkspaceAlert",
+      "description": "Daily retention risk digest alert scoped to a workspace",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "customersCount": { "type": "number" },
+        "mrrAtRisk": { "type": "number" },
+        "summary": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "title", "customersCount", "mrrAtRisk", "summary", "createdAt", "updatedAt"]
+    },
+    "OutboundMessage": {
+      "title": "OutboundMessage",
+      "description": "Approved retention outreach message dispatched or queued inside a workspace",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "customerId": { "type": "string", "maxLength": 128 },
+        "customerName": { "type": "string", "maxLength": 255 },
+        "channel": { "type": "string", "enum": ["email", "whatsapp"], "maxLength": 32 },
+        "recipient": { "type": "string", "maxLength": 255 },
+        "subject": { "type": "string", "maxLength": 255 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "status": { "type": "string", "enum": ["PENDING", "PROCESSING", "SENT", "FAILED"], "maxLength": 32 },
+        "providerMessageId": { "type": "string", "maxLength": 255 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "channel", "recipient", "content", "status", "createdAt", "updatedAt"]
+    },
+    "WorkspaceSubscription": {
+      "title": "WorkspaceSubscription",
+      "description": "Workspace subscription and billing lifecycle stored in Firestore",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tier": { "type": "string", "enum": ["starter", "growth", "pro"], "maxLength": 32 },
+        "billingCycle": { "type": "string", "enum": ["monthly", "annual"], "maxLength": 16 },
+        "status": { "type": "string", "enum": ["pending", "trialing", "active", "halted", "cancelled", "past_due", "trial_expired"], "maxLength": 32 },
+        "paymentVerificationStatus": { "type": "string", "enum": ["pending", "verified", "failed"], "maxLength": 32 },
+        "razorpaySubscriptionId": { "type": "string", "maxLength": 128 },
+        "trialEndsAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "tier", "billingCycle", "status", "paymentVerificationStatus", "createdAt", "updatedAt"]
+    },
+    "SchedulerSetting": {
+      "title": "SchedulerSetting",
+      "description": "Automated daily retention scan scheduler configuration for a workspace",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "enabled": { "type": "boolean" },
+        "ownerEmail": { "type": "string", "format": "email", "minLength": 3, "maxLength": 255 },
+        "cronExpression": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "enabled", "ownerEmail", "cronExpression", "createdAt", "updatedAt"]
+    },
+    "WorkspaceAuditLog": {
+      "title": "WorkspaceAuditLog",
+      "description": "Immutable workspace audit trail entry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorEmail": { "type": "string", "format": "email", "minLength": 3, "maxLength": 255 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "targetType": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "actorId", "actorEmail", "action", "targetType", "createdAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted database record granting administrative privileges",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 255 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "createdAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "User profile document owned by the authenticated user"
+      "description": "Private user profile document containing PII, restricted strictly to document owner or admin"
     },
     "/workspaces/{workspaceId}": {
       "schema": { "$ref": "#/entities/Workspace" },
-      "description": "Tenant workspace document"
+      "description": "Tenant workspace document anchored to an ownerId"
     },
     "/workspaces/{workspaceId}/members/{memberId}": {
       "schema": { "$ref": "#/entities/WorkspaceMember" },
-      "description": "Workspace authorized members list"
+      "description": "Workspace authorized members subcollection"
     },
     "/workspaces/{workspaceId}/customers/{customerId}": {
       "schema": { "$ref": "#/entities/Customer" },
-      "description": "Customer retention records within an authorized workspace"
+      "description": "Customer retention telemetry records scoped to an authorized workspace and owner"
+    },
+    "/workspaces/{workspaceId}/importHistory/{importId}": {
+      "schema": { "$ref": "#/entities/ImportHistory" },
+      "description": "Customer import execution logs scoped to an authorized workspace"
+    },
+    "/workspaces/{workspaceId}/integrations/{integrationId}": {
+      "schema": { "$ref": "#/entities/WorkspaceIntegration" },
+      "description": "Workspace third-party integration settings and sync metadata"
+    },
+    "/workspaces/{workspaceId}/alerts/{alertId}": {
+      "schema": { "$ref": "#/entities/WorkspaceAlert" },
+      "description": "Workspace daily retention digest alerts"
+    },
+    "/workspaces/{workspaceId}/outboundMessages/{messageId}": {
+      "schema": { "$ref": "#/entities/OutboundMessage" },
+      "description": "Workspace outbound retention message queue and delivery records"
+    },
+    "/workspaces/{workspaceId}/subscriptions/{subscriptionId}": {
+      "schema": { "$ref": "#/entities/WorkspaceSubscription" },
+      "description": "Workspace subscription and billing lifecycle"
+    },
+    "/workspaces/{workspaceId}/schedulerSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/SchedulerSetting" },
+      "description": "Workspace automated retention scan scheduler settings"
+    },
+    "/workspaces/{workspaceId}/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/WorkspaceAuditLog" },
+      "description": "Immutable workspace audit trail logs"
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Trusted admin role registry"
     }
   }
 }

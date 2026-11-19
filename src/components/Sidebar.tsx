@@ -10,7 +10,8 @@ import {
   TrendingUp,
   Gift,
   Clock,
-  AlertCircle
+  AlertCircle,
+  Database
 } from 'lucide-react';
 import { authService } from '../services/authService';
 
@@ -87,6 +88,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Settings',
       icon: Settings,
       badge: null
+    },
+    {
+      id: 'admin/db-test',
+      label: 'Backend & Sync',
+      icon: Database,
+      badge: 'Firebase',
+      badgeColor: 'bg-amber-100 text-amber-800 font-semibold'
     }
   ];
 

@@ -23,7 +23,8 @@ import {
   Users,
   MessageSquare,
   Settings,
-  DollarSign
+  DollarSign,
+  Database
 } from 'lucide-react';
 import { DailyAlert, UserProfile } from '../types';
 
@@ -550,7 +551,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                   { id: 'playbooks', label: 'Retention Playbooks', icon: ShieldCheck },
                   { id: 'roi', label: 'ROI Calculator', icon: DollarSign },
                   { id: 'billing', label: 'Plans & Billing', icon: CreditCard },
-                  { id: 'settings', label: 'Settings', icon: Settings }
+                  { id: 'settings', label: 'Settings', icon: Settings },
+                  { id: 'admin/db-test', label: 'Backend & Sync', icon: Database, badge: 'Firebase' }
                 ].map((item) => {
                   const Icon = item.icon;
                   const isCurrent = activeView === item.id || (item.id === 'home' && (activeView === 'dashboard' || activeView === 'action-queue'));

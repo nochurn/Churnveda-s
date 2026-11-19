@@ -25,7 +25,8 @@ import {
   Download,
   Package,
   FileCode,
-  Copy
+  Copy,
+  Database
 } from 'lucide-react';
 import { aiEmployeeService } from '../services/aiEmployeeService';
 import { apiService, OutboundStatusResponse, TestOutboundConfigResponse } from '../services/api';
@@ -597,6 +598,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isLoadingStatus ? 'animate-spin' : ''}`} />
                 <span>Refresh Status</span>
+              </button>
+            </div>
+
+            {/* Firebase Backend & Firestore Sync Shortcut Card */}
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-blue-900 text-white flex items-center justify-center shrink-0">
+                  <Database className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-gray-900">
+                    Firebase Cloud Firestore Backend &amp; Workspace Sync
+                  </h4>
+                  <p className="text-[11px] text-gray-600 mt-0.5">
+                    Inspect live Firestore table counts, run the verification suite, and sync workspace customers to Firestore.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => onNavigate('admin/db-test')}
+                className="px-3.5 py-2 bg-blue-900 hover:bg-blue-800 text-white rounded-lg text-xs font-semibold shrink-0 cursor-pointer transition-colors"
+              >
+                Open Backend &amp; Sync
               </button>
             </div>
 

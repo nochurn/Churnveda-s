@@ -478,23 +478,20 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   </svg>
                   <span>Continue with Google</span>
                 </button>
+                <p className="text-[11px] text-center text-gray-500">
+                  Google Sign-In uses your Google account directly. Need a password for email login?{' '}
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('forgot-password')}
+                    className="text-blue-900 hover:underline font-semibold cursor-pointer"
+                  >
+                    Set or reset password
+                  </button>
+                  .
+                </p>
               </div>
             </>
           )}
-
-          {/* Optional: Email verification code / link toggle */}
-          <div className="text-center pt-3 mt-3 border-t border-gray-100">
-            <button
-              type="button"
-              onClick={() => {
-                setIsMagicLinkMode(!isMagicLinkMode);
-                setErrorMessage(null);
-              }}
-              className="text-[11px] text-gray-500 hover:text-blue-900 underline font-medium cursor-pointer"
-            >
-              {isMagicLinkMode ? 'Sign in with password instead' : 'Use email verification link instead'}
-            </button>
-          </div>
 
           <div className="mt-5 pt-4 border-t border-gray-100 text-center text-xs text-gray-600">
             Don't have an account yet?{' '}

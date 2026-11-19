@@ -2,6 +2,17 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { Customer, ImportHistoryRecord, ChurnReasonType } from '../types';
 import { apiService } from '../services/api';
 import { authService } from '../services/authService';
+import { auth as fbAuth } from '../lib/firebaseClient';
+import {
+  batchDeleteCustomersFromFirestore,
+  batchSyncCustomersToFirestore,
+  deleteCustomerFromFirestore,
+  isFirebaseFirestoreReady,
+  recordImportHistoryToFirestore,
+  subscribeWorkspaceCustomers,
+  updateCustomerOutcomeInFirestore,
+  upsertCustomerToFirestore
+} from '../services/firestoreService';
 import {
   getTotalCustomers,
   getTotalMRR,
@@ -172,6 +183,9 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return;
     }
 
+    const startUserId = authService.getCurrentUser()?.id || null;
+    const startFbUid = fbAuth.currentUser?.uid || null;
+
     try {
       setLoading(true);
       setError(null);
@@ -181,9 +195,27 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         apiService.fetchImportHistory()
       ]);
 
+      const activeUser = authService.getCurrentUser();
+      if (!activeUser || (startUserId && activeUser.id !== startUserId)) {
+        return;
+      }
+
       if (custRes.status === 'fulfilled' && custRes.value && Array.isArray(custRes.value.customers)) {
         const deduped = deduplicateCustomers(custRes.value.customers);
         setCustomers(deduped);
+
+        const wsId = activeUser.workspaceId;
+        if (
+          wsId &&
+          isFirebaseFirestoreReady() &&
+          fbAuth.currentUser &&
+          (!startFbUid || fbAuth.currentUser.uid === startFbUid) &&
+          deduped.length > 0
+        ) {
+          batchSyncCustomersToFirestore(wsId, deduped.slice(0, 100)).catch((syncErr) => {
+            console.warn('[Firestore Sync] Customer snapshot sync skipped:', syncErr);
+          });
+        }
       }
 
       if (histRes.status === 'fulfilled' && histRes.value && Array.isArray(histRes.value.history)) {
@@ -197,9 +229,83 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, []);
 
-  // Initial load
+  // Auth lifecycle & real-time Cloud Firestore listener
   useEffect(() => {
-    refreshCustomerData();
+    let unsubscribeFirestore: (() => void) | null = null;
+
+    const detachFirestore = () => {
+      if (unsubscribeFirestore) {
+        unsubscribeFirestore();
+        unsubscribeFirestore = null;
+      }
+    };
+
+    const unsubscribeAuth = authService.subscribe((user) => {
+      detachFirestore();
+
+      if (!user) {
+        setCustomers([]);
+        setImportHistory([]);
+        setLastDeletedBatch(null);
+        setLoading(false);
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.removeItem(LOCAL_STORAGE_KEY);
+            localStorage.removeItem(LEGACY_STORAGE_KEY);
+            localStorage.removeItem(LOCAL_STORAGE_HISTORY_KEY);
+            localStorage.removeItem(LEGACY_STORAGE_HISTORY_KEY);
+          } catch {
+            // ignore storage errors
+          }
+        }
+        return;
+      }
+
+      refreshCustomerData();
+
+      if (user.workspaceId && isFirebaseFirestoreReady() && fbAuth.currentUser) {
+        unsubscribeFirestore = subscribeWorkspaceCustomers(
+          user.workspaceId,
+          fbAuth.currentUser.uid,
+          (firestoreCustomers) => {
+            if (firestoreCustomers.length === 0) return;
+            setCustomers((prev) => {
+              const prevMap = new Map<string, Customer>();
+              prev.forEach((c) => {
+                const key = c.id || c.customerId || '';
+                if (key) prevMap.set(key, c);
+              });
+
+              const merged = firestoreCustomers.map((fc) => {
+                const existing = prevMap.get(fc.id);
+                if (!existing) return fc;
+                return {
+                  ...existing,
+                  ...fc,
+                  topFactors: existing.topFactors?.length ? existing.topFactors : fc.topFactors,
+                  supportTickets: existing.supportTickets?.length ? existing.supportTickets : fc.supportTickets,
+                  paymentHistory: existing.paymentHistory?.length ? existing.paymentHistory : fc.paymentHistory,
+                  loginHistory: existing.loginHistory?.length ? existing.loginHistory : fc.loginHistory,
+                  riskTrend: existing.riskTrend?.length ? existing.riskTrend : fc.riskTrend,
+                  retentionRecommendation: existing.retentionRecommendation || fc.retentionRecommendation,
+                  healthPillars: existing.healthPillars || fc.healthPillars
+                };
+              });
+
+              return deduplicateCustomers(merged);
+            });
+          },
+          (err) => {
+            console.warn('[Firestore Listener] Subscription warning:', err.message);
+          }
+        );
+      }
+    });
+
+    return () => {
+      detachFirestore();
+      unsubscribeAuth();
+    };
   }, [refreshCustomerData]);
 
   // Import customers
@@ -220,6 +326,12 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       // If not validateOnly, refresh authoritative state
       if (!payload.validateOnly) {
+        const wsId = authService.getCurrentUser()?.workspaceId;
+        if (wsId && isFirebaseFirestoreReady() && res?.importRecord) {
+          recordImportHistoryToFirestore(wsId, res.importRecord).catch((syncErr) => {
+            console.warn('[Firestore Sync] Import history sync skipped:', syncErr);
+          });
+        }
         await refreshCustomerData();
       }
       return res;
@@ -250,6 +362,12 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     try {
       await apiService.deleteCustomer(customerId);
+      const wsId = authService.getCurrentUser()?.workspaceId;
+      if (wsId && isFirebaseFirestoreReady()) {
+        deleteCustomerFromFirestore(wsId, target.id || customerId).catch((syncErr) => {
+          console.warn('[Firestore Sync] Customer delete skipped:', syncErr);
+        });
+      }
       return true;
     } catch (err: any) {
       console.error('[Churnveda Store] Failed to delete customer on server, rolling back:', err);
@@ -279,6 +397,12 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     try {
       await apiService.deleteCustomers(customerIds);
+      const wsId = authService.getCurrentUser()?.workspaceId;
+      if (wsId && isFirebaseFirestoreReady()) {
+        batchDeleteCustomersFromFirestore(wsId, toDelete.map((c) => c.id)).catch((syncErr) => {
+          console.warn('[Firestore Sync] Bulk delete skipped:', syncErr);
+        });
+      }
       return true;
     } catch (err: any) {
       console.error('[Churnveda Store] Failed to bulk delete on server, rolling back:', err);
@@ -306,6 +430,12 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     try {
       const res = await apiService.clearDemoData();
+      const wsId = authService.getCurrentUser()?.workspaceId;
+      if (wsId && isFirebaseFirestoreReady()) {
+        batchDeleteCustomersFromFirestore(wsId, demoCustomers.map((c) => c.id)).catch((syncErr) => {
+          console.warn('[Firestore Sync] Demo clear skipped:', syncErr);
+        });
+      }
       return res.removedCount ?? demoCustomers.length;
     } catch (err: any) {
       console.error('[Churnveda Store] Failed to clear demo data on server, rolling back:', err);
@@ -397,6 +527,16 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const markCustomerSaved = useCallback(async (customerId: string, notes?: string): Promise<Customer> => {
     const updated = await apiService.markCustomerSaved(customerId, notes);
     setCustomers(prev => prev.map(c => (c.id === customerId || c.customerId === customerId ? updated : c)));
+    const wsId = authService.getCurrentUser()?.workspaceId;
+    if (wsId && isFirebaseFirestoreReady()) {
+      updateCustomerOutcomeInFirestore(wsId, updated.id || customerId, {
+        status: 'saved',
+        savedNotes: notes || updated.savedNotes,
+        mrrProtected: updated.mrrProtected ?? updated.mrr
+      }).catch((syncErr) => {
+        console.warn('[Firestore Sync] Saved status sync skipped:', syncErr);
+      });
+    }
     return updated;
   }, []);
 
@@ -427,6 +567,20 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       prev.map(c => (c.id === data.customerId || c.customerId === data.customerId ? { ...c, ...updatedFields } : c))
     );
 
+    const wsId = authService.getCurrentUser()?.workspaceId;
+    if (wsId && isFirebaseFirestoreReady()) {
+      updateCustomerOutcomeInFirestore(wsId, target?.id || data.customerId, {
+        status: data.status === 'recovered' ? 'saved' : 'churned',
+        outcomeStatus: data.status,
+        churnReason: data.churnReason,
+        rescuePlaybookUsed: data.rescuePlaybookUsed,
+        mrrProtected: data.status === 'recovered' ? mrrVal : 0,
+        savedNotes: updatedFields.savedNotes
+      }).catch((syncErr) => {
+        console.warn('[Firestore Sync] Outcome sync skipped:', syncErr);
+      });
+    }
+
     try {
       await apiService.updateCustomerStatus(data.customerId, {
         status: data.status === 'recovered' ? 'saved' : 'churned',
@@ -442,6 +596,12 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const predictCustomerRisk = useCallback(async (customerId: string): Promise<Customer> => {
     const updated = await apiService.predictChurn(customerId);
     setCustomers(prev => prev.map(c => (c.id === customerId || c.customerId === customerId ? updated : c)));
+    const wsId = authService.getCurrentUser()?.workspaceId;
+    if (wsId && isFirebaseFirestoreReady()) {
+      upsertCustomerToFirestore(wsId, updated).catch((syncErr) => {
+        console.warn('[Firestore Sync] Predict risk sync skipped:', syncErr);
+      });
+    }
     return updated;
   }, []);
 
@@ -449,6 +609,12 @@ export const CustomerProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const recommendRetention = useCallback(async (customerId: string): Promise<Customer> => {
     const updated = await apiService.recommendRetention(customerId);
     setCustomers(prev => prev.map(c => (c.id === customerId || c.customerId === customerId ? updated : c)));
+    const wsId = authService.getCurrentUser()?.workspaceId;
+    if (wsId && isFirebaseFirestoreReady()) {
+      upsertCustomerToFirestore(wsId, updated).catch((syncErr) => {
+        console.warn('[Firestore Sync] Recommendation sync skipped:', syncErr);
+      });
+    }
     return updated;
   }, []);
 

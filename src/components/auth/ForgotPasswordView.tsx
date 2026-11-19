@@ -11,7 +11,7 @@ export const ForgotPasswordView: React.FC<ForgotPasswordViewProps> = ({
   onNavigate,
   onShowToast
 }) => {
-  const [email, setEmail] = useState('nageshsharat@gmail.com');
+  const [email, setEmail] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [generatedResetToken, setGeneratedResetToken] = useState<string | null>(null);

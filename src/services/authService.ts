@@ -684,6 +684,26 @@ class AuthService {
           message: 'Signed in with Google successfully'
         };
       } catch (err: any) {
+        const code = err?.code || '';
+        const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+        if (code === 'auth/unauthorized-domain') {
+          return {
+            success: false,
+            message: `Google Sign-In is blocked for "${host}". Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains, or sign in with Email & Password below.`
+          };
+        }
+        if (code === 'auth/popup-blocked') {
+          return {
+            success: false,
+            message: 'Google Sign-In pop-up was blocked by your browser. Allow pop-ups for this site and try again, or sign in with Email & Password.'
+          };
+        }
+        if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+          return {
+            success: false,
+            message: 'Google Sign-In window was closed before completing login. Please try again.'
+          };
+        }
         return {
           success: false,
           message: err?.message || 'Google authentication failed'

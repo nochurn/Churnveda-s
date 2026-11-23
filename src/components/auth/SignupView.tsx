@@ -15,8 +15,7 @@ import {
   Sparkles,
   Check,
   Calendar,
-  X,
-  Terminal
+  X
 } from 'lucide-react';
 import { authService, validatePasswordRequirements } from '../../services/authService';
 import { apiService } from '../../services/api';
@@ -148,19 +147,16 @@ export const SignupView: React.FC<SignupViewProps> = ({
   const [authConfig, setAuthConfig] = useState<{
     isConfigured: boolean;
     oauthProviders: { google: boolean; microsoft: boolean };
-    developerError?: string | null;
   }>({
-    isConfigured: false,
-    oauthProviders: { google: false, microsoft: false },
-    developerError: null
+    isConfigured: true,
+    oauthProviders: { google: true, microsoft: false }
   });
 
   useEffect(() => {
     apiService.getAuthConfig().then((cfg) => {
       setAuthConfig({
         isConfigured: !!cfg.isConfigured,
-        oauthProviders: cfg.oauthProviders || { google: false, microsoft: false },
-        developerError: cfg.developerError || null
+        oauthProviders: cfg.oauthProviders || { google: true, microsoft: false }
       });
     }).catch(() => {});
   }, []);
@@ -378,17 +374,6 @@ export const SignupView: React.FC<SignupViewProps> = ({
   return (
     <div className="min-h-[calc(100vh-14rem)] flex items-center justify-center px-4 py-12">
       <div className="w-full max-w-lg">
-        {/* Developer Warning if Supabase URL / Anon Key Missing */}
-        {authConfig.developerError && (
-          <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-2.5 text-xs text-amber-900 shadow-xs">
-            <Terminal className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-            <div>
-              <div className="font-bold">Authentication Configuration Notice:</div>
-              <p className="mt-0.5 text-[11px] text-amber-800">{authConfig.developerError}</p>
-            </div>
-          </div>
-        )}
-
         {/* Card Container */}
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 sm:p-8">
           {/* Brand Header */}

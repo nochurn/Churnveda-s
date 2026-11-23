@@ -298,7 +298,6 @@ export interface IntegrationStatus {
   lastSyncAt: string | null;
   syncedRecordsCount: number;
   syncFrequency: 'Every 24 Hours' | 'Real-time' | 'Manual';
-  apiKeyMasked?: string;
   statusText: string;
   isFallbackCatalog?: boolean;
 }

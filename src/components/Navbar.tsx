@@ -23,8 +23,7 @@ import {
   Users,
   MessageSquare,
   Settings,
-  DollarSign,
-  Database
+  DollarSign
 } from 'lucide-react';
 import { DailyAlert, UserProfile } from '../types';
 
@@ -235,13 +234,13 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         )}
 
-        {/* Gemini Engine Indicator */}
+        {/* AI Engine Indicator */}
         <div
           className="hidden lg:flex items-center gap-2 px-2.5 py-1 rounded-full bg-blue-50/80 border border-blue-200/70 text-xs text-blue-900"
-          title={geminiReady ? 'Gemini 3.8 Flash API connected' : 'Algorithmic + Gemini Engine'}
+          title={geminiReady ? 'AI churn prediction active' : 'Predictive retention engine'}
         >
           <Sparkles className="w-3.5 h-3.5 text-blue-700 animate-pulse" />
-          <span className="font-medium text-blue-900">Gemini 3.8 Flash</span>
+          <span className="font-medium text-blue-900">AI Retention Active</span>
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
         </div>
 
@@ -551,8 +550,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   { id: 'playbooks', label: 'Retention Playbooks', icon: ShieldCheck },
                   { id: 'roi', label: 'ROI Calculator', icon: DollarSign },
                   { id: 'billing', label: 'Plans & Billing', icon: CreditCard },
-                  { id: 'settings', label: 'Settings', icon: Settings },
-                  { id: 'admin/db-test', label: 'Backend & Sync', icon: Database, badge: 'Firebase' }
+                  { id: 'settings', label: 'Settings', icon: Settings }
                 ].map((item) => {
                   const Icon = item.icon;
                   const isCurrent = activeView === item.id || (item.id === 'home' && (activeView === 'dashboard' || activeView === 'action-queue'));

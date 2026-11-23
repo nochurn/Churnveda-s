@@ -789,7 +789,7 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-gray-50 rounded-xl border border-gray-200 text-xs">
               <div>
-                <span className="font-bold text-gray-900">Export Complete Customer & Model Dataset (Area 9 Formula Sanitized)</span>
+                <span className="font-bold text-gray-900">Export Complete Customer &amp; Model Dataset</span>
                 <p className="text-gray-600 mt-0.5">
                   Download all workspace customer profiles, churn probabilities, and playbooks in GDPR-compliant formats.
                 </p>
@@ -848,7 +848,7 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
                   Enterprise Immutable Audit Trail
                 </h3>
                 <p className="text-xs text-gray-600 mt-0.5">
-                  Append-only, tamper-evident record of administrative, billing, export, and security operations (Area 5).
+                  Append-only, tamper-evident record of administrative, billing, export, and security operations.
                 </p>
               </div>
 

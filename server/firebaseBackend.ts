@@ -1293,5 +1293,66 @@ export const firebaseBackend = {
 
       await fsSetDoc(relPath, data, ['createdAt'], ctx);
     }
+  },
+
+  privacy: {
+    async purgeUserAndWorkspace(ctx: FirebaseRequestContext | null | undefined): Promise<{ purgedDocs: number }> {
+      if (!ctx || !canExecute(ctx)) return { purgedDocs: 0 };
+      const uid = sanitizeFsId(ctx.uid, 'usr');
+      const workspaceId = sanitizeFsId(ctx.workspaceId, 'ws');
+      const deletes: string[] = [`users/${uid}`];
+
+      if (workspaceId !== 'ws-default') {
+        const subcollections = [
+          'customers',
+          'importHistory',
+          'integrations',
+          'alerts',
+          'outboundMessages',
+          'schedulerSettings',
+          'members'
+        ];
+        for (const sub of subcollections) {
+          try {
+            if (hasFirebaseAdminCredentials()) {
+              const snap = await adminDb.collection(`workspaces/${workspaceId}/${sub}`).get();
+              snap.docs.forEach((d) => deletes.push(`workspaces/${workspaceId}/${sub}/${d.id}`));
+            } else if (ctx.idToken) {
+              const docs = await restRunQuery(`workspaces/${workspaceId}`, sub, [{ field: 'workspaceId', value: workspaceId }], ctx.idToken).catch(() => []);
+              for (const d of docs) {
+                if (d.id) deletes.push(`workspaces/${workspaceId}/${sub}/${d.id}`);
+              }
+            }
+          } catch {
+            // best-effort subcollection listing
+          }
+        }
+        deletes.push(`workspaces/${workspaceId}`);
+      }
+
+      let purgedDocs = 0;
+      if (hasFirebaseAdminCredentials()) {
+        for (const relPath of deletes) {
+          try {
+            await adminDb.doc(relPath).delete();
+            purgedDocs++;
+          } catch {}
+        }
+        return { purgedDocs };
+      }
+
+      if (ctx.idToken) {
+        try {
+          await restCommitWrites(
+            deletes.map((relPath) => ({ type: 'delete' as const, relPath })),
+            ctx.idToken
+          );
+          purgedDocs = deletes.length;
+        } catch {
+          // some documents might already be absent or restricted by immutable rules
+        }
+      }
+      return { purgedDocs };
+    }
   }
 };

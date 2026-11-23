@@ -1,11 +1,18 @@
 import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
 import { Pool } from 'pg';
 import crypto from 'crypto';
 import { SAMPLE_CUSTOMERS } from '../src/data/sampleCustomers.ts';
-import { runPostgresMigrations } from './db.ts';
+import { runPostgresMigrations, migrateSqliteFileToPostgres } from './db.ts';
 
 async function migrate() {
-  const rawDbUrl = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
+  const rawDbUrl = (
+    process.env.DATABASE_URL_UNPOOLED ||
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    ''
+  ).trim();
   const isPostgresUrl = rawDbUrl.startsWith('postgresql://') || rawDbUrl.startsWith('postgres://');
 
   if (!rawDbUrl || !isPostgresUrl) {
@@ -20,7 +27,7 @@ async function migrate() {
 
   const dbUrl = rawDbUrl;
 
-  console.log('🔄 [Churnveda Migration] Connecting to Railway PostgreSQL...');
+  console.log('🔄 [Churnveda Migration] Connecting to PostgreSQL...');
 
   const pool = new Pool({
     connectionString: dbUrl,
@@ -47,6 +54,12 @@ async function migrate() {
     // 1. Run core schema DDL migrations (workspaces, users, sessions, subscriptions, customers, etc.)
     await runPostgresMigrations(pool);
     console.log('✅ [Churnveda Migration] Schema DDL tables and constraints verified.');
+
+    // 1b. Migrate any existing local SQLite data before default/demo seeding
+    const sqliteMigration = await migrateSqliteFileToPostgres(pool);
+    if (sqliteMigration.migrated) {
+      console.log('✅ [Churnveda Migration] Local SQLite data migrated into PostgreSQL:', sqliteMigration.counts);
+    }
 
     // 2. Seed default workspace if absent
     const wsRes = await pool.query("SELECT id FROM workspaces WHERE id = 'ws-default'");
@@ -216,7 +229,7 @@ async function migrate() {
     }
 
     await pool.end();
-    console.log('🎉 [Churnveda Migration] Database migration completed successfully on Railway PostgreSQL.');
+    console.log('🎉 [Churnveda Migration] Database migration completed successfully on PostgreSQL.');
     process.exit(0);
   } catch (err: any) {
     console.error('❌ [Churnveda Migration Failed]:', err?.message || err);

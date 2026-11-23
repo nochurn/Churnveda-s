@@ -11,3 +11,4 @@ coverage/
 data/*.db-shm
 data/*.db-wal
 .cache/
+.neon

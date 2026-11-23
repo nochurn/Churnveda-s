@@ -157,6 +157,64 @@ export interface DbAuditLog {
   created_at: string;
 }
 
+export interface DbRazorpayOrder {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  order_id: string;
+  amount_paise: number;
+  currency: string;
+  receipt?: string;
+  status: string;
+  metadata_json?: any;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbSchedulerSetting {
+  workspace_id: string;
+  enabled: boolean;
+  scan_time: string;
+  timezone: string;
+  owner_notification_email?: string;
+  last_run_date?: string;
+  last_run_at?: string;
+  next_run_at?: string;
+  updated_at: string;
+}
+
+export interface DbOwnerBrief {
+  id: string;
+  workspace_id: string;
+  date: string;
+  status: 'COMPLETED' | 'ERROR';
+  customers_analyzed: number;
+  customers_at_risk: number;
+  revenue_at_risk: number;
+  top5_count: number;
+  messages_prepared: number;
+  messages_awaiting_approval: number;
+  messages_sent: number;
+  messages_failed: number;
+  owner_notification_email?: string;
+  owner_notification_status: 'sent' | 'pending_credentials' | 'disabled' | 'failed';
+  owner_notification_message?: string;
+  created_at: string;
+}
+
+export interface DbOutboundLog {
+  idempotency_key: string;
+  workspace_id: string;
+  message_id: string;
+  channel: 'whatsapp' | 'email';
+  customer_id: string;
+  recipient: string;
+  provider_message_id: string;
+  status: string;
+  sent_at: string;
+  created_at: string;
+}
+
 // ----------------------------------------------------------------------------
 // Database Configuration & Connection Pool
 // ----------------------------------------------------------------------------
@@ -196,7 +254,11 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
   }
 
   initDatabasePromise = (async () => {
-    const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT);
+    const isProduction =
+      process.env.NODE_ENV === 'production' ||
+      Boolean(process.env.RAILWAY_ENVIRONMENT) ||
+      Boolean(process.env.RENDER);
+    const isAiStudioSandbox = Boolean(process.env.AIS_DEV_ENVIRONMENT);
 
     // 1. Check for PostgreSQL credentials
     // A PostgreSQL connection string must start with postgresql:// or postgres://.
@@ -219,7 +281,7 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
               ssl: (dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('.railway.internal')) ? false : { rejectUnauthorized: false },
               max: 10,
               idleTimeoutMillis: 30000,
-              connectionTimeoutMillis: 6000
+              connectionTimeoutMillis: 10000
             }
           : {
               host: pgHost,
@@ -230,7 +292,7 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
               ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
               max: 10,
               idleTimeoutMillis: 30000,
-              connectionTimeoutMillis: 6000
+              connectionTimeoutMillis: 10000
             };
 
         pool = new Pool(poolConfig);
@@ -238,7 +300,7 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
           console.error('[Churnveda DB Pool Warning] Idle client error:', err.message);
         });
 
-        // Probe connection once with short timeout
+        // Probe connection once with cold-start-tolerant timeout
         const client = await pool.connect();
         const clientErrHandler = (err: Error) => {
           console.warn('[Churnveda DB Client Warning]:', err?.message || err);
@@ -255,7 +317,7 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
         isPostgresActive = true;
         console.log('[Churnveda DB] Successfully connected to PostgreSQL pool.');
         await runPostgresMigrations(pgPool);
-        await migrateSqliteToPostgresIfEmpty(pgPool);
+        await migrateSqliteFileToPostgres(pgPool);
         databaseInitialized = true;
         return { isPostgres: true, target: 'PostgreSQL' };
       } catch (err: any) {
@@ -264,11 +326,11 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
         }
         pgPool = null;
         isPostgresActive = false;
-        if (isProduction) {
-          console.warn('[Churnveda DB Notice] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + '). Falling back to local SQLite WAL storage.');
-        } else {
-          console.warn('[Churnveda DB Notice] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + '). Using local SQLite storage for development.');
+        if (isProduction && !isAiStudioSandbox) {
+          console.error('[Churnveda DB Error] PostgreSQL connection failed in production:', err?.message || err);
+          throw new Error(`PostgreSQL connection failed in production: ${err?.message || 'connection error'}`);
         }
+        console.warn('[Churnveda DB Notice] PostgreSQL connection unreachable (' + (err?.message || 'timeout') + '). Using local SQLite storage for development.');
       }
     } else if (isProduction) {
       console.warn('[Churnveda DB Notice] DATABASE_URL not configured in production; falling back to SQLite WAL storage.');
@@ -294,82 +356,460 @@ export async function initDatabase(): Promise<{ isPostgres: boolean; target: str
   return initDatabasePromise;
 }
 
-/**
- * Automatically migrates existing local data into PostgreSQL when PostgreSQL is first attached
- */
-async function migrateSqliteToPostgresIfEmpty(pool: Pool) {
-  try {
-    if (!sqliteDb) return;
-    const client = await pool.connect();
-    const clientErrHandler = (err: Error) => {
-      console.warn('[Churnveda DB Migration Client Warning]:', err?.message || err);
-    };
-    client.on('error', clientErrHandler);
+function safeParseJsonValue(raw: unknown): any {
+  if (raw === null || raw === undefined || raw === '') return null;
+  if (typeof raw === 'object') return raw;
+  if (typeof raw === 'string') {
     try {
-      const res = await client.query('SELECT COUNT(*) as count FROM customers');
-      const count = parseInt(res.rows[0]?.count || '0', 10);
-      if (count === 0) {
-        console.log('[Churnveda DB Migration] PostgreSQL database is empty. Migrating local records to PostgreSQL...');
-        await client.query('BEGIN');
-        try {
-          const workspaces = sqliteDb.prepare('SELECT * FROM workspaces').all() as any[];
-          for (const ws of workspaces) {
-            await client.query(
-              'INSERT INTO workspaces (id, name, owner_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING',
-              [ws.id, ws.name, ws.owner_id, ws.created_at, ws.updated_at]
-            );
-          }
-          const users = sqliteDb.prepare('SELECT * FROM users').all() as any[];
-          for (const u of users) {
-            await client.query(
-              `INSERT INTO users (
-                id, full_name, company_name, email, password_hash, phone, email_verified,
-                selected_plan, billing_status, workspace_id, role, razorpay_subscription_id,
-                razorpay_plan_id, billing_plan_id, trial_ends_at, created_at, updated_at
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-              ON CONFLICT (email) DO NOTHING`,
-              [
-                u.id, u.full_name, u.company_name, u.email, u.password_hash, u.phone || null,
-                Boolean(u.email_verified), u.selected_plan, u.billing_status, u.workspace_id,
-                u.role || 'Admin', u.razorpay_subscription_id || null, u.razorpay_plan_id || null,
-                u.billing_plan_id || null, u.trial_ends_at || null, u.created_at, u.updated_at
-              ]
-            );
-          }
-          const customers = sqliteDb.prepare('SELECT * FROM customers').all() as any[];
-          for (const c of customers) {
-            await client.query(
-              `INSERT INTO customers (
-                id, workspace_id, customer_id, name, domain, plan, mrr, status,
-                risk_score, risk_category, last_login_days, usage_drop_percent,
-                open_tickets_count, payment_status, contract_renewal_days,
-                primary_contact_name, primary_contact_role, primary_contact_email,
-                data_json, created_at, updated_at
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-              ON CONFLICT (workspace_id, customer_id) DO NOTHING`,
-              [
-                c.id, c.workspace_id, c.customer_id, c.name, c.domain || null, c.plan,
-                c.mrr, c.status, c.risk_score, c.risk_category, c.last_login_days,
-                c.usage_drop_percent, c.open_tickets_count, c.payment_status,
-                c.contract_renewal_days, c.primary_contact_name || null,
-                c.primary_contact_role || null, c.primary_contact_email || null,
-                c.data_json, c.created_at, c.updated_at
-              ]
-            );
-          }
-          await client.query('COMMIT');
-          console.log(`[Churnveda DB Migration] Successfully migrated ${customers.length} customer records to PostgreSQL.`);
-        } catch (txErr) {
-          await client.query('ROLLBACK').catch(() => {});
-          throw txErr;
-        }
+      return JSON.parse(raw);
+    } catch {
+      return { raw };
+    }
+  }
+  return raw;
+}
+
+/**
+ * Automatically migrates existing local SQLite data (`data/nochurn.db`) into PostgreSQL
+ * in strict dependency order, skipping synthetic test/orphan rows that would violate
+ * PostgreSQL foreign key constraints.
+ */
+export async function migrateSqliteFileToPostgres(pool: Pool): Promise<{
+  migrated: boolean;
+  counts: Record<string, number>;
+}> {
+  const counts: Record<string, number> = {};
+  const dbFilePath = path.join(dataDir, 'nochurn.db');
+  if (!fs.existsSync(dbFilePath)) {
+    return { migrated: false, counts };
+  }
+
+  let srcDb: DatabaseSync | null = null;
+  const client = await pool.connect();
+  const clientErrHandler = (err: Error) => {
+    console.warn('[Churnveda DB Migration Client Warning]:', err?.message || err);
+  };
+  client.on('error', clientErrHandler);
+
+  try {
+    const wsCountRes = await client.query('SELECT COUNT(*) as count FROM workspaces');
+    const userCountRes = await client.query('SELECT COUNT(*) as count FROM users');
+    const custCountRes = await client.query('SELECT COUNT(*) as count FROM customers');
+    const pgWsCount = parseInt(wsCountRes.rows[0]?.count || '0', 10);
+    const pgUserCount = parseInt(userCountRes.rows[0]?.count || '0', 10);
+    const pgCustCount = parseInt(custCountRes.rows[0]?.count || '0', 10);
+
+    // Migrate whenever PostgreSQL is fresh (no workspaces, no users, or no customers yet)
+    if (pgWsCount > 0 && pgUserCount > 0 && pgCustCount > 0) {
+      return { migrated: false, counts };
+    }
+
+    srcDb = new DatabaseSync(dbFilePath, { readOnly: true });
+    const existingTables = new Set(
+      (srcDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
+        .map(t => t.name)
+    );
+    const readRows = (table: string): any[] => {
+      if (!existingTables.has(table)) return [];
+      return srcDb!.prepare(`SELECT * FROM ${table}`).all() as any[];
+    };
+
+    const isTestWorkspaceId = (id?: string | null) =>
+      !id || id.startsWith('ws_test_') || id.startsWith('ws_tenant_');
+    const isTestUserId = (id?: string | null) =>
+      !id || id.startsWith('usr_test_');
+    const isTestEventId = (id?: string | null) =>
+      !id || id.startsWith('evt_test_');
+
+    console.log('[Churnveda DB Migration] Migrating local SQLite records into PostgreSQL...');
+
+    await client.query('BEGIN');
+    try {
+      const existingWsRes = await client.query('SELECT id FROM workspaces');
+      const validWorkspaceIds = new Set<string>(existingWsRes.rows.map((r: any) => r.id));
+
+      const workspaces = readRows('workspaces').filter(ws => !isTestWorkspaceId(ws.id));
+      counts.workspaces = 0;
+      for (const ws of workspaces) {
+        await client.query(
+          `INSERT INTO workspaces (id, name, owner_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+          [ws.id, ws.name, ws.owner_id, ws.created_at, ws.updated_at]
+        );
+        validWorkspaceIds.add(ws.id);
+        counts.workspaces += 1;
       }
-    } finally {
-      client.removeListener('error', clientErrHandler);
-      client.release();
+
+      const existingUsersRes = await client.query('SELECT id FROM users');
+      const validUserIds = new Set<string>(existingUsersRes.rows.map((r: any) => r.id));
+
+      const users = readRows('users').filter(
+        u => !isTestUserId(u.id) && validWorkspaceIds.has(u.workspace_id)
+      );
+      counts.users = 0;
+      for (const u of users) {
+        await client.query(
+          `INSERT INTO users (
+            id, full_name, company_name, email, password_hash, phone, email_verified,
+            selected_plan, billing_status, workspace_id, role, razorpay_subscription_id,
+            razorpay_plan_id, billing_plan_id, trial_ends_at, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          ON CONFLICT DO NOTHING`,
+          [
+            u.id, u.full_name, u.company_name, u.email, u.password_hash, u.phone || null,
+            Boolean(u.email_verified), u.selected_plan, u.billing_status, u.workspace_id,
+            u.role || 'Admin', u.razorpay_subscription_id || null, u.razorpay_plan_id || null,
+            u.billing_plan_id || null, u.trial_ends_at || null, u.created_at, u.updated_at
+          ]
+        );
+        validUserIds.add(u.id);
+        counts.users += 1;
+      }
+
+      const members = readRows('workspace_members').filter(
+        m => validWorkspaceIds.has(m.workspace_id) && validUserIds.has(m.user_id)
+      );
+      counts.workspace_members = 0;
+      for (const m of members) {
+        await client.query(
+          `INSERT INTO workspace_members (id, workspace_id, user_id, role, created_at)
+           VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+          [m.id, m.workspace_id, m.user_id, m.role || 'member', m.created_at]
+        );
+        counts.workspace_members += 1;
+      }
+
+      const sessions = readRows('sessions').filter(
+        s => validWorkspaceIds.has(s.workspace_id) && validUserIds.has(s.user_id)
+      );
+      counts.sessions = 0;
+      for (const s of sessions) {
+        await client.query(
+          `INSERT INTO sessions (token, user_id, email, workspace_id, expires_at, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
+          [s.token, s.user_id, s.email, s.workspace_id, Number(s.expires_at), s.created_at]
+        );
+        counts.sessions += 1;
+      }
+
+      const resetTokens = readRows('password_reset_tokens');
+      counts.password_reset_tokens = 0;
+      for (const rt of resetTokens) {
+        await client.query(
+          `INSERT INTO password_reset_tokens (token, email, expires_at, created_at)
+           VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+          [rt.token, rt.email, Number(rt.expires_at), rt.created_at]
+        );
+        counts.password_reset_tokens += 1;
+      }
+
+      const pendingSignups = readRows('pending_signups');
+      counts.pending_signups = 0;
+      for (const ps of pendingSignups) {
+        await client.query(
+          `INSERT INTO pending_signups (user_id, email, tier, billing_cycle, trial_verified, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
+          [ps.user_id, ps.email, ps.tier, ps.billing_cycle, Boolean(ps.trial_verified), ps.created_at, ps.updated_at]
+        );
+        counts.pending_signups += 1;
+      }
+
+      const existingPlansRes = await client.query('SELECT id FROM billing_plans');
+      const validPlanIds = new Set<string>(existingPlansRes.rows.map((r: any) => r.id));
+
+      const plans = readRows('billing_plans');
+      counts.billing_plans = 0;
+      for (const bp of plans) {
+        await client.query(
+          `INSERT INTO billing_plans (
+            id, name, tier, billing_cycle, amount_paise, amount_inr, currency,
+            razorpay_plan_id, is_active, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          ON CONFLICT DO NOTHING`,
+          [
+            bp.id, bp.name, bp.tier, bp.billing_cycle, Number(bp.amount_paise), Number(bp.amount_inr),
+            bp.currency || 'USD', bp.razorpay_plan_id, Boolean(bp.is_active), bp.created_at, bp.updated_at
+          ]
+        );
+        validPlanIds.add(bp.id);
+        counts.billing_plans += 1;
+      }
+
+      const customers = readRows('customers').filter(c => validWorkspaceIds.has(c.workspace_id));
+      counts.customers = 0;
+      for (const c of customers) {
+        const parsedData = safeParseJsonValue(c.data_json) ?? {};
+        await client.query(
+          `INSERT INTO customers (
+            id, workspace_id, customer_id, name, domain, plan, mrr, status,
+            risk_score, risk_category, last_login_days, usage_drop_percent,
+            open_tickets_count, payment_status, contract_renewal_days,
+            primary_contact_name, primary_contact_role, primary_contact_email,
+            data_json, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21)
+          ON CONFLICT DO NOTHING`,
+          [
+            c.id, c.workspace_id, c.customer_id, c.name, c.domain || null, c.plan,
+            Number(c.mrr), c.status, Number(c.risk_score), c.risk_category, Number(c.last_login_days),
+            Number(c.usage_drop_percent), Number(c.open_tickets_count), c.payment_status,
+            Number(c.contract_renewal_days), c.primary_contact_name || null,
+            c.primary_contact_role || null, c.primary_contact_email || null,
+            JSON.stringify(parsedData), c.created_at, c.updated_at
+          ]
+        );
+        counts.customers += 1;
+      }
+
+      const imports = readRows('csv_imports').filter(i => validWorkspaceIds.has(i.workspace_id));
+      counts.csv_imports = 0;
+      for (const imp of imports) {
+        await client.query(
+          `INSERT INTO csv_imports (
+            import_id, workspace_id, source, file_name, started_at, completed_at,
+            total_rows, valid_rows, failed_rows, status, error_summary, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          ON CONFLICT DO NOTHING`,
+          [
+            imp.import_id, imp.workspace_id, imp.source || 'CSV', imp.file_name,
+            imp.started_at, imp.completed_at || null, Number(imp.total_rows), Number(imp.valid_rows),
+            Number(imp.failed_rows), imp.status || 'completed', imp.error_summary || null, imp.created_at
+          ]
+        );
+        counts.csv_imports += 1;
+      }
+
+      const actions = readRows('retention_actions').filter(r => validWorkspaceIds.has(r.workspace_id));
+      counts.retention_actions = 0;
+      for (const act of actions) {
+        await client.query(
+          `INSERT INTO retention_actions (
+            id, workspace_id, customer_id, action_type, status, recommended_action,
+            email_script, recovery_probability, discount_offered, notes, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          ON CONFLICT DO NOTHING`,
+          [
+            act.id, act.workspace_id, act.customer_id, act.action_type, act.status || 'pending',
+            act.recommended_action || null, act.email_script || null,
+            act.recovery_probability !== null && act.recovery_probability !== undefined ? Number(act.recovery_probability) : null,
+            act.discount_offered || null, act.notes || null, act.created_at, act.updated_at
+          ]
+        );
+        counts.retention_actions += 1;
+      }
+
+      const trialVerifications = readRows('trial_verifications').filter(
+        tv => validWorkspaceIds.has(tv.workspace_id) && validPlanIds.has(tv.billing_plan_id)
+      );
+      counts.trial_verifications = 0;
+      for (const tv of trialVerifications) {
+        await client.query(
+          `INSERT INTO trial_verifications (
+            id, workspace_id, user_id, email, tier, billing_cycle, billing_plan_id,
+            razorpay_plan_id, razorpay_order_id, amount_paise, currency, status,
+            payment_id, verified_at, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+          ON CONFLICT DO NOTHING`,
+          [
+            tv.id, tv.workspace_id, tv.user_id, tv.email, tv.tier, tv.billing_cycle,
+            tv.billing_plan_id, tv.razorpay_plan_id, tv.razorpay_order_id,
+            Number(tv.amount_paise), tv.currency || 'INR', tv.status || 'pending',
+            tv.payment_id || null, tv.verified_at || null, tv.created_at, tv.updated_at
+          ]
+        );
+        counts.trial_verifications += 1;
+      }
+
+      const subscriptions = readRows('subscriptions').filter(
+        sub => validWorkspaceIds.has(sub.workspace_id) && validPlanIds.has(sub.billing_plan_id)
+      );
+      counts.subscriptions = 0;
+      for (const sub of subscriptions) {
+        await client.query(
+          `INSERT INTO subscriptions (
+            id, workspace_id, user_id, email, tier, billing_cycle, billing_plan_id,
+            razorpay_plan_id, razorpay_subscription_id, status, trial_started_at, trial_ends_at,
+            payment_verification_status, razorpay_verification_order_id, razorpay_verification_payment_id,
+            created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          ON CONFLICT DO NOTHING`,
+          [
+            sub.id, sub.workspace_id, sub.user_id, sub.email, sub.tier, sub.billing_cycle,
+            sub.billing_plan_id, sub.razorpay_plan_id, sub.razorpay_subscription_id || null,
+            sub.status, sub.trial_started_at || null, sub.trial_ends_at || null,
+            sub.payment_verification_status || 'pending',
+            sub.razorpay_verification_order_id || null,
+            sub.razorpay_verification_payment_id || null,
+            sub.created_at, sub.updated_at
+          ]
+        );
+        counts.subscriptions += 1;
+      }
+
+      const orders = readRows('razorpay_orders').filter(o => validWorkspaceIds.has(o.workspace_id));
+      counts.razorpay_orders = 0;
+      for (const o of orders) {
+        const meta = safeParseJsonValue(o.metadata_json);
+        await client.query(
+          `INSERT INTO razorpay_orders (
+            id, workspace_id, user_id, order_id, amount_paise, currency, receipt, status,
+            metadata_json, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+          ON CONFLICT DO NOTHING`,
+          [
+            o.id, o.workspace_id, o.user_id, o.order_id, Number(o.amount_paise),
+            o.currency || 'INR', o.receipt || null, o.status,
+            meta ? JSON.stringify(meta) : null, o.created_at, o.updated_at
+          ]
+        );
+        counts.razorpay_orders += 1;
+      }
+
+      const webhooks = readRows('webhook_events').filter(
+        w => !isTestEventId(w.event_id) && (!w.workspace_id || validWorkspaceIds.has(w.workspace_id))
+      );
+      counts.webhook_events = 0;
+      for (const w of webhooks) {
+        const payload = safeParseJsonValue(w.payload_json) ?? {};
+        await client.query(
+          `INSERT INTO webhook_events (
+            event_id, event_type, workspace_id, idempotency_key, payload_json, processed_at, status
+          ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7) ON CONFLICT DO NOTHING`,
+          [
+            w.event_id, w.event_type, w.workspace_id || null, w.idempotency_key,
+            JSON.stringify(payload), w.processed_at, w.status || 'processed'
+          ]
+        );
+        counts.webhook_events += 1;
+      }
+
+      const payments = readRows('subscription_payments').filter(p => validWorkspaceIds.has(p.workspace_id));
+      counts.subscription_payments = 0;
+      for (const p of payments) {
+        const rawEvent = safeParseJsonValue(p.raw_event);
+        await client.query(
+          `INSERT INTO subscription_payments (
+            id, workspace_id, user_id, subscription_id, razorpay_payment_id, currency,
+            amount_usd, amount_cents, converted_inr_amount, fee, tax, settlement_status,
+            raw_event, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15)
+          ON CONFLICT DO NOTHING`,
+          [
+            p.id, p.workspace_id, p.user_id || null, p.subscription_id, p.razorpay_payment_id,
+            p.currency || 'USD', Number(p.amount_usd), Number(p.amount_cents),
+            p.converted_inr_amount !== null && p.converted_inr_amount !== undefined ? Number(p.converted_inr_amount) : null,
+            p.fee !== null && p.fee !== undefined ? Number(p.fee) : null,
+            p.tax !== null && p.tax !== undefined ? Number(p.tax) : null,
+            p.settlement_status || 'pending', rawEvent ? JSON.stringify(rawEvent) : null,
+            p.created_at, p.updated_at
+          ]
+        );
+        counts.subscription_payments += 1;
+      }
+
+      const auditLogs = readRows('audit_logs').filter(a => validWorkspaceIds.has(a.workspace_id));
+      counts.audit_logs = 0;
+      for (const a of auditLogs) {
+        const meta = safeParseJsonValue(a.metadata);
+        await client.query(
+          `INSERT INTO audit_logs (
+            id, workspace_id, actor_id, actor_email, action, target_type, target_id,
+            ip_address, user_agent, metadata, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+          ON CONFLICT DO NOTHING`,
+          [
+            a.id, a.workspace_id, a.actor_id, a.actor_email, a.action, a.target_type,
+            a.target_id || null, a.ip_address || null, a.user_agent || null,
+            meta ? JSON.stringify(meta) : null, a.created_at
+          ]
+        );
+        counts.audit_logs += 1;
+      }
+
+      const unsubs = readRows('unsubscribed_contacts');
+      counts.unsubscribed_contacts = 0;
+      for (const u of unsubs) {
+        await client.query(
+          `INSERT INTO unsubscribed_contacts (contact_key, channel, contact_value, unsubscribed_at)
+           VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+          [u.contact_key, u.channel, u.contact_value, u.unsubscribed_at]
+        );
+        counts.unsubscribed_contacts += 1;
+      }
+
+      const schedulerSettings = readRows('scheduler_settings').filter(s => validWorkspaceIds.has(s.workspace_id));
+      counts.scheduler_settings = 0;
+      for (const s of schedulerSettings) {
+        await client.query(
+          `INSERT INTO scheduler_settings (
+            workspace_id, enabled, scan_time, timezone, owner_notification_email,
+            last_run_date, last_run_at, next_run_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING`,
+          [
+            s.workspace_id, Boolean(s.enabled), s.scan_time || '09:00', s.timezone || 'UTC',
+            s.owner_notification_email || null, s.last_run_date || null,
+            s.last_run_at || null, s.next_run_at || null, s.updated_at
+          ]
+        );
+        counts.scheduler_settings += 1;
+      }
+
+      const briefs = readRows('owner_briefs').filter(b => validWorkspaceIds.has(b.workspace_id));
+      counts.owner_briefs = 0;
+      for (const b of briefs) {
+        await client.query(
+          `INSERT INTO owner_briefs (
+            id, workspace_id, date, status, customers_analyzed, customers_at_risk,
+            revenue_at_risk, top5_count, messages_prepared, messages_awaiting_approval,
+            messages_sent, messages_failed, owner_notification_email,
+            owner_notification_status, owner_notification_message, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+          ON CONFLICT DO NOTHING`,
+          [
+            b.id, b.workspace_id, b.date, b.status || 'COMPLETED',
+            Number(b.customers_analyzed), Number(b.customers_at_risk), Number(b.revenue_at_risk),
+            Number(b.top5_count), Number(b.messages_prepared), Number(b.messages_awaiting_approval),
+            Number(b.messages_sent), Number(b.messages_failed),
+            b.owner_notification_email || null, b.owner_notification_status || 'pending_credentials',
+            b.owner_notification_message || null, b.created_at
+          ]
+        );
+        counts.owner_briefs += 1;
+      }
+
+      const outboundLogs = readRows('outbound_messages_log').filter(o => validWorkspaceIds.has(o.workspace_id));
+      counts.outbound_messages_log = 0;
+      for (const o of outboundLogs) {
+        await client.query(
+          `INSERT INTO outbound_messages_log (
+            idempotency_key, workspace_id, message_id, channel, customer_id,
+            recipient, provider_message_id, status, sent_at, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING`,
+          [
+            o.idempotency_key, o.workspace_id, o.message_id, o.channel, o.customer_id,
+            o.recipient, o.provider_message_id, o.status || 'SENT', o.sent_at, o.created_at
+          ]
+        );
+        counts.outbound_messages_log += 1;
+      }
+
+      await client.query('COMMIT');
+      console.log(
+        `[Churnveda DB Migration] SQLite -> PostgreSQL migration complete (workspaces: ${counts.workspaces}, users: ${counts.users}, sessions: ${counts.sessions}, customers: ${counts.customers}, billing_plans: ${counts.billing_plans}).`
+      );
+      return { migrated: true, counts };
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
     }
   } catch (err: any) {
-    console.warn('[Churnveda DB Migration Warning] SQLite to PostgreSQL migration skipped:', err.message);
+    console.error('[Churnveda DB Migration Error] SQLite to PostgreSQL migration failed:', err?.message || err);
+    throw err;
+  } finally {
+    if (srcDb) {
+      try { srcDb.close(); } catch {}
+    }
+    client.removeListener('error', clientErrHandler);
+    client.release();
   }
 }
 
@@ -624,6 +1064,52 @@ export async function runPostgresMigrations(pool: Pool) {
         unsubscribed_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS scheduler_settings (
+        workspace_id TEXT PRIMARY KEY,
+        enabled BOOLEAN NOT NULL DEFAULT true,
+        scan_time TEXT NOT NULL DEFAULT '09:00',
+        timezone TEXT NOT NULL DEFAULT 'UTC',
+        owner_notification_email TEXT,
+        last_run_date TEXT,
+        last_run_at TEXT,
+        next_run_at TEXT,
+        updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS owner_briefs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        date TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'COMPLETED',
+        customers_analyzed INTEGER NOT NULL DEFAULT 0,
+        customers_at_risk INTEGER NOT NULL DEFAULT 0,
+        revenue_at_risk NUMERIC(12, 2) NOT NULL DEFAULT 0,
+        top5_count INTEGER NOT NULL DEFAULT 0,
+        messages_prepared INTEGER NOT NULL DEFAULT 0,
+        messages_awaiting_approval INTEGER NOT NULL DEFAULT 0,
+        messages_sent INTEGER NOT NULL DEFAULT 0,
+        messages_failed INTEGER NOT NULL DEFAULT 0,
+        owner_notification_email TEXT,
+        owner_notification_status TEXT NOT NULL DEFAULT 'pending_credentials',
+        owner_notification_message TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_owner_briefs_workspace ON owner_briefs(workspace_id);
+
+      CREATE TABLE IF NOT EXISTS outbound_messages_log (
+        idempotency_key TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        customer_id TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        provider_message_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'SENT',
+        sent_at TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_outbound_log_ws_cust ON outbound_messages_log(workspace_id, customer_id, channel, sent_at);
+
       -- Enable Row-Level Security (RLS) across all private tables if not already enabled
       DO $$
       DECLARE tbl text;
@@ -639,7 +1125,8 @@ export async function runPostgresMigrations(pool: Pool) {
               'workspaces', 'users', 'sessions', 'password_reset_tokens',
               'workspace_members', 'pending_signups', 'billing_plans', 'customers',
               'csv_imports', 'retention_actions', 'trial_verifications', 'subscriptions',
-              'razorpay_orders', 'webhook_events', 'subscription_payments', 'audit_logs'
+              'razorpay_orders', 'webhook_events', 'subscription_payments', 'audit_logs',
+              'unsubscribed_contacts', 'scheduler_settings', 'owner_briefs', 'outbound_messages_log'
             ])
         LOOP
           EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', tbl);
@@ -887,6 +1374,50 @@ function runSqliteMigrations(db: DatabaseSync) {
       contact_value TEXT NOT NULL,
       unsubscribed_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS scheduler_settings (
+      workspace_id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      scan_time TEXT NOT NULL DEFAULT '09:00',
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      owner_notification_email TEXT,
+      last_run_date TEXT,
+      last_run_at TEXT,
+      next_run_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS owner_briefs (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'COMPLETED',
+      customers_analyzed INTEGER NOT NULL DEFAULT 0,
+      customers_at_risk INTEGER NOT NULL DEFAULT 0,
+      revenue_at_risk REAL NOT NULL DEFAULT 0,
+      top5_count INTEGER NOT NULL DEFAULT 0,
+      messages_prepared INTEGER NOT NULL DEFAULT 0,
+      messages_awaiting_approval INTEGER NOT NULL DEFAULT 0,
+      messages_sent INTEGER NOT NULL DEFAULT 0,
+      messages_failed INTEGER NOT NULL DEFAULT 0,
+      owner_notification_email TEXT,
+      owner_notification_status TEXT NOT NULL DEFAULT 'pending_credentials',
+      owner_notification_message TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS outbound_messages_log (
+      idempotency_key TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      customer_id TEXT NOT NULL,
+      recipient TEXT NOT NULL,
+      provider_message_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'SENT',
+      sent_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
 }
 
@@ -900,7 +1431,10 @@ export const db = {
    */
   async getHealth() {
     if (!databaseInitialized) await initDatabase();
-    const isProd = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT);
+    const isProd =
+      process.env.NODE_ENV === 'production' ||
+      Boolean(process.env.RAILWAY_ENVIRONMENT) ||
+      Boolean(process.env.RENDER);
     
     if (isPostgresActive) {
       return {
@@ -931,7 +1465,7 @@ export const db = {
       poolMax: 1,
       isPersistent: false,
       productionReady: false,
-      notice: 'Local development storage active. Railway PostgreSQL required for production beta users.',
+      notice: 'Local development storage active. Managed PostgreSQL required for production.',
       timestamp: new Date().toISOString()
     };
   },
@@ -2306,6 +2840,250 @@ export const db = {
   },
 
   /**
+   * Authoritative Razorpay Orders persistence (binds order_id -> workspace, tier, cycle, currency, amount)
+   */
+  razorpayOrders: {
+    async upsert(order: DbRazorpayOrder): Promise<DbRazorpayOrder> {
+      if (!databaseInitialized) await initDatabase();
+      const now = new Date().toISOString();
+      const metaStr = order.metadata_json ? JSON.stringify(order.metadata_json) : null;
+      if (isPostgresActive && pgPool) {
+        await pgPool.query(
+          `INSERT INTO razorpay_orders (
+            id, workspace_id, user_id, order_id, amount_paise, currency, receipt, status, metadata_json, created_at, updated_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          ON CONFLICT (order_id) DO UPDATE SET
+            status = EXCLUDED.status,
+            metadata_json = COALESCE(EXCLUDED.metadata_json, razorpay_orders.metadata_json),
+            updated_at = EXCLUDED.updated_at`,
+          [order.id, order.workspace_id, order.user_id, order.order_id, order.amount_paise, order.currency, order.receipt || null, order.status, metaStr, order.created_at || now, now]
+        );
+        return order;
+      }
+      sqliteDb!.prepare(
+        `INSERT INTO razorpay_orders (
+          id, workspace_id, user_id, order_id, amount_paise, currency, receipt, status, metadata_json, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (order_id) DO UPDATE SET
+          status = excluded.status,
+          metadata_json = COALESCE(excluded.metadata_json, razorpay_orders.metadata_json),
+          updated_at = excluded.updated_at`
+      ).run(order.id, order.workspace_id, order.user_id, order.order_id, order.amount_paise, order.currency, order.receipt || null, order.status, metaStr, order.created_at || now, now);
+      return order;
+    },
+
+    async getByOrderId(orderId: string): Promise<DbRazorpayOrder | null> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM razorpay_orders WHERE order_id = $1 LIMIT 1', [orderId]);
+        if (res.rows.length === 0) return null;
+        const r = res.rows[0];
+        return {
+          ...r,
+          amount_paise: Number(r.amount_paise),
+          metadata_json: typeof r.metadata_json === 'string' ? JSON.parse(r.metadata_json) : r.metadata_json
+        };
+      }
+      const row = sqliteDb!.prepare('SELECT * FROM razorpay_orders WHERE order_id = ? LIMIT 1').get(orderId) as any;
+      if (!row) return null;
+      return {
+        ...row,
+        amount_paise: Number(row.amount_paise),
+        metadata_json: typeof row.metadata_json === 'string' ? JSON.parse(row.metadata_json) : row.metadata_json
+      };
+    }
+  },
+
+  /**
+   * Persistent per-workspace AI Employee Scheduler settings & historical briefs
+   */
+  scheduler: {
+    async getSetting(workspaceId: string): Promise<DbSchedulerSetting | null> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM scheduler_settings WHERE workspace_id = $1 LIMIT 1', [workspaceId]);
+        if (res.rows.length === 0) return null;
+        return res.rows[0];
+      }
+      const row = sqliteDb!.prepare('SELECT * FROM scheduler_settings WHERE workspace_id = ? LIMIT 1').get(workspaceId) as any;
+      if (!row) return null;
+      return { ...row, enabled: Boolean(row.enabled) };
+    },
+
+    async upsertSetting(setting: DbSchedulerSetting): Promise<DbSchedulerSetting> {
+      if (!databaseInitialized) await initDatabase();
+      const now = new Date().toISOString();
+      if (isPostgresActive && pgPool) {
+        await pgPool.query(
+          `INSERT INTO scheduler_settings (
+            workspace_id, enabled, scan_time, timezone, owner_notification_email, last_run_date, last_run_at, next_run_at, updated_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+          ON CONFLICT (workspace_id) DO UPDATE SET
+            enabled = EXCLUDED.enabled,
+            scan_time = EXCLUDED.scan_time,
+            timezone = EXCLUDED.timezone,
+            owner_notification_email = EXCLUDED.owner_notification_email,
+            last_run_date = EXCLUDED.last_run_date,
+            last_run_at = EXCLUDED.last_run_at,
+            next_run_at = EXCLUDED.next_run_at,
+            updated_at = EXCLUDED.updated_at`,
+          [
+            setting.workspace_id,
+            Boolean(setting.enabled),
+            setting.scan_time || '09:00',
+            setting.timezone || 'UTC',
+            setting.owner_notification_email || null,
+            setting.last_run_date || null,
+            setting.last_run_at || null,
+            setting.next_run_at || null,
+            now
+          ]
+        );
+        return setting;
+      }
+      sqliteDb!.prepare(
+        `INSERT INTO scheduler_settings (
+          workspace_id, enabled, scan_time, timezone, owner_notification_email, last_run_date, last_run_at, next_run_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (workspace_id) DO UPDATE SET
+          enabled = excluded.enabled,
+          scan_time = excluded.scan_time,
+          timezone = excluded.timezone,
+          owner_notification_email = excluded.owner_notification_email,
+          last_run_date = excluded.last_run_date,
+          last_run_at = excluded.last_run_at,
+          next_run_at = excluded.next_run_at,
+          updated_at = excluded.updated_at`
+      ).run(
+        setting.workspace_id,
+        setting.enabled ? 1 : 0,
+        setting.scan_time || '09:00',
+        setting.timezone || 'UTC',
+        setting.owner_notification_email || null,
+        setting.last_run_date || null,
+        setting.last_run_at || null,
+        setting.next_run_at || null,
+        now
+      );
+      return setting;
+    },
+
+    async listAllSettings(): Promise<DbSchedulerSetting[]> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM scheduler_settings');
+        return res.rows;
+      }
+      const rows = sqliteDb!.prepare('SELECT * FROM scheduler_settings').all() as any[];
+      return rows.map(r => ({ ...r, enabled: Boolean(r.enabled) }));
+    },
+
+    async addBrief(brief: DbOwnerBrief): Promise<DbOwnerBrief> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        await pgPool.query(
+          `INSERT INTO owner_briefs (
+            id, workspace_id, date, status, customers_analyzed, customers_at_risk, revenue_at_risk,
+            top5_count, messages_prepared, messages_awaiting_approval, messages_sent, messages_failed,
+            owner_notification_email, owner_notification_status, owner_notification_message, created_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+          ON CONFLICT (id) DO NOTHING`,
+          [
+            brief.id, brief.workspace_id, brief.date, brief.status,
+            brief.customers_analyzed, brief.customers_at_risk, brief.revenue_at_risk,
+            brief.top5_count, brief.messages_prepared, brief.messages_awaiting_approval,
+            brief.messages_sent, brief.messages_failed,
+            brief.owner_notification_email || null, brief.owner_notification_status,
+            brief.owner_notification_message || null, brief.created_at
+          ]
+        );
+        return brief;
+      }
+      sqliteDb!.prepare(
+        `INSERT INTO owner_briefs (
+          id, workspace_id, date, status, customers_analyzed, customers_at_risk, revenue_at_risk,
+          top5_count, messages_prepared, messages_awaiting_approval, messages_sent, messages_failed,
+          owner_notification_email, owner_notification_status, owner_notification_message, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (id) DO NOTHING`
+      ).run(
+        brief.id, brief.workspace_id, brief.date, brief.status,
+        brief.customers_analyzed, brief.customers_at_risk, brief.revenue_at_risk,
+        brief.top5_count, brief.messages_prepared, brief.messages_awaiting_approval,
+        brief.messages_sent, brief.messages_failed,
+        brief.owner_notification_email || null, brief.owner_notification_status,
+        brief.owner_notification_message || null, brief.created_at
+      );
+      return brief;
+    },
+
+    async listBriefs(workspaceId?: string): Promise<DbOwnerBrief[]> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = workspaceId
+          ? await pgPool.query('SELECT * FROM owner_briefs WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 30', [workspaceId])
+          : await pgPool.query('SELECT * FROM owner_briefs ORDER BY created_at DESC LIMIT 60');
+        return res.rows.map(r => ({ ...r, revenue_at_risk: Number(r.revenue_at_risk || 0) }));
+      }
+      const rows = (workspaceId
+        ? sqliteDb!.prepare('SELECT * FROM owner_briefs WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 30').all(workspaceId)
+        : sqliteDb!.prepare('SELECT * FROM owner_briefs ORDER BY created_at DESC LIMIT 60').all()) as any[];
+      return rows.map(r => ({ ...r, revenue_at_risk: Number(r.revenue_at_risk || 0) }));
+    }
+  },
+
+  /**
+   * Persistent outbound message delivery & deduplication registry
+   */
+  outboundLog: {
+    async getByIdempotencyKey(key: string): Promise<DbOutboundLog | null> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM outbound_messages_log WHERE idempotency_key = $1 LIMIT 1', [key]);
+        return res.rows[0] || null;
+      }
+      return (sqliteDb!.prepare('SELECT * FROM outbound_messages_log WHERE idempotency_key = ? LIMIT 1').get(key) as unknown as DbOutboundLog | undefined) || null;
+    },
+
+    async hasCustomerSentToday(workspaceId: string, customerId: string, channel: string, datePrefix: string): Promise<boolean> {
+      if (!databaseInitialized) await initDatabase();
+      if (!customerId || customerId === 'cust-generic') return false;
+      const pattern = `${datePrefix}%`;
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          'SELECT 1 FROM outbound_messages_log WHERE workspace_id = $1 AND customer_id = $2 AND channel = $3 AND sent_at LIKE $4 LIMIT 1',
+          [workspaceId, customerId, channel, pattern]
+        );
+        return res.rows.length > 0;
+      }
+      const row = sqliteDb!.prepare(
+        'SELECT 1 FROM outbound_messages_log WHERE workspace_id = ? AND customer_id = ? AND channel = ? AND sent_at LIKE ? LIMIT 1'
+      ).get(workspaceId, customerId, channel, pattern);
+      return Boolean(row);
+    },
+
+    async recordSent(entry: DbOutboundLog): Promise<void> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        await pgPool.query(
+          `INSERT INTO outbound_messages_log (
+            idempotency_key, workspace_id, message_id, channel, customer_id, recipient, provider_message_id, status, sent_at, created_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+          ON CONFLICT (idempotency_key) DO NOTHING`,
+          [entry.idempotency_key, entry.workspace_id, entry.message_id, entry.channel, entry.customer_id, entry.recipient, entry.provider_message_id, entry.status, entry.sent_at, entry.created_at]
+        );
+        return;
+      }
+      sqliteDb!.prepare(
+        `INSERT INTO outbound_messages_log (
+          idempotency_key, workspace_id, message_id, channel, customer_id, recipient, provider_message_id, status, sent_at, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (idempotency_key) DO NOTHING`
+      ).run(entry.idempotency_key, entry.workspace_id, entry.message_id, entry.channel, entry.customer_id, entry.recipient, entry.provider_message_id, entry.status, entry.sent_at, entry.created_at);
+    }
+  },
+
+  /**
    * GDPR/DPDP Account Data Export & Full Multi-Table Account Deletion
    */
   accountPrivacy: {
@@ -2397,6 +3175,9 @@ export const db = {
           await del('subscription_payments', 'DELETE FROM subscription_payments WHERE workspace_id = $1 OR user_id = $2', [workspaceId, userId]);
           await del('subscriptions', 'DELETE FROM subscriptions WHERE workspace_id = $1', [workspaceId]);
           await del('razorpay_orders', 'DELETE FROM razorpay_orders WHERE workspace_id = $1', [workspaceId]);
+          await del('scheduler_settings', 'DELETE FROM scheduler_settings WHERE workspace_id = $1', [workspaceId]);
+          await del('owner_briefs', 'DELETE FROM owner_briefs WHERE workspace_id = $1', [workspaceId]);
+          await del('outbound_messages_log', 'DELETE FROM outbound_messages_log WHERE workspace_id = $1', [workspaceId]);
           await del('audit_logs', 'DELETE FROM audit_logs WHERE workspace_id = $1 OR actor_id = $2', [workspaceId, userId]);
           await del('users', 'DELETE FROM users WHERE id = $1 OR email = $2', [userId, cleanEmail]);
           await del('workspaces', 'DELETE FROM workspaces WHERE id = $1', [workspaceId]);
@@ -2422,6 +3203,9 @@ export const db = {
         delSqlite('subscription_payments', 'DELETE FROM subscription_payments WHERE workspace_id = ? OR user_id = ?', workspaceId, userId);
         delSqlite('subscriptions', 'DELETE FROM subscriptions WHERE workspace_id = ?', workspaceId);
         delSqlite('razorpay_orders', 'DELETE FROM razorpay_orders WHERE workspace_id = ?', workspaceId);
+        delSqlite('scheduler_settings', 'DELETE FROM scheduler_settings WHERE workspace_id = ?', workspaceId);
+        delSqlite('owner_briefs', 'DELETE FROM owner_briefs WHERE workspace_id = ?', workspaceId);
+        delSqlite('outbound_messages_log', 'DELETE FROM outbound_messages_log WHERE workspace_id = ?', workspaceId);
         delSqlite('audit_logs', 'DELETE FROM audit_logs WHERE workspace_id = ? OR actor_id = ?', workspaceId, userId);
         delSqlite('users', 'DELETE FROM users WHERE id = ? OR email = ?', userId, cleanEmail);
         delSqlite('workspaces', 'DELETE FROM workspaces WHERE id = ?', workspaceId);

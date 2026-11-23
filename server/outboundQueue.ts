@@ -13,6 +13,7 @@
  */
 
 import crypto from 'crypto';
+import { db } from './db.ts';
 
 export interface OutboundQueueItem {
   id: string; // Internal queue ID
@@ -30,6 +31,7 @@ export interface OutboundQueueItem {
   maxAttempts: number;
   idempotencyKey: string;
   lockedAt?: number | null;
+  nextAttemptAt?: number;
   providerMessageId?: string;
   error?: string;
   createdAt: string;
@@ -47,7 +49,7 @@ export interface QueueProcessingResult {
   duplicatesBlocked: number;
 }
 
-// In-memory persistent queue structures (Tenant isolated)
+// Persistent-backed queue structures (Tenant isolated)
 const queueItems: Map<string, OutboundQueueItem> = new Map();
 // Idempotency cache: idempotencyKey -> { providerMessageId, sentAt, channel }
 const completedIdempotencyMap: Map<string, { providerMessageId: string; sentAt: string; channel: string }> = new Map();
@@ -160,6 +162,85 @@ export function computeIdempotencyKey(workspaceId: string, messageId: string, ch
     .createHash('sha256')
     .update(`${workspaceId}:${messageId}:${channel}:${content.trim()}`)
     .digest('hex');
+}
+
+export async function checkPersistentIdempotencyOrDailyDuplicate(params: {
+  workspaceId: string;
+  messageId: string;
+  channel: 'whatsapp' | 'email';
+  customerId?: string;
+  content: string;
+}): Promise<{ isDuplicate: boolean; reason?: string; existingProviderId?: string; existingSentAt?: string }> {
+  const key = computeIdempotencyKey(params.workspaceId, params.messageId, params.channel, params.content);
+  const mem = completedIdempotencyMap.get(key);
+  if (mem) {
+    return {
+      isDuplicate: true,
+      reason: `Duplicate send suppressed. Message already delivered via ${params.channel}.`,
+      existingProviderId: mem.providerMessageId,
+      existingSentAt: mem.sentAt
+    };
+  }
+  const dbRec = await db.outboundLog.getByIdempotencyKey(key).catch(() => null);
+  if (dbRec) {
+    completedIdempotencyMap.set(key, {
+      providerMessageId: dbRec.provider_message_id,
+      sentAt: dbRec.sent_at,
+      channel: dbRec.channel
+    });
+    return {
+      isDuplicate: true,
+      reason: `Duplicate send suppressed. Message already delivered via ${params.channel}.`,
+      existingProviderId: dbRec.provider_message_id,
+      existingSentAt: dbRec.sent_at
+    };
+  }
+  if (params.customerId && params.customerId !== 'cust-generic') {
+    const todayPrefix = new Date().toISOString().slice(0, 10);
+    const alreadySentToday = await db.outboundLog.hasCustomerSentToday(
+      params.workspaceId,
+      params.customerId,
+      params.channel,
+      todayPrefix
+    ).catch(() => false);
+    if (alreadySentToday) {
+      return {
+        isDuplicate: true,
+        reason: `Customer ${params.customerId} already received a ${params.channel} outreach message today (${todayPrefix}). Duplicate outreach blocked.`
+      };
+    }
+  }
+  return { isDuplicate: false };
+}
+
+export async function recordPersistentOutboundSend(params: {
+  workspaceId: string;
+  messageId: string;
+  channel: 'whatsapp' | 'email';
+  customerId?: string;
+  recipient: string;
+  content: string;
+  providerMessageId: string;
+}): Promise<void> {
+  const key = computeIdempotencyKey(params.workspaceId, params.messageId, params.channel, params.content);
+  const nowIso = new Date().toISOString();
+  completedIdempotencyMap.set(key, {
+    providerMessageId: params.providerMessageId,
+    sentAt: nowIso,
+    channel: params.channel
+  });
+  await db.outboundLog.recordSent({
+    idempotency_key: key,
+    workspace_id: params.workspaceId,
+    message_id: params.messageId,
+    channel: params.channel,
+    customer_id: params.customerId || 'cust-generic',
+    recipient: params.recipient,
+    provider_message_id: params.providerMessageId,
+    status: 'SENT',
+    sent_at: nowIso,
+    created_at: nowIso
+  }).catch(() => {});
 }
 
 /**
@@ -514,6 +595,11 @@ export async function processOutboundQueue(): Promise<QueueProcessingResult> {
         continue;
       }
 
+      // Check backoff timer for transient retries
+      if (item.nextAttemptAt && nowMs < item.nextAttemptAt) {
+        continue;
+      }
+
       // Check lock (avoid race conditions across concurrent runners; 45s lock timeout)
       if (item.lockedAt && nowMs - item.lockedAt < 45000) {
         continue;
@@ -531,13 +617,26 @@ export async function processOutboundQueue(): Promise<QueueProcessingResult> {
         continue;
       }
 
-      // Check duplicate protection
-      if (completedIdempotencyMap.has(item.idempotencyKey)) {
+      // Check in-memory + DB persistent duplicate protection & same-day customer limit
+      const dupCheck = await checkPersistentIdempotencyOrDailyDuplicate({
+        workspaceId: item.workspaceId,
+        messageId: item.messageId,
+        channel: item.channel,
+        customerId: item.customerId,
+        content: item.content
+      });
+      if (dupCheck.isDuplicate) {
+        duplicateSuppressedCount++;
         result.duplicatesBlocked++;
-        item.status = 'SENT';
-        const prior = completedIdempotencyMap.get(item.idempotencyKey)!;
-        item.providerMessageId = prior.providerMessageId;
-        item.sentAt = prior.sentAt;
+        if (dupCheck.existingProviderId) {
+          item.status = 'SENT';
+          item.providerMessageId = dupCheck.existingProviderId;
+          item.sentAt = dupCheck.existingSentAt || nowIso;
+        } else {
+          item.status = 'FAILED';
+          item.failedAt = nowIso;
+          item.error = dupCheck.reason || 'Duplicate daily customer outreach suppressed.';
+        }
         item.updatedAt = nowIso;
         continue;
       }
@@ -559,13 +658,18 @@ export async function processOutboundQueue(): Promise<QueueProcessingResult> {
         item.sentAt = new Date().toISOString();
         item.error = undefined;
         item.lockedAt = null;
+        item.nextAttemptAt = undefined;
         item.updatedAt = item.sentAt;
 
-        // Save in idempotency map
-        completedIdempotencyMap.set(item.idempotencyKey, {
-          providerMessageId: dispatchResult.providerMessageId,
-          sentAt: item.sentAt,
-          channel: item.channel
+        // Save in memory + persistent DB idempotency log
+        await recordPersistentOutboundSend({
+          workspaceId: item.workspaceId,
+          messageId: item.messageId,
+          channel: item.channel,
+          customerId: item.customerId,
+          recipient: item.recipientEmail || item.recipientPhone || 'recipient',
+          content: item.content,
+          providerMessageId: dispatchResult.providerMessageId
         });
 
         result.succeeded++;
@@ -580,13 +684,15 @@ export async function processOutboundQueue(): Promise<QueueProcessingResult> {
           item.failedAt = new Date().toISOString();
           item.error = dispatchResult.error || 'Outbound send request rejected by provider.';
           item.lockedAt = null;
+          item.nextAttemptAt = undefined;
           item.updatedAt = item.failedAt;
           result.failed++;
         } else {
-          // Transient error: Re-queue with exponential backoff
+          // Transient error: Re-queue with exponential backoff (5s, 15s, ...)
           item.status = 'QUEUED';
           item.error = `Temporary failure (Attempt ${item.attempts}/${item.maxAttempts}): ${dispatchResult.error || 'Retrying soon'}`;
           item.lockedAt = null;
+          item.nextAttemptAt = Date.now() + 5000 * Math.pow(3, Math.max(0, item.attempts - 1));
           item.updatedAt = new Date().toISOString();
         }
       }
@@ -599,9 +705,9 @@ export async function processOutboundQueue(): Promise<QueueProcessingResult> {
 }
 
 /**
- * Returns current outbound queue statistics.
+ * Returns outbound queue statistics scoped to workspace when provided.
  */
-export function getOutboundQueueStatus(): {
+export function getOutboundQueueStatus(workspaceId?: string): {
   totalItems: number;
   queued: number;
   sending: number;
@@ -611,12 +717,15 @@ export function getOutboundQueueStatus(): {
   duplicateSuppressedCount: number;
   lastProcessedAt: string;
 } {
+  let totalItems = 0;
   let queued = 0;
   let sending = 0;
   let sent = 0;
   let failed = 0;
 
   for (const item of queueItems.values()) {
+    if (workspaceId && item.workspaceId !== workspaceId) continue;
+    totalItems++;
     if (item.status === 'QUEUED') queued++;
     else if (item.status === 'SENDING') sending++;
     else if (item.status === 'SENT') sent++;
@@ -624,7 +733,7 @@ export function getOutboundQueueStatus(): {
   }
 
   return {
-    totalItems: queueItems.size,
+    totalItems,
     queued,
     sending,
     sent,

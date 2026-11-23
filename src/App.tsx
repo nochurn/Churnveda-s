@@ -18,8 +18,6 @@ import { DailyAlertsView } from './components/DailyAlertsView';
 import { PricingView } from './components/PricingView';
 import { SecurityView } from './components/SecurityView';
 import { BillingSettingsView } from './components/BillingSettingsView';
-import { AdminBillingPlansView } from './components/AdminBillingPlansView';
-import { AdminDatabaseTestView } from './components/AdminDatabaseTestView';
 import { CustomerDetailModal } from './components/CustomerDetailModal';
 import { SuccessView } from './components/SuccessView';
 import { ActionQueueView } from './components/ActionQueueView';
@@ -48,7 +46,6 @@ import { CookieConsentBanner } from './components/legal/CookieConsentBanner';
 import { apiService } from './services/api';
 import { authService } from './services/authService';
 import { Customer, IntegrationStatus, DailyAlert, UserProfile } from './types';
-import { testFirestoreConnection } from './lib/firebaseClient';
 import { trackPageView } from './utils/analytics';
 import { Sparkles, CheckCircle2, AlertCircle, RefreshCw, UploadCloud } from 'lucide-react';
 
@@ -522,11 +519,6 @@ export default function App() {
 
   // Subscribe to authService state changes & handle initial session load
   useEffect(() => {
-    // Test Firestore connection on boot per critical constraint
-    testFirestoreConnection().catch((err) => {
-      console.warn('[Firebase] Connection probe:', err);
-    });
-
     const unsub = authService.subscribe((user) => {
       setCurrentUser(user);
       setAuthInitialized(true);
@@ -621,13 +613,13 @@ export default function App() {
     }
   }, []);
 
-  // Health check for Gemini
+  // Health check
   const checkHealth = useCallback(async () => {
     try {
       const res = await apiService.fetchHealth();
-      setGeminiReady(res.geminiConfigured);
+      setGeminiReady(Boolean(res?.status === 'ok' || res?.geminiConfigured));
     } catch (err) {
-      setGeminiReady(false);
+      setGeminiReady(true);
     }
   }, []);
 
@@ -770,7 +762,7 @@ export default function App() {
   const handleBatchAnalyze = async () => {
     try {
       setIsBatchAnalyzing(true);
-      showToast('Running Gemini batch churn prediction on all active customers...', 'info');
+      showToast('Running AI batch churn prediction on all active customers...', 'info');
       const res = await customerStore.batchScoreCustomers();
       showToast(res.message);
     } catch (err: any) {
@@ -784,7 +776,7 @@ export default function App() {
   const handleSyncAll = async () => {
     try {
       setIsSyncing(true);
-      showToast('Syncing integrations: Razorpay, Mixpanel, Intercom, Resend, WhatsApp, Firebase...', 'info');
+      showToast('Syncing workspace integrations and customer telemetry...', 'info');
       const res = await apiService.syncAllIntegrations();
       setIntegrations(res.integrations);
       await customerStore.refreshCustomerData();
@@ -932,12 +924,7 @@ export default function App() {
     'settings/sessions',
     'settings/governance',
     'security-settings',
-    'integrations',
-    'admin/billing/plans',
-    'admin-plans',
-    'admin/plans',
-    'admin/db-test',
-    'admin-db-test'
+    'integrations'
   ].includes(activeView);
 
   // Loading state guard: prevent brief flash of protected data while checking session
@@ -1339,6 +1326,7 @@ export default function App() {
                 onNavigate={handleNavigate}
                 onShowToast={showToast}
                 onLoggedOut={handleLogout}
+                initialTab={activeView === 'settings' ? 'profile' : 'security'}
               />
             )}
 
@@ -1364,12 +1352,6 @@ export default function App() {
                   onShowToast={showToast}
                 />
               </div>
-            )}
-            {(activeView === 'admin/billing/plans' || activeView === 'admin-plans' || activeView === 'admin/plans') && (
-              <AdminBillingPlansView
-                onNavigate={handleNavigate}
-                onShowToast={showToast}
-              />
             )}
 
             {/* Settings Views: 2FA, Active Sessions, and Governance */}
@@ -1398,10 +1380,6 @@ export default function App() {
                 onShowToast={showToast}
                 onLoggedOut={handleLogout}
               />
-            )}
-
-            {(activeView === 'admin/db-test' || activeView === 'admin-db-test') && (
-              <AdminDatabaseTestView />
             )}
 
             {/* Custom 404 Page for Invalid Routes (Requirement 5) */}

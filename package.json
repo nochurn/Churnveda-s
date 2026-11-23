@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild server/migrate.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/migrate.cjs",
@@ -17,6 +20,8 @@
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
+    "@neon/config": "^1.14.6",
+    "@neon/env": "^2.1.9",
     "@tailwindcss/vite": "^4.1.14",
     "@types/cookie-parser": "^1.4.10",
     "@types/qrcode": "^1.5.6",

@@ -1,6 +1,5 @@
 import React from 'react';
 import { AlertTriangle, RefreshCw, RotateCcw } from 'lucide-react';
-import type { FirestoreErrorInfo } from '../lib/firebaseClient';
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -9,20 +8,6 @@ interface ErrorBoundaryProps {
 interface ErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
-  firestoreError: FirestoreErrorInfo | null;
-}
-
-function parseFirestoreError(error: Error | null): FirestoreErrorInfo | null {
-  if (!error?.message) return null;
-  try {
-    const parsed = JSON.parse(error.message);
-    if (parsed && typeof parsed === 'object' && 'operationType' in parsed && 'error' in parsed) {
-      return parsed as FirestoreErrorInfo;
-    }
-  } catch {
-    // Not a serialized FirestoreErrorInfo
-  }
-  return null;
 }
 
 export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
@@ -34,28 +19,25 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
     super(props);
     this.state = {
       hasError: false,
-      error: null,
-      firestoreError: null
+      error: null
     };
   }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return {
       hasError: true,
-      error,
-      firestoreError: parseFirestoreError(error)
+      error
     };
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
-    console.error('[ErrorBoundary] Uncaught application error:', error, errorInfo);
+    console.error('[ErrorBoundary] Application error:', error?.message, errorInfo?.componentStack);
   }
 
   private handleReset = () => {
     this.setState({
       hasError: false,
-      error: null,
-      firestoreError: null
+      error: null
     });
   };
 
@@ -70,9 +52,9 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
       return this.props.children;
     }
 
-    const { error, firestoreError } = this.state;
+    const { error } = this.state;
     const isPermissionError =
-      firestoreError?.error?.toLowerCase().includes('permission') ||
+      error?.message?.toLowerCase().includes('permission') ||
       error?.message?.toLowerCase().includes('missing or insufficient permissions');
 
     return (
@@ -84,38 +66,13 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
             </div>
             <div className="min-w-0 flex-1">
               <h1 className="text-lg font-bold text-slate-900">
-                {firestoreError ? 'Database Synchronization Error' : 'Something went wrong'}
+                {isPermissionError ? 'Workspace Access Notice' : 'Something went wrong'}
               </h1>
               <p className="text-sm text-slate-600 mt-1 leading-relaxed">
                 {isPermissionError
-                  ? 'Your account does not have permission to complete this database operation. Verify that you are signed in with a verified email and belong to this workspace.'
+                  ? 'Your account does not have permission to complete this operation. Please verify that you are signed in to the correct workspace.'
                   : 'An unexpected error interrupted this view. You can retry the view or reload the workspace.'}
               </p>
-
-              {firestoreError ? (
-                <div className="mt-4 bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-700 space-y-1">
-                  <div>
-                    <span className="font-semibold text-slate-900">Operation:</span>{' '}
-                    <span className="font-mono">{firestoreError.operationType}</span>
-                  </div>
-                  {firestoreError.path && (
-                    <div className="truncate">
-                      <span className="font-semibold text-slate-900">Path:</span>{' '}
-                      <span className="font-mono">{firestoreError.path}</span>
-                    </div>
-                  )}
-                  <div className="break-words">
-                    <span className="font-semibold text-slate-900">Details:</span>{' '}
-                    <span>{firestoreError.error}</span>
-                  </div>
-                </div>
-              ) : (
-                error?.message && (
-                  <div className="mt-4 bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-700 font-mono break-words">
-                    {error.message}
-                  </div>
-                )
-              )}
 
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 <button

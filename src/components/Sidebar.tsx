@@ -10,8 +10,7 @@ import {
   TrendingUp,
   Gift,
   Clock,
-  AlertCircle,
-  Database
+  AlertCircle
 } from 'lucide-react';
 import { authService } from '../services/authService';
 
@@ -80,21 +79,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'billing',
       label: 'Billing',
       icon: CreditCard,
-      badge: 'Razorpay',
-      badgeColor: 'bg-blue-100 text-blue-900'
+      badge: null
     },
     {
       id: 'settings',
       label: 'Settings',
       icon: Settings,
       badge: null
-    },
-    {
-      id: 'admin/db-test',
-      label: 'Backend & Sync',
-      icon: Database,
-      badge: 'Firebase',
-      badgeColor: 'bg-amber-100 text-amber-800 font-semibold'
     }
   ];
 
@@ -102,7 +93,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="w-64 bg-white border-r border-gray-200 flex flex-col justify-between shrink-0 h-[calc(100vh-4rem)] sticky top-16 overflow-y-auto">
       <div className="p-3">
         <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-gray-700">
-          AI Employee MVP
+          Workspace
         </div>
 
         <nav className="space-y-1">

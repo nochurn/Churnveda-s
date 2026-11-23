@@ -9,9 +9,7 @@ import {
   AlertTriangle,
   ArrowRight,
   CheckCircle2,
-  Clock,
-  KeyRound,
-  Terminal
+  Clock
 } from 'lucide-react';
 import { authService } from '../../services/authService';
 import * as apiService from '../../services/api';
@@ -42,24 +40,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [isMagicLinkMode, setIsMagicLinkMode] = useState(false);
   const [magicLinkSent, setMagicLinkSent] = useState(false);
 
-  // Auth config & developer alert state
+  // Auth config state
   const [authConfig, setAuthConfig] = useState<{
     isConfigured: boolean;
     oauthProviders: { google: boolean; microsoft: boolean };
-    developerError?: string | null;
-    diagnostic?: {
-      hasUrl: boolean;
-      hasAnonKey: boolean;
-      source: string;
-      framework: string;
-      backendReachable: boolean;
-    };
   }>({
-    isConfigured: false,
-    oauthProviders: { google: false, microsoft: false },
-    developerError: null
+    isConfigured: true,
+    oauthProviders: { google: true, microsoft: false }
   });
-  const [showDiagnostic, setShowDiagnostic] = useState(false);
 
   // Error & Security State
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -72,18 +60,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
   useEffect(() => {
     let active = true;
-    // Fetch auth configuration for OAuth provider availability & developer checks
     apiService.getAuthConfig().then((cfg) => {
       if (!active) return;
       setAuthConfig({
         isConfigured: !!cfg.isConfigured,
-        oauthProviders: cfg.oauthProviders || { google: false, microsoft: false },
-        developerError: cfg.developerError || null,
-        diagnostic: cfg.diagnostic
+        oauthProviders: cfg.oauthProviders || { google: true, microsoft: false }
       });
-    }).catch((e) => {
-      console.warn('Failed to load auth config:', e);
-    });
+    }).catch(() => {});
     return () => {
       active = false;
     };
@@ -118,9 +101,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
         const latestCfg = await apiService.getAuthConfig();
         setAuthConfig({
           isConfigured: !!latestCfg.isConfigured,
-          oauthProviders: latestCfg.oauthProviders || { google: false, microsoft: false },
-          developerError: latestCfg.developerError || null,
-          diagnostic: latestCfg.diagnostic
+          oauthProviders: latestCfg.oauthProviders || { google: true, microsoft: false }
         });
         if (!latestCfg.isConfigured) {
           setErrorMessage('Authentication is not configured.');
@@ -216,9 +197,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
         const latestCfg = await apiService.getAuthConfig();
         setAuthConfig({
           isConfigured: !!latestCfg.isConfigured,
-          oauthProviders: latestCfg.oauthProviders || { google: false, microsoft: false },
-          developerError: latestCfg.developerError || null,
-          diagnostic: latestCfg.diagnostic
+          oauthProviders: latestCfg.oauthProviders || { google: true, microsoft: false }
         });
       }
       const res = await authService.loginWithOAuth(provider);
@@ -247,31 +226,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
   return (
     <div className="min-h-[calc(100vh-14rem)] flex items-center justify-center px-4 py-12">
       <div className="w-full max-w-md">
-        {/* Configuration Alert if Firebase Authentication is missing */}
-        {!authConfig.isConfigured && (
-          <div className="mb-4 p-3.5 bg-red-50 border border-red-300 rounded-xl text-xs text-red-900 shadow-xs">
-            <div className="flex items-start gap-2.5">
-              <AlertCircle className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <div className="font-bold text-red-950">Authentication is initializing...</div>
-                <p className="mt-1 text-[11px] text-red-800 leading-relaxed">
-                  Firebase Authentication is configured for this workspace. Please refresh or proceed with sign in.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {authConfig.developerError && authConfig.isConfigured && (
-          <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-2.5 text-xs text-amber-900 shadow-xs">
-            <Terminal className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-            <div>
-              <div className="font-bold">Authentication Notice:</div>
-              <p className="mt-0.5 text-[11px] text-amber-800">{authConfig.developerError}</p>
-            </div>
-          </div>
-        )}
-
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 sm:p-8">
           {/* Header */}
           <div className="text-center mb-6">

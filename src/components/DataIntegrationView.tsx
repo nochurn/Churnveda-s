@@ -621,10 +621,6 @@ export const DataIntegrationView: React.FC<DataIntegrationViewProps> = ({
 
               <div className="mt-4 p-2.5 bg-gray-50 rounded-lg text-xs space-y-1 border border-gray-100">
                 <div className="flex items-center justify-between text-gray-700">
-                  <span>API Key Token:</span>
-                  <span className="font-mono text-[11px] text-gray-800">{item.apiKeyMasked}</span>
-                </div>
-                <div className="flex items-center justify-between text-gray-700">
                   <span>Synced Records:</span>
                   <span className="font-semibold text-gray-900">{item.syncedRecordsCount.toLocaleString()}</span>
                 </div>
@@ -676,7 +672,7 @@ export const DataIntegrationView: React.FC<DataIntegrationViewProps> = ({
               </span>
             </div>
             <p className="text-xs text-gray-700 mt-1">
-              Upload bulk CSV telemetry or PDF account audits and statements up to 30MB. Gemini 3.8 Flash extracts accounts and scores churn risk in real-time.
+              Upload bulk CSV telemetry or PDF account audits and statements up to 30MB. Churnveda AI extracts accounts and scores churn risk in real-time.
             </p>
           </div>
 

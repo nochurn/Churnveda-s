@@ -1045,7 +1045,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
                 Start Your 14-Day Free Trial on the {activeTier.name} Plan
               </h3>
               <p className="text-xs text-gray-600 mt-0.5">
-                No credit card required. Instant sandbox with simulated telemetry and automated Gemini AI predictions.
+                No credit card required. Instant sandbox with simulated telemetry and automated Churnveda AI predictions.
               </p>
             </div>
 
@@ -1327,7 +1327,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
           <div className="p-3.5 bg-gray-50 rounded-xl space-y-1 border border-gray-100">
             <span className="font-bold text-gray-900">How does the 14-day free trial work?</span>
             <p className="text-gray-600 leading-relaxed">
-              Every plan includes a 14-day free trial with no credit card required at signup. You receive instant access to telemetry ingestion, Gemini AI predictions, and automated retention playbooks.
+              Every plan includes a 14-day free trial with no credit card required at signup. You receive instant access to telemetry ingestion, Churnveda AI predictions, and automated retention playbooks.
             </p>
           </div>
 
@@ -1346,9 +1346,9 @@ export const PricingView: React.FC<PricingViewProps> = ({
           </div>
 
           <div className="p-3.5 bg-gray-50 rounded-xl space-y-1 border border-gray-100">
-            <span className="font-bold text-gray-900">How accurate is the Gemini AI churn score?</span>
+            <span className="font-bold text-gray-900">How accurate is the AI churn score?</span>
             <p className="text-gray-600 leading-relaxed">
-              Gemini analyzes multi-dimensional telemetry (login dropoff, ticket sentiment, payment failure patterns) yielding an 89% early detection accuracy 30-60 days before account churn.
+              Churnveda AI analyzes multi-dimensional telemetry (login dropoff, ticket sentiment, payment failure patterns) yielding an 89% early detection accuracy 30-60 days before account churn.
             </p>
           </div>
 

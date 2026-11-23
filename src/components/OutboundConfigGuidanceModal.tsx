@@ -1,12 +1,8 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   Smartphone,
   Mail,
-  Shield,
   X,
-  ExternalLink,
-  Copy,
-  Check,
   AlertTriangle,
   Info,
   Sliders
@@ -25,32 +21,9 @@ export const OutboundConfigGuidanceModal: React.FC<OutboundConfigGuidanceModalPr
   channel,
   onNavigateToSettings
 }) => {
-  const [copied, setCopied] = useState(false);
-
   if (!isOpen) return null;
 
   const isWa = channel === 'whatsapp';
-
-  const envSnippet = isWa
-    ? `# WhatsApp Business Cloud API (Server-Side Secrets)
-WHATSAPP_ACCESS_TOKEN="your_permanent_or_system_user_token"
-WHATSAPP_PHONE_NUMBER_ID="your_meta_phone_number_id"
-WHATSAPP_BUSINESS_ACCOUNT_ID="your_meta_business_account_id"`
-    : `# Resend Email API (Server-Side Secrets)
-RESEND_API_KEY="re_123456789abcdef..."
-RESEND_FROM_EMAIL="Churnveda <onboarding@resend.dev>"`;
-
-  const handleCopySnippet = async () => {
-    try {
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(envSnippet);
-      }
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // fallback
-    }
-  };
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -73,10 +46,10 @@ RESEND_FROM_EMAIL="Churnveda <onboarding@resend.dev>"`;
             </div>
             <div>
               <h3 className="font-bold text-base text-gray-900">
-                {isWa ? 'WhatsApp Sending Is Not Configured Yet' : 'Email Sending Is Not Configured Yet'}
+                {isWa ? 'WhatsApp Delivery Not Enabled' : 'Email Delivery Not Enabled'}
               </h3>
               <p className="text-xs text-gray-500">
-                {isWa ? 'Meta WhatsApp Business Cloud API' : 'Resend Email API'}
+                {isWa ? 'WhatsApp Business Messaging' : 'Customer Email Outreach'}
               </p>
             </div>
           </div>
@@ -90,57 +63,28 @@ RESEND_FROM_EMAIL="Churnveda <onboarding@resend.dev>"`;
           </button>
         </div>
 
-        {/* Warning & Policy Notice */}
+        {/* Notice */}
         <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-3.5 flex items-start gap-2.5 text-xs text-amber-900">
           <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <p className="font-semibold">Real Provider Required — No Fake Sending</p>
+            <p className="font-semibold">Verified Provider Delivery Only</p>
             <p className="text-[11px] text-amber-800 leading-relaxed">
-              Churnveda strictly rejects fake dispatch or simulated delivery. Messages are only marked SENT when the external provider confirms successful dispatch.
+              Messages are only marked as Sent once confirmed by the messaging provider. Drafts remain safely queued until delivery is enabled for your workspace.
             </p>
           </div>
         </div>
 
-        {/* Configuration Instructions */}
-        <div className="space-y-3 text-xs">
-          <h4 className="font-bold text-gray-900 flex items-center gap-1.5">
-            <Shield className="w-4 h-4 text-blue-900" />
-            <span>Required Server-Side Environment Variables</span>
-          </h4>
-
-          <div className="relative bg-slate-900 text-slate-100 rounded-xl p-3.5 font-mono text-[11px] leading-relaxed overflow-x-auto border border-slate-800">
-            <button
-              onClick={handleCopySnippet}
-              className="absolute top-2.5 right-2.5 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-[10px] font-sans font-semibold flex items-center gap-1 cursor-pointer transition-colors"
-            >
-              {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-              <span>{copied ? 'Copied' : 'Copy'}</span>
-            </button>
-            <pre className="pr-16 whitespace-pre-wrap">{envSnippet}</pre>
-          </div>
-
-          <div className="bg-gray-50 border border-gray-200/80 rounded-xl p-3 space-y-1.5 text-[11px] text-gray-600">
-            <p className="flex items-center gap-1 font-semibold text-gray-800">
-              <Info className="w-3.5 h-3.5 text-blue-900" /> How to configure:
-            </p>
-            <ol className="list-decimal list-inside space-y-1 pl-1 text-gray-700">
-              <li>Add the environment variables to your deployment environment or <code className="bg-gray-200/80 px-1 py-0.5 rounded text-[10px]">.env</code> file.</li>
-              <li>Secrets are evaluated strictly server-side and never exposed to the browser bundle.</li>
-              <li>
-                {isWa
-                  ? 'Verify your Meta Phone Number ID and System User token.'
-                  : 'Get an API key from resend.com or configure custom verified sending domain.'}
-              </li>
-              <li>
-                Visit <strong>Settings &gt; Outbound Integrations</strong> to run a safe verification test without sending customer messages.
-              </li>
-            </ol>
-            {!isWa && (
-              <p className="text-[10px] text-blue-800 pt-1 italic">
-                Note: If your team prefers direct Google Workspace Gmail OAuth instead of Resend, configure client-side OAuth scopes.
-              </p>
-            )}
-          </div>
+        {/* Next steps */}
+        <div className="bg-gray-50 border border-gray-200/80 rounded-xl p-4 space-y-2 text-xs text-gray-700">
+          <p className="flex items-center gap-1.5 font-semibold text-gray-900">
+            <Info className="w-4 h-4 text-blue-900" />
+            <span>How to enable {isWa ? 'WhatsApp' : 'Email'} outreach:</span>
+          </p>
+          <ol className="list-decimal list-inside space-y-1 pl-1 text-[11px]">
+            <li>Open <strong>Settings &gt; Connected Channels</strong> to inspect your workspace delivery status.</li>
+            <li>Run <strong>Verify Connection</strong> to confirm live provider availability without sending customer messages.</li>
+            <li>If the channel remains inactive, contact workspace support to complete sender verification.</li>
+          </ol>
         </div>
 
         {/* Footer Actions */}
@@ -152,20 +96,18 @@ RESEND_FROM_EMAIL="Churnveda <onboarding@resend.dev>"`;
             Dismiss
           </button>
 
-          <div className="flex items-center gap-2">
-            {onNavigateToSettings && (
-              <button
-                onClick={() => {
-                  onClose();
-                  onNavigateToSettings();
-                }}
-                className="px-4 py-2 bg-blue-900 hover:bg-blue-800 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer"
-              >
-                <Sliders className="w-3.5 h-3.5" />
-                <span>Go to Outbound Settings</span>
-              </button>
-            )}
-          </div>
+          {onNavigateToSettings && (
+            <button
+              onClick={() => {
+                onClose();
+                onNavigateToSettings();
+              }}
+              className="px-4 py-2 bg-blue-900 hover:bg-blue-800 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Open Channel Settings</span>
+            </button>
+          )}
         </div>
       </div>
     </div>

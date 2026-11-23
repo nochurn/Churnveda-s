@@ -482,7 +482,7 @@ export const CustomerTableView: React.FC<CustomerTableViewProps> = ({
                           {cust.riskScore}
                         </span>
                         {cust.isAiAnalyzed && (
-                          <Sparkles className="w-3 h-3 text-blue-900" title="Analyzed with Gemini" />
+                          <Sparkles className="w-3 h-3 text-blue-900" title="Analyzed with Churnveda AI" />
                         )}
                       </div>
                     </td>

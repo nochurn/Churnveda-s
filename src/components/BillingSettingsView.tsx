@@ -54,14 +54,6 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [showAddCardModal, setShowAddCardModal] = useState(initialAction === 'add-card');
   const [savedMethods, setSavedMethods] = useState<PaymentMethod[]>(currentUser?.paymentMethods || []);
-
-  // Form Fields
-  const [cardholderName, setCardholderName] = useState(currentUser?.name || '');
-  const [cardNumber, setCardNumber] = useState('');
-  const [cardExpiry, setCardExpiry] = useState('');
-  const [cardCvc, setCardCvc] = useState('');
-  const [cardZip, setCardZip] = useState('');
-  const [isDefault, setIsDefault] = useState(true);
   const [cancelReason, setCancelReason] = useState('');
 
   // Fallback / Normalized values
@@ -172,104 +164,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         year: 'numeric'
       });
 
-  // Real-time Brand Detection for Card Number
-  const detectBrand = (digits: string) => {
-    const clean = digits.replace(/\D/g, '');
-    if (/^5[1-5]/.test(clean) || /^2[2-7]/.test(clean)) return 'Mastercard';
-    if (/^3[47]/.test(clean)) return 'American Express';
-    if (/^6(?:011|5)/.test(clean)) return 'Discover';
-    if (/^4/.test(clean)) return 'Visa';
-    return 'Credit Card';
-  };
 
-  // Card number formatter for typing
-  const handleCardNumberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const raw = e.target.value.replace(/\D/g, '').slice(0, 16);
-    const formatted = raw.replace(/(\d{4})(?=\d)/g, '$1 ');
-    setCardNumber(formatted);
-  };
-
-  // Expiry formatter MM/YY
-  const handleExpiryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    let raw = e.target.value.replace(/\D/g, '').slice(0, 4);
-    if (raw.length > 2) {
-      raw = `${raw.slice(0, 2)}/${raw.slice(2)}`;
-    }
-    setCardExpiry(raw);
-  };
-
-  // Autofill Presets
-  const applyTestCard = (type: 'visa' | 'mastercard' | 'amex') => {
-    if (type === 'visa') {
-      setCardNumber('4242 4242 4242 4242');
-      setCardExpiry('12/28');
-      setCardCvc('123');
-      setCardZip('94103');
-      if (!cardholderName) setCardholderName(currentUser?.name || 'Jane Doe');
-    } else if (type === 'mastercard') {
-      setCardNumber('5555 5555 5555 4444');
-      setCardExpiry('08/29');
-      setCardCvc('888');
-      setCardZip('10001');
-      if (!cardholderName) setCardholderName(currentUser?.name || 'John Smith');
-    } else if (type === 'amex') {
-      setCardNumber('3782 8224 6310 005');
-      setCardExpiry('11/27');
-      setCardCvc('1234');
-      setCardZip('90210');
-      if (!cardholderName) setCardholderName(currentUser?.name || 'Alex Morgan');
-    }
-  };
-
-  // Handle Add Payment Method submission
-  const handleSavePaymentMethod = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!cardNumber.replace(/\D/g, '')) {
-      onShowToast('Please enter a valid card number.', 'error');
-      return;
-    }
-
-    setIsProcessing(true);
-    try {
-      const parts = cardExpiry.split('/');
-      const month = parts[0] ? parseInt(parts[0], 10) : 12;
-      const year = parts[1] ? 2000 + parseInt(parts[1], 10) : 2028;
-
-      const res = await apiService.addPaymentMethod({
-        cardNumber,
-        cardholderName: cardholderName || currentUser?.name || 'Valued Customer',
-        expMonth: month,
-        expYear: year,
-        cvc: cardCvc || '123',
-        zip: cardZip || '94103',
-        isDefault
-      });
-
-      if (res.user) {
-        authService.setCurrentUser(res.user);
-        if (onUpdateUser) onUpdateUser(res.user);
-      }
-
-      if (res.paymentMethods) {
-        setSavedMethods(res.paymentMethods);
-      } else if (res.paymentMethod) {
-        setSavedMethods((prev) => [res.paymentMethod, ...prev]);
-      }
-
-      setShowAddCardModal(false);
-      // Reset card inputs
-      setCardNumber('');
-      setCardExpiry('');
-      setCardCvc('');
-      setCardZip('');
-
-      onShowToast('Payment method saved and securely tokenized.', 'success');
-    } catch (err: any) {
-      onShowToast(err.message || 'Failed to save payment method.', 'error');
-    } finally {
-      setIsProcessing(false);
-    }
-  };
 
   // Handle Remove Card
   const handleDeleteCard = async (id: string) => {
@@ -699,7 +594,6 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
             >
               <CreditCard className="w-4 h-4 text-cyan-300" />
               <span>Pay via Razorpay (UPI, Netbanking, Cards)</span>
-              <span className="text-[10px] bg-blue-500/30 text-blue-100 px-1.5 py-0.5 rounded font-mono">Test Live</span>
             </button>
           </div>
 
@@ -948,23 +842,19 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
                   <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active & Verified
                   </span>
-                ) : internationalStatus?.status === 'configured_pending_mandate_test' ? (
-                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400" /> Pending Test Mandate Verification
-                  </span>
                 ) : (
                   <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-blue-500/20 text-blue-300 border border-blue-500/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400" /> International Setup Active
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400" /> Recurring Billing Ready
                   </span>
                 )}
               </div>
               <p className="text-xs text-indigo-200/80 mt-0.5">
-                Razorpay Subscriptions for international customers with INR settlement to Indian bank account.
+                Transparent USD pricing with support for international cards, UPI AutoPay, netbanking, and wallets.
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-xs font-mono text-indigo-200 bg-indigo-900/40 px-3 py-1.5 rounded-lg border border-indigo-700/40 shrink-0">
-            <span>Purpose Code:</span>
+          <div className="flex items-center gap-2 text-xs font-medium text-indigo-200 bg-indigo-900/40 px-3 py-1.5 rounded-lg border border-indigo-700/40 shrink-0">
+            <span>Export Code:</span>
             <span className="font-bold text-white">{internationalStatus?.purposeCode || 'P0802'} (Software Exports)</span>
           </div>
         </div>
@@ -977,15 +867,15 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
           </div>
 
           <div className="bg-white/5 border border-white/10 rounded-xl p-3.5">
-            <span className="text-indigo-200/70 block text-[11px] font-medium">Merchant Bank Settlement</span>
-            <span className="font-bold text-white text-sm mt-0.5 block">Indian Current Account (INR)</span>
-            <span className="text-[11px] text-indigo-300/80 mt-1 block">Automatic bank conversion upon batch settlement (T+7)</span>
+            <span className="text-indigo-200/70 block text-[11px] font-medium">Supported Methods</span>
+            <span className="font-bold text-white text-sm mt-0.5 block">Cards, UPI, Netbanking &amp; Wallets</span>
+            <span className="text-[11px] text-indigo-300/80 mt-1 block">Instant checkout confirmation and automated receipts</span>
           </div>
 
           <div className="bg-white/5 border border-white/10 rounded-xl p-3.5">
-            <span className="text-indigo-200/70 block text-[11px] font-medium">Webhook & Access Isolation</span>
-            <span className="font-bold text-white text-sm mt-0.5 block">HMAC-SHA256 & Idempotency</span>
-            <span className="text-[11px] text-indigo-300/80 mt-1 block">Access granted only upon verified charged events</span>
+            <span className="text-indigo-200/70 block text-[11px] font-medium">Payment Security</span>
+            <span className="font-bold text-white text-sm mt-0.5 block">PCI-DSS Level 1 Checkout</span>
+            <span className="text-[11px] text-indigo-300/80 mt-1 block">All payments verified cryptographically before activation</span>
           </div>
         </div>
       </div>
@@ -1190,7 +1080,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
                 <option value="">Select a reason...</option>
                 <option value="missing_integrations">Missing integrations</option>
                 <option value="too_expensive">Price point considerations</option>
-                <option value="testing_mvp">Just testing the MVP flow</option>
+                <option value="testing_mvp">Just evaluating the product</option>
                 <option value="other">Other</option>
               </select>
             </div>

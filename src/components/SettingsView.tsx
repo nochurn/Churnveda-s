@@ -8,37 +8,35 @@ import {
   Check,
   Lock,
   Mail,
-  Clock,
   Sparkles,
   Globe,
   MessageSquare,
   Smartphone,
   RefreshCw,
   AlertTriangle,
-  AlertCircle,
   CheckCircle2,
   XCircle,
-  Key,
-  ExternalLink,
-  Info,
   Trash2,
   Download,
-  Package,
-  FileCode,
-  Copy,
-  Database
+  User,
+  Building2,
+  CreditCard,
+  Laptop,
+  ArrowRight
 } from 'lucide-react';
 import { aiEmployeeService } from '../services/aiEmployeeService';
 import { apiService, OutboundStatusResponse, TestOutboundConfigResponse } from '../services/api';
 import { auth as firebaseAuth, db as firestoreDb } from '../lib/firebaseClient';
 import { deleteDoc, doc } from 'firebase/firestore';
 
+type SettingsTab = 'profile' | 'employee' | 'notifications' | 'integrations' | 'security';
+
 interface SettingsViewProps {
   currentUser: UserProfile | null;
   onNavigate: (view: string) => void;
   onShowToast: (text: string, type?: 'success' | 'info' | 'error') => void;
   onLoggedOut?: () => void;
-  initialTab?: 'employee' | 'notifications' | 'security' | 'integrations' | 'export';
+  initialTab?: SettingsTab;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -46,34 +44,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onNavigate,
   onShowToast,
   onLoggedOut,
-  initialTab = 'employee'
+  initialTab = 'profile'
 }) => {
-  const [activeTab, setActiveTab] = useState<'employee' | 'notifications' | 'security' | 'integrations' | 'export'>(initialTab);
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
   const [settings, setSettings] = useState<AiEmployeeSettings>(() => aiEmployeeService.getSettings());
-  const [downloadingType, setDownloadingType] = useState<'lovable' | 'deployment' | null>(null);
-
-  const handleDownloadZipFile = async (type: 'lovable' | 'deployment') => {
-    setDownloadingType(type);
-    const fileName = type === 'lovable' ? 'churnveda-lovable-export.zip' : 'churnveda-deployment.zip';
-    try {
-      const res = await fetch(`/${fileName}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => window.URL.revokeObjectURL(url), 1000);
-      onShowToast(`${fileName} downloaded successfully!`, 'success');
-    } catch {
-      window.location.href = `/${fileName}`;
-    } finally {
-      setDownloadingType(null);
-    }
-  };
 
   const [ownerEmail, setOwnerEmail] = useState<string>(
     settings.ownerNotificationEmail || currentUser?.email || ''
@@ -86,11 +60,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [testingChannel, setTestingChannel] = useState<'whatsapp' | 'email' | null>(null);
   const [testResult, setTestResult] = useState<TestOutboundConfigResponse | null>(null);
 
-  // Self-Serve Account Deletion State (Requirement 15)
+  // Self-Serve Account Deletion State
   const [showDeleteModal, setShowDeleteModal] = useState<boolean>(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState<string>('');
   const [isDeletingAccount, setIsDeletingAccount] = useState<boolean>(false);
-
   const [isExportingAccount, setIsExportingAccount] = useState<boolean>(false);
 
   const handleExportMyData = async () => {
@@ -131,10 +104,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const cleanedSummary = res.servicesCleaned?.length
         ? ` Cleaned: ${res.servicesCleaned.join(', ')}.`
         : '';
-      onShowToast(
-        `${res.message || 'Account deleted.'}${cleanedSummary}`,
-        'success'
-      );
+      onShowToast(`${res.message || 'Account deleted.'}${cleanedSummary}`, 'success');
       setShowDeleteModal(false);
       setDeleteConfirmText('');
       if (onLoggedOut) {
@@ -152,8 +122,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     try {
       const data = await apiService.fetchOutboundStatus();
       setOutboundStatus(data);
-    } catch (e: any) {
-      console.warn('[Settings] Failed to fetch outbound status:', e);
+    } catch {
+      // ignore background status fetch failure
     } finally {
       setIsLoadingStatus(false);
     }
@@ -170,16 +140,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const res = await apiService.testOutboundConfig(channel);
       setTestResult(res);
       if (res.verified) {
-        onShowToast(`Configuration verified: ${res.message}`, 'success');
+        onShowToast(`Connection verified: ${res.message}`, 'success');
       } else if (res.status === 'not_configured') {
-        onShowToast(`${channel === 'whatsapp' ? 'WhatsApp' : 'Email'} sending is not configured yet.`, 'info');
+        onShowToast(`${channel === 'whatsapp' ? 'WhatsApp' : 'Email'} delivery is not enabled yet.`, 'info');
       } else {
         onShowToast(res.message, 'error');
       }
-      // Reload live status after test
       loadOutboundStatus();
     } catch (err: any) {
-      onShowToast(`Test failed: ${err.message}`, 'error');
+      onShowToast(`Verification failed: ${err.message}`, 'error');
     } finally {
       setTestingChannel(null);
     }
@@ -192,7 +161,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     try {
       await aiEmployeeService.updateSettings({ [key]: value });
       onShowToast('Settings updated.', 'success');
-    } catch (e) {
+    } catch {
       onShowToast('Failed to update settings', 'error');
     } finally {
       setIsSaving(false);
@@ -204,12 +173,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     try {
       await aiEmployeeService.updateSettings({ ownerNotificationEmail: ownerEmail });
       onShowToast('Owner notification email saved.', 'success');
-    } catch (e) {
+    } catch {
       onShowToast('Failed to save email', 'error');
     } finally {
       setIsSaving(false);
     }
   };
+
+  const subscriptionLabel =
+    currentUser?.billingStatus === 'active'
+      ? `Active (${currentUser?.plan || 'Growth'} Plan)`
+      : currentUser?.billingStatus === 'trial_expired'
+      ? 'Trial Ended'
+      : '14-Day Free Trial';
 
   return (
     <div className="space-y-6">
@@ -221,26 +197,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span>Settings</span>
           </h1>
           <p className="text-xs text-gray-600 mt-0.5">
-            Configure your AI Retention Employee, morning briefings, and account security.
+            Manage your profile, workspace preferences, notifications, connected channels, billing, and account security.
           </p>
         </div>
 
         {isSaving && (
           <span className="text-xs font-semibold text-emerald-700 flex items-center gap-1">
             <Check className="w-3.5 h-3.5" />
-            <span>Settings synced</span>
+            <span>Changes saved</span>
           </span>
         )}
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-2 border-b border-gray-200 pb-2 text-xs font-bold">
+      <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 pb-2 text-xs font-bold">
+        <button
+          onClick={() => setActiveTab('profile')}
+          className={`px-4 py-2 rounded-xl transition-colors flex items-center gap-2 cursor-pointer ${
+            activeTab === 'profile' ? 'bg-blue-900 text-white shadow-xs' : 'text-gray-600 hover:bg-gray-100'
+          }`}
+        >
+          <User className="w-3.5 h-3.5" />
+          <span>Profile &amp; Workspace</span>
+        </button>
+
         <button
           onClick={() => setActiveTab('employee')}
           className={`px-4 py-2 rounded-xl transition-colors flex items-center gap-2 cursor-pointer ${
-            activeTab === 'employee'
-              ? 'bg-blue-900 text-white shadow-xs'
-              : 'text-gray-600 hover:bg-gray-100'
+            activeTab === 'employee' ? 'bg-blue-900 text-white shadow-xs' : 'text-gray-600 hover:bg-gray-100'
           }`}
         >
           <Sliders className="w-3.5 h-3.5" />
@@ -250,53 +234,117 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <button
           onClick={() => setActiveTab('notifications')}
           className={`px-4 py-2 rounded-xl transition-colors flex items-center gap-2 cursor-pointer ${
-            activeTab === 'notifications'
-              ? 'bg-blue-900 text-white shadow-xs'
-              : 'text-gray-600 hover:bg-gray-100'
+            activeTab === 'notifications' ? 'bg-blue-900 text-white shadow-xs' : 'text-gray-600 hover:bg-gray-100'
           }`}
         >
           <Bell className="w-3.5 h-3.5" />
-          <span>Morning Notifications</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('security')}
-          className={`px-4 py-2 rounded-xl transition-colors flex items-center gap-2 cursor-pointer ${
-            activeTab === 'security'
-              ? 'bg-blue-900 text-white shadow-xs'
-              : 'text-gray-600 hover:bg-gray-100'
-          }`}
-        >
-          <ShieldCheck className="w-3.5 h-3.5" />
-          <span>Security & 2FA</span>
+          <span>Notifications</span>
         </button>
 
         <button
           onClick={() => setActiveTab('integrations')}
           className={`px-4 py-2 rounded-xl transition-colors flex items-center gap-2 cursor-pointer ${
-            activeTab === 'integrations'
-              ? 'bg-blue-900 text-white shadow-xs'
-              : 'text-gray-600 hover:bg-gray-100'
+            activeTab === 'integrations' ? 'bg-blue-900 text-white shadow-xs' : 'text-gray-600 hover:bg-gray-100'
           }`}
         >
           <MessageSquare className="w-3.5 h-3.5" />
-          <span>Outbound Integrations (WhatsApp & Email)</span>
+          <span>Connected Channels</span>
         </button>
 
         <button
-          onClick={() => setActiveTab('export')}
+          onClick={() => setActiveTab('security')}
           className={`px-4 py-2 rounded-xl transition-colors flex items-center gap-2 cursor-pointer ${
-            activeTab === 'export'
-              ? 'bg-blue-900 text-white shadow-xs'
-              : 'text-gray-600 hover:bg-gray-100'
+            activeTab === 'security' ? 'bg-blue-900 text-white shadow-xs' : 'text-gray-600 hover:bg-gray-100'
           }`}
         >
-          <Download className="w-3.5 h-3.5" />
-          <span>Export Source & ZIP</span>
+          <ShieldCheck className="w-3.5 h-3.5" />
+          <span>Account Security</span>
         </button>
       </div>
 
-      {/* TAB 1: AI EMPLOYEE SETTINGS (Section 22) */}
+      {/* TAB 0: PROFILE, WORKSPACE & SUBSCRIPTION */}
+      {activeTab === 'profile' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-4">
+            <div className="border-b border-gray-100 pb-3">
+              <h3 className="font-bold text-sm text-gray-900 flex items-center gap-2">
+                <User className="w-4 h-4 text-blue-900" />
+                <span>Profile Settings</span>
+              </h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Your account details used across alerts and retention drafts.
+              </p>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between">
+                <span className="text-gray-500 font-medium">Full Name</span>
+                <span className="font-bold text-gray-900">{currentUser?.name || 'Workspace Member'}</span>
+              </div>
+              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between">
+                <span className="text-gray-500 font-medium">Email Address</span>
+                <span className="font-bold text-gray-900">{currentUser?.email || '—'}</span>
+              </div>
+              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between">
+                <span className="text-gray-500 font-medium">Role</span>
+                <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-900 border border-blue-200 font-bold text-[11px]">
+                  {currentUser?.role || 'Workspace Owner'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-4">
+            <div className="border-b border-gray-100 pb-3">
+              <h3 className="font-bold text-sm text-gray-900 flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-blue-900" />
+                <span>Workspace &amp; Subscription</span>
+              </h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Company organization, timezone, and active billing plan.
+              </p>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between">
+                <span className="text-gray-500 font-medium">Workspace / Company</span>
+                <span className="font-bold text-gray-900">{currentUser?.company || 'My SaaS Workspace'}</span>
+              </div>
+              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between">
+                <span className="text-gray-500 font-medium">Timezone</span>
+                <span className="font-bold text-gray-900">{settings.timezone || 'UTC'}</span>
+              </div>
+              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between">
+                <span className="text-gray-500 font-medium">Subscription &amp; Billing</span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold text-[11px]">
+                  {subscriptionLabel}
+                </span>
+              </div>
+            </div>
+
+            <div className="pt-2 flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => onNavigate('billing')}
+                className="px-4 py-2 bg-blue-900 hover:bg-blue-800 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <CreditCard className="w-3.5 h-3.5" />
+                <span>Manage Subscription &amp; Billing</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('security')}
+                className="px-4 py-2 bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Account Security
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 1: AI EMPLOYEE SETTINGS */}
       {activeTab === 'employee' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-5">
           <div className="border-b border-gray-100 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -306,19 +354,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <span>Daily Morning Automation</span>
               </h3>
               <p className="text-xs text-gray-500 mt-0.5">
-                Configure your daily retention scan schedule and owner alerts.
+                Configure your daily retention scan schedule and owner brief preferences.
               </p>
             </div>
-
-            {/* Scheduler Status Indicator (Section 8) */}
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 border border-amber-200 text-amber-900 rounded-full text-xs font-bold shrink-0">
-              <span className="w-2 h-2 rounded-full bg-amber-500" />
-              <span>Scheduler not connected.</span>
-            </div>
-          </div>
-
-          <div className="p-3 bg-blue-50/50 border border-blue-200/80 rounded-xl text-xs text-blue-900">
-            <strong>Note:</strong> Automatic daily scan requires a backend scheduler configuration. Manual <strong>"Run Scan Now"</strong> is fully functional anytime from Home or AI Employee.
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
@@ -326,7 +364,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 space-y-2">
               <label className="font-bold text-gray-900 block">Daily Scan</label>
               <p className="text-gray-500 text-[11px]">
-                Toggle automated morning scans on or off.
+                Toggle automated morning scans on or off. Manual scans are always available from Home or AI Employee.
               </p>
               <div className="flex items-center gap-2 pt-1">
                 <button
@@ -350,11 +388,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
             </div>
 
-            {/* 2. Scan Time (Default 09:00 AM) */}
+            {/* 2. Scan Time */}
             <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 space-y-2">
               <label className="font-bold text-gray-900 block">Scan Time</label>
               <p className="text-gray-500 text-[11px]">
-                Time when morning telemetry analysis begins (Default: 09:00 AM).
+                Preferred time for daily account risk scoring (Default: 09:00 AM).
               </p>
               <input
                 type="time"
@@ -395,7 +433,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <div className="flex items-center gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={() => handleUpdate('ownerNotificationEmail', ownerEmail || currentUser?.email || 'owner@company.com')}
+                  onClick={() => handleUpdate('ownerNotificationEmail', ownerEmail || currentUser?.email || '')}
                   className={`px-4 py-1.5 rounded-lg font-bold text-xs cursor-pointer ${
                     Boolean(settings.ownerNotificationEmail) ? 'bg-emerald-600 text-white' : 'bg-white text-gray-700 border border-gray-200'
                   }`}
@@ -414,57 +452,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
             </div>
           </div>
-
-          {/* Automatic Scheduler & Cron Status (Requirement 11) */}
-          <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-3">
-            <div className="flex items-center justify-between">
-              <strong className="font-bold text-gray-900 flex items-center gap-2">
-                <Clock className="w-4 h-4 text-blue-900" />
-                <span>Automatic Retention Scheduler Architecture</span>
-              </strong>
-              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-blue-100 text-blue-900 border border-blue-200">
-                Production Ready
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
-              <div className="bg-white p-3 rounded-lg border border-gray-200">
-                <span className="text-[10px] uppercase font-bold text-gray-400 block">Daily Trigger Time</span>
-                <span className="text-sm font-extrabold text-gray-900 font-mono">{settings.scanTime || '09:00'} {settings.timezone || 'UTC'}</span>
-              </div>
-              <div className="bg-white p-3 rounded-lg border border-gray-200">
-                <span className="text-[10px] uppercase font-bold text-gray-400 block">Next Scheduled Run</span>
-                <span className="text-xs font-semibold text-gray-800 font-mono">Tomorrow @ {settings.scanTime || '09:00'}</span>
-              </div>
-              <div className="bg-white p-3 rounded-lg border border-gray-200">
-                <span className="text-[10px] uppercase font-bold text-gray-400 block">Cron Webhook Endpoint</span>
-                <span className="text-xs font-semibold text-blue-900 font-mono">POST /api/cron/daily-scan</span>
-              </div>
-            </div>
-
-            <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-lg text-[11px] text-amber-900 space-y-1">
-              <div className="font-semibold flex items-center gap-1.5">
-                <Info className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-                <span>Scheduler Deployment Note:</span>
-              </div>
-              <p className="text-amber-800 leading-relaxed">
-                In-process timer is active while the server process runs. For zero-downtime serverless or scale-to-zero container platforms, automatic scheduler requires deployment scheduler configuration (e.g. Google Cloud Scheduler, AWS EventBridge, or Railway Cron targeting <code className="bg-amber-100 px-1 py-0.5 rounded font-mono font-bold text-[10px]">/api/cron/daily-scan</code>).
-              </p>
-            </div>
-          </div>
         </div>
       )}
 
-      {/* TAB 2: MORNING NOTIFICATIONS (Section 16) */}
+      {/* TAB 2: MORNING NOTIFICATIONS */}
       {activeTab === 'notifications' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-5">
           <div className="border-b border-gray-100 pb-3">
             <h3 className="font-bold text-sm text-gray-900 flex items-center gap-2">
               <Mail className="w-4 h-4 text-blue-900" />
-              <span>Owner Notification & Morning Brief Delivery</span>
+              <span>Notification Preferences</span>
             </h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              Receive your 60-second retention brief every morning right after your AI Employee finishes scanning.
+              Receive your daily retention brief right after your AI Employee finishes scanning.
             </p>
           </div>
 
@@ -479,7 +479,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-xs"
               />
               <p className="text-[11px] text-gray-500">
-                Morning digest email will be delivered to this address with the subject "Churnveda: 5 customers need your attention today".
+                Morning digest email will be delivered to this address summarizing high-risk accounts.
               </p>
             </div>
 
@@ -487,40 +487,249 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               onClick={handleSaveEmail}
               className="px-4 py-2 bg-blue-900 hover:bg-blue-800 text-white rounded-xl text-xs font-bold shadow-xs transition-colors cursor-pointer"
             >
-              Save Notification Email
+              Save Notification Preferences
             </button>
           </div>
         </div>
       )}
 
-      {/* TAB 3: SECURITY & 2FA */}
+      {/* TAB 3: CONNECTED CHANNELS (WhatsApp & Email) */}
+      {activeTab === 'integrations' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
+              <div>
+                <h3 className="font-bold text-base text-gray-900 flex items-center gap-2">
+                  <Globe className="w-5 h-5 text-blue-900" />
+                  <span>Outbound Messaging Channels</span>
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  View delivery availability and verify connections for approved retention outreach.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={loadOutboundStatus}
+                disabled={isLoadingStatus}
+                className="px-3 py-1.5 bg-gray-50 hover:bg-gray-100 text-gray-700 border border-gray-200 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingStatus ? 'animate-spin' : ''}`} />
+                <span>Refresh Status</span>
+              </button>
+            </div>
+
+            {/* Test result announcement banner */}
+            {testResult && (
+              <div
+                className={`p-4 rounded-xl border text-xs flex items-start gap-3 animate-in fade-in duration-200 ${
+                  testResult.verified
+                    ? 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
+                    : testResult.status === 'not_configured'
+                    ? 'bg-amber-50/80 border-amber-200 text-amber-950'
+                    : 'bg-red-50/80 border-red-200 text-red-950'
+                }`}
+              >
+                {testResult.verified ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                ) : testResult.status === 'not_configured' ? (
+                  <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-1 flex-1">
+                  <div className="flex items-center justify-between">
+                    <strong className="font-bold">
+                      {testResult.verified
+                        ? 'Channel Verified'
+                        : testResult.status === 'not_configured'
+                        ? 'Not Enabled'
+                        : 'Verification Issue'}
+                    </strong>
+                    <span className="text-[10px] font-medium uppercase bg-white/70 px-2 py-0.5 rounded border border-current">
+                      No Customer Messages Sent
+                    </span>
+                  </div>
+                  <p className="leading-relaxed">{testResult.message}</p>
+                  {testResult.safeDetails && <p className="text-[11px] opacity-80">{testResult.safeDetails}</p>}
+                </div>
+              </div>
+            )}
+
+            {/* Channel Cards Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 pt-2">
+              {/* WhatsApp Card */}
+              <div className="bg-gray-50/60 rounded-xl border border-gray-200 p-5 space-y-4 flex flex-col justify-between">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-9 h-9 rounded-xl bg-emerald-100 border border-emerald-200 text-emerald-800 flex items-center justify-center">
+                        <Smartphone className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-sm text-gray-900">WhatsApp Business</h4>
+                        <span className="text-[11px] text-gray-500">Direct customer messaging</span>
+                      </div>
+                    </div>
+
+                    <span
+                      className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${
+                        outboundStatus?.whatsapp.status === 'connected'
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                          : outboundStatus?.whatsapp.status === 'error'
+                          ? 'bg-red-100 text-red-800 border border-red-200'
+                          : 'bg-amber-100 text-amber-800 border border-amber-200'
+                      }`}
+                    >
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          outboundStatus?.whatsapp.status === 'connected'
+                            ? 'bg-emerald-600'
+                            : outboundStatus?.whatsapp.status === 'error'
+                            ? 'bg-red-600'
+                            : 'bg-amber-500'
+                        }`}
+                      />
+                      <span>
+                        {outboundStatus?.whatsapp.status === 'connected'
+                          ? 'Connected'
+                          : outboundStatus?.whatsapp.status === 'error'
+                          ? 'Attention Needed'
+                          : 'Not Enabled'}
+                      </span>
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-gray-600 leading-relaxed">
+                    Delivers approved, personalized check-in messages directly to churn-risk customer phone numbers.
+                  </p>
+                </div>
+
+                <div className="pt-3 border-t border-gray-200/80 flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleTestChannel('whatsapp')}
+                    disabled={testingChannel === 'whatsapp'}
+                    className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${testingChannel === 'whatsapp' ? 'animate-spin' : ''}`} />
+                    <span>{testingChannel === 'whatsapp' ? 'Checking...' : 'Verify Connection'}</span>
+                  </button>
+                  <span className="text-[10px] text-gray-500 italic">No customer message sent</span>
+                </div>
+              </div>
+
+              {/* Email Card */}
+              <div className="bg-gray-50/60 rounded-xl border border-gray-200 p-5 space-y-4 flex flex-col justify-between">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-9 h-9 rounded-xl bg-blue-100 border border-blue-200 text-blue-900 flex items-center justify-center">
+                        <Mail className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-sm text-gray-900">Email Outreach</h4>
+                        <span className="text-[11px] text-gray-500">
+                          {outboundStatus?.email.configured && outboundStatus.email.fromEmail
+                            ? `Sending as ${outboundStatus.email.fromEmail}`
+                            : 'Founder retention emails'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <span
+                      className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${
+                        outboundStatus?.email.status === 'connected'
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                          : outboundStatus?.email.status === 'error'
+                          ? 'bg-red-100 text-red-800 border border-red-200'
+                          : 'bg-amber-100 text-amber-800 border border-amber-200'
+                      }`}
+                    >
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          outboundStatus?.email.status === 'connected'
+                            ? 'bg-emerald-600'
+                            : outboundStatus?.email.status === 'error'
+                            ? 'bg-red-600'
+                            : 'bg-amber-500'
+                        }`}
+                      />
+                      <span>
+                        {outboundStatus?.email.status === 'connected'
+                          ? 'Connected'
+                          : outboundStatus?.email.status === 'error'
+                          ? 'Attention Needed'
+                          : 'Not Enabled'}
+                      </span>
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-gray-600 leading-relaxed">
+                    Sends founder-style check-in emails with personalized talking points and retention offers after your approval.
+                  </p>
+                </div>
+
+                <div className="pt-3 border-t border-gray-200/80 flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleTestChannel('email')}
+                    disabled={testingChannel === 'email'}
+                    className="px-3.5 py-2 bg-blue-900 hover:bg-blue-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${testingChannel === 'email' ? 'animate-spin' : ''}`} />
+                    <span>{testingChannel === 'email' ? 'Checking...' : 'Verify Connection'}</span>
+                  </button>
+                  <span className="text-[10px] text-gray-500 italic">No customer message sent</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: ACCOUNT SECURITY */}
       {activeTab === 'security' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-5">
           <div className="border-b border-gray-100 pb-3">
             <h3 className="font-bold text-sm text-gray-900 flex items-center gap-2">
               <Lock className="w-4 h-4 text-blue-900" />
-              <span>Authentication & Workspace Security</span>
+              <span>Account Security &amp; Privacy</span>
             </h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              Two-factor authentication and session management.
+              Two-factor authentication, active sessions, data portability, and account erasure.
             </p>
           </div>
 
-          <div className="space-y-3 text-xs max-w-md">
-            <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between">
+          <div className="space-y-3 text-xs max-w-xl">
+            <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between gap-3">
               <div>
                 <strong className="text-gray-900 font-bold block">Two-Factor Authentication (2FA)</strong>
-                <span className="text-gray-500 text-[11px]">Enhanced protection for client data</span>
+                <span className="text-gray-500 text-[11px]">Extra verification layer for workspace sign-in</span>
               </div>
-              <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 font-bold text-[11px] rounded-full">
-                Active
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 font-bold text-[11px] rounded-full ${
+                  currentUser?.twoFactorEnabled ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                }`}>
+                  {currentUser?.twoFactorEnabled ? 'Enabled' : 'Inactive'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('security')}
+                  className="px-2.5 py-1 bg-white hover:bg-gray-100 border border-gray-200 rounded-lg text-[11px] font-semibold text-blue-900 cursor-pointer"
+                >
+                  Configure
+                </button>
+              </div>
             </div>
 
-            <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between">
-              <div>
-                <strong className="text-gray-900 font-bold block">Signed In As</strong>
-                <span className="text-gray-500 text-[11px]">{currentUser?.email || 'Authenticated User'}</span>
+            <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <Laptop className="w-4 h-4 text-gray-600 shrink-0" />
+                <div>
+                  <strong className="text-gray-900 font-bold block">Signed In As</strong>
+                  <span className="text-gray-500 text-[11px]">{currentUser?.email || 'Authenticated User'}</span>
+                </div>
               </div>
               {onLoggedOut && (
                 <button
@@ -532,19 +741,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               )}
             </div>
 
-            {/* Self-Serve Account Data Export (GDPR Art. 15/20, India DPDP) */}
+            {/* Self-Serve Account Data Export */}
             <div className="p-4 bg-blue-50/50 rounded-xl border border-blue-200 space-y-3">
               <div className="flex items-start gap-2.5">
                 <Download className="w-4 h-4 text-blue-900 shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <strong className="text-blue-950 font-bold block">Download My Data (GDPR / DPDP Portability)</strong>
                   <p className="text-gray-600 text-[11px] leading-relaxed">
-                    Export a complete machine-readable JSON archive of your account profile, workspace, customer telemetry, retention drafts, subscription records, and audit logs.
+                    Export a machine-readable JSON archive of your account profile, workspace, customer records, and retention drafts.
                   </p>
                 </div>
               </div>
               <div className="pt-1 flex items-center justify-between">
-                <span className="text-[11px] text-gray-500">Format: JSON (excludes password hashes)</span>
+                <span className="text-[11px] text-gray-500">Format: JSON</span>
                 <button
                   type="button"
                   disabled={isExportingAccount}
@@ -556,14 +765,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
             </div>
 
-            {/* Self-Serve Account & Data Deletion (Requirement 15) */}
+            {/* Self-Serve Account & Data Deletion */}
             <div className="p-4 bg-red-50/50 rounded-xl border border-red-200 space-y-3">
               <div className="flex items-start gap-2.5">
                 <Trash2 className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <strong className="text-red-950 font-bold block">Delete Account &amp; Data Erasure</strong>
                   <p className="text-gray-600 text-[11px] leading-relaxed">
-                    Under GDPR Article 17, India DPDP Act, and CCPA, permanent erasure removes live records from our database, cancels active Razorpay billing mandates, clears outbound queues/storage, and emails confirmation. Backups purge within 30 days.
+                    Under GDPR Article 17, India DPDP Act, and CCPA, permanent erasure removes live workspace records, cancels active billing subscriptions, and emails confirmation.
                   </p>
                 </div>
               </div>
@@ -632,460 +841,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {/* TAB 4: OUTBOUND INTEGRATIONS (WhatsApp & Resend Email) */}
-      {activeTab === 'integrations' && (
-        <div className="space-y-6">
-          {/* Header & Status Refresh */}
-          <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
-              <div>
-                <h3 className="font-bold text-base text-gray-900 flex items-center gap-2">
-                  <Globe className="w-5 h-5 text-blue-900" />
-                  <span>Outbound Retention Channels &amp; API Status</span>
-                </h3>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  Real credentials for WhatsApp Business Cloud API and Resend Email API. Stored securely in server environment variables.
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={loadOutboundStatus}
-                disabled={isLoadingStatus}
-                className="px-3 py-1.5 bg-gray-50 hover:bg-gray-100 text-gray-700 border border-gray-200 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingStatus ? 'animate-spin' : ''}`} />
-                <span>Refresh Status</span>
-              </button>
-            </div>
-
-            {/* Firebase Backend & Firestore Sync Shortcut Card */}
-            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-start gap-3">
-                <div className="w-9 h-9 rounded-xl bg-blue-900 text-white flex items-center justify-center shrink-0">
-                  <Database className="w-4 h-4" />
-                </div>
-                <div>
-                  <h4 className="text-xs font-bold text-gray-900">
-                    Firebase Cloud Firestore Backend &amp; Workspace Sync
-                  </h4>
-                  <p className="text-[11px] text-gray-600 mt-0.5">
-                    Inspect live Firestore table counts, run the verification suite, and sync workspace customers to Firestore.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => onNavigate('admin/db-test')}
-                className="px-3.5 py-2 bg-blue-900 hover:bg-blue-800 text-white rounded-lg text-xs font-semibold shrink-0 cursor-pointer transition-colors"
-              >
-                Open Backend &amp; Sync
-              </button>
-            </div>
-
-            {/* Test result announcement banner */}
-            {testResult && (
-              <div className={`p-4 rounded-xl border text-xs flex items-start gap-3 animate-in fade-in duration-200 ${
-                testResult.verified
-                  ? 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
-                  : testResult.status === 'not_configured'
-                  ? 'bg-amber-50/80 border-amber-200 text-amber-950'
-                  : 'bg-red-50/80 border-red-200 text-red-950'
-              }`}>
-                {testResult.verified ? (
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                ) : testResult.status === 'not_configured' ? (
-                  <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                ) : (
-                  <XCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
-                )}
-                <div className="space-y-1 flex-1">
-                  <div className="flex items-center justify-between">
-                    <strong className="font-bold">
-                      {testResult.verified
-                        ? 'Configuration Verified'
-                        : testResult.status === 'not_configured'
-                        ? 'Not Configured'
-                        : 'Verification Error'}
-                    </strong>
-                    <span className="text-[10px] font-mono uppercase bg-white/70 px-2 py-0.5 rounded border border-current">
-                      No Customer Messages Sent
-                    </span>
-                  </div>
-                  <p className="leading-relaxed">{testResult.message}</p>
-                  {testResult.safeDetails && (
-                    <p className="text-[11px] opacity-80">{testResult.safeDetails}</p>
-                  )}
-                  {testResult.requiredEnvVars && testResult.requiredEnvVars.length > 0 && (
-                    <div className="pt-1 text-[11px]">
-                      Required environment variables:{' '}
-                      <span className="font-mono font-semibold">{testResult.requiredEnvVars.join(', ')}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Channel Cards Grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 pt-2">
-              {/* WhatsApp Card */}
-              <div className="bg-gray-50/60 rounded-xl border border-gray-200 p-5 space-y-4 flex flex-col justify-between">
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-9 h-9 rounded-xl bg-emerald-100 border border-emerald-200 text-emerald-800 flex items-center justify-center">
-                        <Smartphone className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <h4 className="font-bold text-sm text-gray-900">WhatsApp Business Cloud API</h4>
-                        <span className="text-[11px] text-gray-500">Meta Graph API v18.0</span>
-                      </div>
-                    </div>
-
-                    {/* Status Badge */}
-                    <span className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${
-                      outboundStatus?.whatsapp.status === 'connected'
-                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                        : outboundStatus?.whatsapp.status === 'error'
-                        ? 'bg-red-100 text-red-800 border border-red-200'
-                        : 'bg-amber-100 text-amber-800 border border-amber-200'
-                    }`}>
-                      <span className={`w-2 h-2 rounded-full ${
-                        outboundStatus?.whatsapp.status === 'connected'
-                          ? 'bg-emerald-600'
-                          : outboundStatus?.whatsapp.status === 'error'
-                          ? 'bg-red-600'
-                          : 'bg-amber-500'
-                      }`} />
-                      <span>
-                        {outboundStatus?.whatsapp.status === 'connected'
-                          ? 'Connected'
-                          : outboundStatus?.whatsapp.status === 'error'
-                          ? 'Error'
-                          : 'Not configured'}
-                      </span>
-                    </span>
-                  </div>
-
-                  <p className="text-xs text-gray-600 leading-relaxed">
-                    Sends automated personalized check-in messages directly to churn-risk customer phone numbers via Meta WhatsApp Cloud API.
-                  </p>
-
-                  <div className="p-3 bg-white rounded-lg border border-gray-200 text-xs space-y-2 font-mono">
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>Phone Number ID:</span>
-                      <span className="font-bold text-gray-900">
-                        {outboundStatus?.whatsapp.phoneNumberIdMasked || 'Not configured'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>Business Account ID:</span>
-                      <span className="font-bold text-gray-900">
-                        {outboundStatus?.whatsapp.businessAccountIdMasked || 'Not configured'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>Server Security:</span>
-                      <span className="text-[11px] text-emerald-800 font-sans font-semibold">
-                        Credentials are configured server-side.
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>Access Token:</span>
-                      <span className="text-[11px] text-emerald-700 font-sans font-semibold">
-                        {outboundStatus?.whatsapp.configured ? 'Secure in server env' : 'Missing WHATSAPP_ACCESS_TOKEN'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="pt-3 border-t border-gray-200/80 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleTestChannel('whatsapp')}
-                      disabled={testingChannel === 'whatsapp'}
-                      className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${testingChannel === 'whatsapp' ? 'animate-spin' : ''}`} />
-                      <span>{testingChannel === 'whatsapp' ? 'Verifying...' : 'Test WhatsApp Connection'}</span>
-                    </button>
-
-                    <span className="text-[10px] text-gray-500 italic">Safe test (no message sent)</span>
-                  </div>
-
-                  {/* Configuration Help Accordion / Box */}
-                  <div className="text-[11px] text-gray-600 bg-emerald-50/50 p-3 rounded-lg border border-emerald-100 space-y-1.5 font-sans">
-                    <strong className="text-emerald-950 font-bold block flex items-center gap-1">
-                      <Info className="w-3.5 h-3.5 text-emerald-700" /> Required Environment Variables:
-                    </strong>
-                    <ul className="list-disc list-inside space-y-0.5 text-gray-700 font-mono text-[10px]">
-                      <li>WHATSAPP_ACCESS_TOKEN</li>
-                      <li>WHATSAPP_PHONE_NUMBER_ID</li>
-                      <li>WHATSAPP_BUSINESS_ACCOUNT_ID</li>
-                    </ul>
-                    <p className="text-[10px] text-gray-500 pt-0.5">
-                      Never exposed to browser. Evaluated strictly server-side.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Email (Resend) Card */}
-              <div className="bg-gray-50/60 rounded-xl border border-gray-200 p-5 space-y-4 flex flex-col justify-between">
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-9 h-9 rounded-xl bg-blue-100 border border-blue-200 text-blue-900 flex items-center justify-center">
-                        <Mail className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <h4 className="font-bold text-sm text-gray-900">Email Retention Dispatch (Resend)</h4>
-                        <span className="text-[11px] text-gray-500">Resend REST API</span>
-                      </div>
-                    </div>
-
-                    {/* Status Badge */}
-                    <span className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${
-                      outboundStatus?.email.status === 'connected'
-                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                        : outboundStatus?.email.status === 'error'
-                        ? 'bg-red-100 text-red-800 border border-red-200'
-                        : 'bg-amber-100 text-amber-800 border border-amber-200'
-                    }`}>
-                      <span className={`w-2 h-2 rounded-full ${
-                        outboundStatus?.email.status === 'connected'
-                          ? 'bg-emerald-600'
-                          : outboundStatus?.email.status === 'error'
-                          ? 'bg-red-600'
-                          : 'bg-amber-500'
-                      }`} />
-                      <span>
-                        {outboundStatus?.email.status === 'connected'
-                          ? 'Connected'
-                          : outboundStatus?.email.status === 'error'
-                          ? 'Error'
-                          : 'Not configured'}
-                      </span>
-                    </span>
-                  </div>
-
-                  <p className="text-xs text-gray-600 leading-relaxed">
-                    Sends founder-style check-in emails with personalized talking points and concession offers to high-risk SaaS decision-makers.
-                  </p>
-
-                  <div className="p-3 bg-white rounded-lg border border-gray-200 text-xs space-y-2 font-mono">
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>Sender Address:</span>
-                      <span className="font-bold text-gray-900 font-sans text-xs">
-                        {outboundStatus?.email.fromEmail || 'Churnveda <onboarding@resend.dev>'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>API Key:</span>
-                      <span className="font-bold text-gray-900">
-                        {outboundStatus?.email.maskedIdentifier || 'Not configured'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>Server Security:</span>
-                      <span className="text-[11px] text-blue-900 font-sans font-semibold">
-                        Credentials are configured server-side.
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>Status:</span>
-                      <span className="text-[11px] text-blue-700 font-sans font-semibold">
-                        {outboundStatus?.email.configured ? 'Secure in server env' : 'Missing RESEND_API_KEY'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="pt-3 border-t border-gray-200/80 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleTestChannel('email')}
-                      disabled={testingChannel === 'email'}
-                      className="px-3.5 py-2 bg-blue-900 hover:bg-blue-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${testingChannel === 'email' ? 'animate-spin' : ''}`} />
-                      <span>{testingChannel === 'email' ? 'Verifying...' : 'Test Email Connection'}</span>
-                    </button>
-
-                    <span className="text-[10px] text-gray-500 italic">Safe test (no message sent)</span>
-                  </div>
-
-                  {/* Configuration Help Accordion / Box */}
-                  <div className="text-[11px] text-gray-600 bg-blue-50/50 p-3 rounded-lg border border-blue-100 space-y-1.5 font-sans">
-                    <strong className="text-blue-950 font-bold block flex items-center gap-1">
-                      <Info className="w-3.5 h-3.5 text-blue-800" /> Required Environment Variables:
-                    </strong>
-                    <ul className="list-disc list-inside space-y-0.5 text-gray-700 font-mono text-[10px]">
-                      <li>RESEND_API_KEY (from resend.com)</li>
-                      <li>RESEND_FROM_EMAIL (e.g., "Churnveda &lt;founder@yourdomain.com&gt;")</li>
-                    </ul>
-                    <p className="text-[10px] text-gray-500 pt-0.5">
-                      Note: To use Google Workspace Gmail OAuth instead of Resend, configure client-side OAuth scopes.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* TAB 5: PROJECT EXPORT & LOVABLE ZIP DOWNLOAD */}
-      {activeTab === 'export' && (
-        <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-6">
-          <div className="border-b border-gray-100 pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <h3 className="font-bold text-base text-gray-900 flex items-center gap-2">
-                <Package className="w-5 h-5 text-blue-900" />
-                <span>Export Complete Source Code & Project Archive</span>
-              </h3>
-              <p className="text-xs text-gray-500 mt-1">
-                Download your complete Churnveda SaaS codebase as a verified ZIP archive for Lovable, Netlify, or local development.
-              </p>
-            </div>
-
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-full text-xs font-bold shrink-0">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span>95 Files Verified • 0 Secrets</span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            {/* 1. Lovable Direct Import Package */}
-            <div className="p-5 bg-gradient-to-br from-blue-50/60 to-indigo-50/40 rounded-2xl border border-blue-200/90 shadow-2xs flex flex-col justify-between space-y-4">
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="px-2.5 py-0.5 rounded-full bg-blue-900 text-white font-extrabold text-[10px] uppercase tracking-wider">
-                    Recommended for Lovable
-                  </span>
-                  <span className="text-[11px] font-mono text-gray-500">~1.38 MB</span>
-                </div>
-                <h4 className="font-bold text-sm text-gray-900">Lovable Direct Import Package</h4>
-                <p className="text-xs text-gray-600 leading-relaxed">
-                  Has <code className="bg-white px-1.5 py-0.5 rounded border border-blue-100 font-mono text-[11px]">package.json</code> directly at the root of the ZIP. Drag &amp; drop directly into Lovable’s project uploader without any extra configuration.
-                </p>
-                <ul className="text-[11px] text-gray-600 space-y-1 list-disc list-inside">
-                  <li>React 19 + Vite 6 + Tailwind CSS v4</li>
-                  <li>All 35+ components, pages &amp; legal templates</li>
-                  <li>Firebase Auth &amp; Cloud Firestore + SQL migrations</li>
-                </ul>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => handleDownloadZipFile('lovable')}
-                disabled={downloadingType === 'lovable'}
-                className="w-full py-2.5 px-4 bg-blue-900 hover:bg-blue-800 disabled:opacity-60 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <Download className={`w-4 h-4 ${downloadingType === 'lovable' ? 'animate-bounce' : ''}`} />
-                <span>
-                  {downloadingType === 'lovable'
-                    ? 'Preparing Lovable ZIP...'
-                    : 'Download for Lovable Import (ZIP)'}
-                </span>
-              </button>
-            </div>
-
-            {/* 2. Standard Deployment Package */}
-            <div className="p-5 bg-gray-50 rounded-2xl border border-gray-200 flex flex-col justify-between space-y-4">
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="px-2.5 py-0.5 rounded-full bg-gray-200 text-gray-800 font-bold text-[10px] uppercase tracking-wider">
-                    Netlify &amp; Docker Ready
-                  </span>
-                  <span className="text-[11px] font-mono text-gray-500">~1.38 MB</span>
-                </div>
-                <h4 className="font-bold text-sm text-gray-900">Standard Project Archive</h4>
-                <p className="text-xs text-gray-600 leading-relaxed">
-                  Contained inside a clean <code className="bg-white px-1.5 py-0.5 rounded border border-gray-200 font-mono text-[11px]">churnveda/</code> folder so unzipping on your computer or phone creates a neat directory.
-                </p>
-                <ul className="text-[11px] text-gray-600 space-y-1 list-disc list-inside">
-                  <li>Includes <code className="font-mono text-[10px]">netlify.toml</code> &amp; SPA redirects</li>
-                  <li>Includes <code className="font-mono text-[10px]">Dockerfile</code> &amp; Railway manifests</li>
-                  <li>Includes bundled Node/Express backend files</li>
-                </ul>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => handleDownloadZipFile('deployment')}
-                disabled={downloadingType === 'deployment'}
-                className="w-full py-2.5 px-4 bg-white hover:bg-gray-100 disabled:opacity-60 text-gray-800 border border-gray-300 rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <Download className={`w-4 h-4 text-blue-900 ${downloadingType === 'deployment' ? 'animate-bounce' : ''}`} />
-                <span>
-                  {downloadingType === 'deployment'
-                    ? 'Preparing Deployment ZIP...'
-                    : 'Download Standard ZIP (churnveda/ folder)'}
-                </span>
-              </button>
-            </div>
-          </div>
-
-          {/* Direct Browser Link / Offline Base64 Fallback */}
-          <div className="p-4 bg-amber-50/70 rounded-xl border border-amber-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-            <div className="space-y-1">
-              <div className="font-bold text-amber-950 flex items-center gap-1.5">
-                <Info className="w-4 h-4 text-amber-700" />
-                <span>Having trouble downloading on mobile or inside an iframe?</span>
-              </div>
-              <p className="text-amber-900 text-[11px]">
-                You can open the standalone Offline Download Portal where the entire ZIP is pre-embedded in Base64 memory.
-              </p>
-            </div>
-
-            <a
-              href="/download.html"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-xs shrink-0 flex items-center gap-1.5 shadow-2xs text-center justify-center"
-            >
-              <span>Open Download Portal</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-          </div>
-
-          {/* 3-Step Lovable Import Guide */}
-          <div className="p-5 bg-gray-50/70 rounded-xl border border-gray-200 space-y-3">
-            <h4 className="font-bold text-xs uppercase tracking-wider text-gray-500">
-              How to Import into Lovable in 3 Steps:
-            </h4>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-              <div className="p-3 bg-white rounded-lg border border-gray-200 space-y-1">
-                <span className="w-5 h-5 rounded-full bg-blue-900 text-white text-[10px] font-bold flex items-center justify-center">1</span>
-                <span className="font-bold text-gray-900 block pt-1">Download ZIP</span>
-                <p className="text-[11px] text-gray-500">
-                  Click the blue button above to save <code className="font-mono text-[10px]">churnveda-lovable-export.zip</code>.
-                </p>
-              </div>
-
-              <div className="p-3 bg-white rounded-lg border border-gray-200 space-y-1">
-                <span className="w-5 h-5 rounded-full bg-blue-900 text-white text-[10px] font-bold flex items-center justify-center">2</span>
-                <span className="font-bold text-gray-900 block pt-1">Import in Lovable</span>
-                <p className="text-[11px] text-gray-500">
-                  In Lovable, create a new project, select <strong>"Import Existing Project"</strong>, and choose the downloaded ZIP.
-                </p>
-              </div>
-
-              <div className="p-3 bg-white rounded-lg border border-gray-200 space-y-1">
-                <span className="w-5 h-5 rounded-full bg-blue-900 text-white text-[10px] font-bold flex items-center justify-center">3</span>
-                <span className="font-bold text-gray-900 block pt-1">Add Environment Secrets</span>
-                <p className="text-[11px] text-gray-500">
-                  In your hosting settings, enter your server secrets from <code className="font-mono text-[10px]">.env.example</code>.
-                </p>
-              </div>
-            </div>
-          </div>
         </div>
       )}
     </div>

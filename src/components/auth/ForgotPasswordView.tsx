@@ -14,7 +14,6 @@ export const ForgotPasswordView: React.FC<ForgotPasswordViewProps> = ({
   const [email, setEmail] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
-  const [generatedResetToken, setGeneratedResetToken] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -33,10 +32,7 @@ export const ForgotPasswordView: React.FC<ForgotPasswordViewProps> = ({
 
       if (res.success) {
         setIsSubmitted(true);
-        if (res.resetToken) {
-          setGeneratedResetToken(res.resetToken);
-        }
-        onShowToast(res.message || 'Password reset link sent (valid for 24 hours, single-use).', 'info');
+        onShowToast(res.message || 'If an account exists, a password reset link has been emailed (valid for 24 hours, single-use).', 'info');
       } else {
         setErrorMessage(res.message);
       }
@@ -107,29 +103,12 @@ export const ForgotPasswordView: React.FC<ForgotPasswordViewProps> = ({
               <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
                 <div className="flex items-center gap-2 text-xs font-bold text-emerald-900 mb-1">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>Reset Email Dispatched!</span>
+                  <span>Reset Request Received</span>
                 </div>
                 <p className="text-xs text-emerald-800 leading-relaxed">
-                  We've sent a 24-hour single-use password reset link to <strong>{email}</strong>. Please check your inbox.
+                  If an account exists for <strong>{email}</strong>, a 24-hour single-use password reset link has been sent to that email address.
                 </p>
               </div>
-
-              {/* Simulation One-Click Action */}
-              {generatedResetToken && (
-                <div className="p-3 bg-blue-50/80 border border-blue-200 rounded-xl space-y-2">
-                  <span className="text-[11px] font-semibold text-blue-950 block">
-                    Instant Test Simulator:
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onNavigate('reset-password', { token: generatedResetToken })}
-                    className="w-full py-2 px-3 bg-blue-900 hover:bg-blue-800 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 shadow-xs"
-                  >
-                    <span>Click Simulated Reset Link</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </button>
-                </div>
-              )}
             </div>
           )}
 

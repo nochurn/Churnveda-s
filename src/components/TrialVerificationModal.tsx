@@ -115,12 +115,13 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
       }
 
       // 2. Open Razorpay Checkout modal with ALL supported payment methods
-      if (typeof (window as any).Razorpay !== 'undefined') {
+      if (typeof (window as any).Razorpay !== 'undefined' && orderRes.keyId) {
+        const chargeAmount = orderRes.amount || orderRes.amountCents || 100;
         const options = buildRazorpayOneTimeOptions({
-          keyId: orderRes.keyId || '',
+          keyId: orderRes.keyId,
           orderId: orderRes.orderId,
-          amountCents: orderRes.amountCents || orderRes.amount,
-          amount: orderRes.amountCents || orderRes.amount,
+          amountCents: chargeAmount,
+          amount: chargeAmount,
           currency: orderRes.currency || 'USD',
           name: 'Churnveda',
           description: `$1 Verification - ${authoritativePlan.name} 14-Day Trial (${billingCycle === 'annual' ? 'Annual' : 'Monthly'})`,

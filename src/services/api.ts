@@ -195,6 +195,11 @@ export async function parseJsonResponse<T = any>(
 
   if (!trimmed) {
     if (!res.ok) {
+      if (res.status === 405) {
+        throw new Error(
+          `${fallbackError} (HTTP 405: This host only serves static files and cannot run backend /api routes. Deploy full-stack via npm start/Dockerfile, or rebuild with VITE_API_URL pointing to your Node backend.)`
+        );
+      }
       throw new Error(`${fallbackError} (HTTP ${res.status})`);
     }
     return {} as T;
@@ -206,6 +211,11 @@ export async function parseJsonResponse<T = any>(
     /^<html[\s>]/i.test(trimmed);
 
   if (looksLikeHtml) {
+    if (res.status === 405) {
+      throw new Error(
+        `${fallbackError} (HTTP 405: This host only serves static files and cannot run backend /api routes. Deploy full-stack via npm start/Dockerfile, or rebuild with VITE_API_URL pointing to your Node backend.)`
+      );
+    }
     throw new Error(
       `Server returned an HTML page instead of JSON (HTTP ${res.status}). Please refresh or try again in a moment.`
     );
@@ -221,7 +231,17 @@ export async function parseJsonResponse<T = any>(
   }
 
   if (!res.ok) {
-    const err: any = new Error(data?.error || data?.message || `${fallbackError} (HTTP ${res.status})`);
+    const rawError =
+      typeof data?.error === 'string'
+        ? data.error
+        : typeof data?.error?.message === 'string'
+        ? data.error.message
+        : typeof data?.message === 'string'
+        ? data.message
+        : typeof data?.message?.message === 'string'
+        ? data.message.message
+        : '';
+    const err: any = new Error(rawError || `${fallbackError} (HTTP ${res.status})`);
     err.status = res.status;
     err.data = data;
     throw err;
@@ -254,10 +274,6 @@ export async function safeJson<T = any>(
 
   // 1. Handle Auth Failures (401 Unauthorized / 403 Forbidden)
   if (status === 401 || status === 403) {
-    const errorCategory = status === 401 ? 'UNAUTHORIZED' : 'FORBIDDEN';
-    console.warn(`[API Diagnostics] ${errorCategory} at ${safeEndpoint} (HTTP ${status})`);
-
-    // Parse server error payload if JSON to preserve server error message/codes
     if (isJson) {
       try {
         const errorJson = await res.json();
@@ -275,9 +291,6 @@ export async function safeJson<T = any>(
 
   // 2. Handle Client / Server Errors (404, 500, 502, 503, etc.)
   if (!res.ok) {
-    const errorCategory = status === 404 ? 'NOT_FOUND' : status >= 500 ? 'SERVER_ERROR' : 'HTTP_ERROR';
-    console.warn(`[API Diagnostics] ${errorCategory} at ${safeEndpoint} (HTTP ${status}, Content-Type: ${contentType || 'none'})`);
-
     if (isJson) {
       try {
         return await res.json();
@@ -288,9 +301,8 @@ export async function safeJson<T = any>(
     return fallback;
   }
 
-  // 3. Handle Non-JSON Responses (HTML warmup pages, gateway error pages)
+  // 3. Handle Non-JSON Responses
   if (!isJson) {
-    console.warn(`[API Diagnostics] NON_JSON_RESPONSE at ${safeEndpoint} (HTTP ${status}, Content-Type: ${contentType || 'none'})`);
     return fallback;
   }
 
@@ -298,12 +310,10 @@ export async function safeJson<T = any>(
   try {
     const rawText = await res.text();
     if (!rawText || rawText.trim().length === 0) {
-      console.warn(`[API Diagnostics] EMPTY_BODY at ${safeEndpoint} (HTTP ${status})`);
       return fallback;
     }
     return JSON.parse(rawText) as T;
   } catch {
-    console.warn(`[API Diagnostics] MALFORMED_JSON at ${safeEndpoint} (HTTP ${status})`);
     return fallback;
   }
 }
@@ -339,14 +349,14 @@ export function getAuthHeaders(extraHeaders: Record<string, string> = {}): Recor
   };
 }
 
-export async function fetchHealth(): Promise<{ status: string; geminiConfigured: boolean; model: string; totalCustomers: number }> {
+export async function fetchHealth(): Promise<{ status: string; geminiConfigured?: boolean }> {
   try {
     const res = await apiFetch('/api/health', {
       headers: { 'Accept': 'application/json' }
     });
-    return await safeJson(res, { status: 'error', geminiConfigured: false, model: '', totalCustomers: 0 });
+    return await safeJson(res, { status: 'error' });
   } catch {
-    return { status: 'error', geminiConfigured: false, model: '', totalCustomers: 0 };
+    return { status: 'error' };
   }
 }
 
@@ -465,7 +475,6 @@ export const DEFAULT_INTEGRATIONS: IntegrationStatus[] = [
     lastSyncAt: null,
     syncedRecordsCount: 0,
     syncFrequency: 'Every 24 Hours',
-    apiKeyMasked: 'rzp_••••••••••••',
     statusText: 'Catalog Available — Not Connected',
     isFallbackCatalog: true
   },
@@ -479,7 +488,6 @@ export const DEFAULT_INTEGRATIONS: IntegrationStatus[] = [
     lastSyncAt: null,
     syncedRecordsCount: 0,
     syncFrequency: 'Every 24 Hours',
-    apiKeyMasked: 'mix_••••••••••••',
     statusText: 'Catalog Available — Not Connected',
     isFallbackCatalog: true
   },
@@ -493,7 +501,6 @@ export const DEFAULT_INTEGRATIONS: IntegrationStatus[] = [
     lastSyncAt: null,
     syncedRecordsCount: 0,
     syncFrequency: 'Every 24 Hours',
-    apiKeyMasked: 'dck_••••••••••••',
     statusText: 'Catalog Available — Not Connected',
     isFallbackCatalog: true
   },
@@ -507,21 +514,6 @@ export const DEFAULT_INTEGRATIONS: IntegrationStatus[] = [
     lastSyncAt: null,
     syncedRecordsCount: 0,
     syncFrequency: 'Every 24 Hours',
-    apiKeyMasked: 'SG.••••••••••••',
-    statusText: 'Catalog Available — Not Connected',
-    isFallbackCatalog: true
-  },
-  {
-    id: 'firebase',
-    name: 'Firebase Cloud Firestore & Auth',
-    category: 'database',
-    icon: 'Database',
-    description: 'Active persistent storage with Firebase Cloud Firestore for customer records, profiles, and enterprise security rules.',
-    isConnected: false,
-    lastSyncAt: null,
-    syncedRecordsCount: 0,
-    syncFrequency: 'Real-time',
-    apiKeyMasked: 'AIza••••••••••••',
     statusText: 'Catalog Available — Not Connected',
     isFallbackCatalog: true
   }
@@ -841,15 +833,7 @@ export async function resolvePostLoginRedirect(next?: string): Promise<{
 export async function getAuthConfig(): Promise<{
   isConfigured: boolean;
   oauthProviders: { google: boolean; microsoft: boolean };
-  developerError: string | null;
   siteUrl?: string;
-  diagnostic?: {
-    hasUrl: boolean;
-    hasAnonKey: boolean;
-    source: string;
-    framework: string;
-    backendReachable: boolean;
-  };
 }> {
   let backendData: any = null;
   try {
@@ -861,50 +845,10 @@ export async function getAuthConfig(): Promise<{
     // backend offline or unconfigured
   }
 
-  if (backendData && backendData.configured === true) {
-    const hasAnonKey = typeof backendData.anonKey === 'string' && backendData.anonKey.trim().length > 0;
-    if (backendData.url && hasAnonKey) {
-      try {
-        const { isValidSupabaseUrl, normalizeSupabaseUrl, updateSupabaseClient } = await import('../lib/supabaseClient');
-        const resolvedUrl = normalizeSupabaseUrl(backendData.url, backendData.anonKey);
-        if (isValidSupabaseUrl(resolvedUrl)) {
-          updateSupabaseClient(resolvedUrl, backendData.anonKey, {
-            siteUrl: backendData.siteUrl,
-            oauthProviders: backendData.oauthProviders
-          });
-        }
-      } catch {
-        // Ignore dynamic import errors in non-browser environments
-      }
-    }
-
-    return {
-      isConfigured: true,
-      oauthProviders: backendData?.oauthProviders || { google: true, microsoft: false },
-      developerError: null,
-      siteUrl: backendData?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : ''),
-      diagnostic: {
-        hasUrl: true,
-        hasAnonKey: true,
-        source: 'firebase',
-        framework: 'Vite React SPA',
-        backendReachable: true
-      }
-    };
-  }
-
   return {
     isConfigured: true,
-    oauthProviders: { google: true, microsoft: false },
-    developerError: null,
-    siteUrl: typeof window !== 'undefined' ? window.location.origin : '',
-    diagnostic: {
-      hasUrl: true,
-      hasAnonKey: true,
-      source: 'firebase',
-      framework: 'Vite React SPA',
-      backendReachable: false
-    }
+    oauthProviders: backendData?.oauthProviders || { google: true, microsoft: false },
+    siteUrl: backendData?.siteUrl || (typeof window !== 'undefined' ? window.location.origin : '')
   };
 }
 
@@ -1004,45 +948,6 @@ export async function fetchBillingTransactions(): Promise<{
     }
   });
   return res.json();
-}
-
-// Admin Billing Plans API Calls
-export async function fetchAdminBillingPlans(): Promise<{
-  success: boolean;
-  plans: any[];
-  keyId: string;
-  mode: string;
-}> {
-  const token = getStoredAuthToken();
-  const res = await apiFetch('/api/admin/billing/plans', {
-    headers: {
-      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-    }
-  });
-  return res.json();
-}
-
-export async function createMissingRazorpayTestPlans(confirmationText: string): Promise<{
-  success: boolean;
-  message: string;
-  createdCount: number;
-  plans: any[];
-  error?: string;
-}> {
-  const token = getStoredAuthToken();
-  const res = await apiFetch('/api/admin/billing/plans/create-missing', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-    },
-    body: JSON.stringify({ confirmationText })
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to create missing Razorpay plans');
-  }
-  return data;
 }
 
 // CSV & Manual Data Ingestion Calls
@@ -1318,15 +1223,12 @@ export async function createTrialVerificationOrder(payload: {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
       ...(token ? { 'Authorization': `Bearer ${token}` } : {})
     },
     body: JSON.stringify(payload)
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to initialize trial verification order');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Failed to initialize trial verification order');
 }
 
 export async function verifyTrialPayment(payload: {
@@ -1349,15 +1251,12 @@ export async function verifyTrialPayment(payload: {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
       ...(token ? { 'Authorization': `Bearer ${token}` } : {})
     },
     body: JSON.stringify(payload)
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Trial verification payment failed to verify');
-  }
-  return data;
+  return await parseJsonResponse(res, 'Trial verification payment failed to verify');
 }
 
 export async function activateSubscription(payload: {
@@ -1400,73 +1299,8 @@ export async function fetchSubscriptionDetails(): Promise<{
   return res.json();
 }
 
-export async function fetchFirebaseStatus(): Promise<{
-  success: boolean;
-  url: string;
-  projectId?: string;
-  databaseId?: string;
-  authDomain?: string;
-  isConfigured: boolean;
-  isConnected: boolean;
-  responseCode: number;
-  statusText: string;
-  latencyMs?: number;
-  firebaseLatencyMs?: number;
-  firebaseMode?: string;
-  checklist?: {
-    projectId: string;
-    databaseId: string;
-    authDomain: string;
-    activeMode: string;
-    steps: { id: string; label: string; status: string; details: string }[];
-  };
-  tables: { name: string; recordsCount: number; lastSync: string }[];
-}> {
-  const res = await apiFetch('/api/firebase/status', {
-    headers: getAuthHeaders()
-  });
-  return res.json();
-}
-
-export async function syncFirebase(action = 'export', table = 'customers'): Promise<{
-  success: boolean;
-  action: string;
-  table: string;
-  syncedRecordsCount: number;
-  firebaseSynced?: boolean;
-  timestamp: string;
-  message: string;
-}> {
-  const res = await apiFetch('/api/firebase/sync', {
-    method: 'POST',
-    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ action, table })
-  });
-  return res.json();
-}
-
-export async function testFirebase(): Promise<{
-  success: boolean;
-  url: string;
-  status: string;
-  latencyMs: number;
-  firebaseLatencyMs?: number;
-  firebaseMode?: string;
-  message: string;
-}> {
-  const res = await apiFetch('/api/firebase/test', {
-    method: 'POST',
-    headers: getAuthHeaders()
-  });
-  return res.json();
-}
-
-export const fetchSupabaseStatus = fetchFirebaseStatus;
-export const syncSupabase = syncFirebase;
-export const testSupabase = testFirebase;
-
 // ----------------------------------------------------
-// Real Outbound Integrations (WhatsApp & Resend Email)
+// Outbound Integrations (WhatsApp & Email)
 // ----------------------------------------------------
 
 export interface OutboundStatusResponse {
@@ -1474,21 +1308,13 @@ export interface OutboundStatusResponse {
     configured: boolean;
     status: 'connected' | 'not_configured' | 'error';
     provider: string;
-    maskedIdentifier?: string | null;
-    phoneNumberIdMasked?: string | null;
-    businessAccountIdMasked?: string | null;
-    error?: string | null;
-    requiredEnvVars: string[];
     lastCheckedAt: string;
   };
   email: {
     configured: boolean;
     status: 'connected' | 'not_configured' | 'error';
     provider: string;
-    maskedIdentifier?: string | null;
-    fromEmail: string;
-    error?: string | null;
-    requiredEnvVars: string[];
+    fromEmail?: string | null;
     lastCheckedAt: string;
   };
 }
@@ -1498,8 +1324,6 @@ export interface TestOutboundConfigResponse {
   verified: boolean;
   status: 'connected' | 'not_configured' | 'error';
   message: string;
-  distinction: 'CONFIGURATION_VERIFIED_ONLY_NO_MESSAGE_SENT';
-  requiredEnvVars?: string[];
   safeDetails?: string;
 }
 
@@ -1524,8 +1348,6 @@ export interface SendMessageResponse {
   sentAt?: string;
   message?: string;
   error?: string;
-  requiredEnvVars?: string[];
-  providerResponse?: any;
 }
 
 export async function fetchOutboundStatus(): Promise<OutboundStatusResponse> {
@@ -1770,8 +1592,6 @@ export const apiService = {
   forgotPassword,
   resetPassword,
   createRazorpaySubscription,
-  fetchAdminBillingPlans,
-  createMissingRazorpayTestPlans,
   fetchRazorpayConfig,
   fetchExchangeRate,
   createRazorpayOrder,
@@ -1781,12 +1601,6 @@ export const apiService = {
   verifyTrialPayment,
   activateSubscription,
   fetchSubscriptionDetails,
-  fetchFirebaseStatus,
-  syncFirebase,
-  testFirebase,
-  fetchSupabaseStatus,
-  syncSupabase,
-  testSupabase,
   fetchImportHistory,
   clearImportHistory,
   deleteCustomer,

@@ -1,10 +1,11 @@
 import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
 import http from 'http';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import fs from 'fs';
-import { execSync } from 'child_process';
 import crypto from 'crypto';
 import zlib from 'zlib';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -17,11 +18,11 @@ import {
   normalizePlanTier,
   getPlanPricing,
   getExpectedPlanAmount,
-  buildAuthoritativeBillingPlans,
   validatePaymentMatch,
   AuthoritativeBillingPlanRecord,
   PLAN_LIMITS
 } from './src/config/pricing.ts';
+import { buildAuthoritativeBillingPlans } from './server/billingPlans.ts';
 import {
   getValidatedAuthConfig,
   getAdminClient,
@@ -48,6 +49,10 @@ import {
   startOutboundQueueRunner,
   markEmailUnsubscribed,
   markPhoneOptedOut,
+  isEmailUnsubscribed,
+  isPhoneOptedOut,
+  checkPersistentIdempotencyOrDailyDuplicate,
+  recordPersistentOutboundSend,
   removeWorkspaceQueueItems
 } from './server/outboundQueue.ts';
 import {
@@ -55,7 +60,9 @@ import {
   getSchedulerStatus,
   updateSchedulerSettings,
   getBriefHistory,
-  startSchedulerRunner
+  startSchedulerRunner,
+  hydrateSchedulerFromDb,
+  removeWorkspaceSchedulerData
 } from './server/scheduler.ts';
 import {
   getVerifiedUsdToInrRate,
@@ -101,6 +108,9 @@ function resolveServerPort(): number {
   return 3000;
 }
 const PORT = resolveServerPort();
+
+// Trust first reverse-proxy hop (Cloud Run / Railway / Nginx) for accurate req.ip and req.secure
+app.set('trust proxy', 1);
 
 // Remove server fingerprinting header (Area 14, 18)
 app.disable('x-powered-by');
@@ -201,28 +211,58 @@ app.use((req, res, next) => {
 // ----------------------------------------------------
 // 2. STRICT CORS LOCKDOWN (Area 13) & CSRF DEFENSE (Area 16)
 // ----------------------------------------------------
-const isAllowedOrigin = (orig?: string): boolean => {
+const isAllowedOrigin = (orig?: string, reqHost?: string): boolean => {
   if (!orig) return true;
+  let origHost = '';
+  let normalizedOrig = orig.trim().replace(/\/+$/, '');
+  try {
+    const parsed = new URL(normalizedOrig);
+    origHost = parsed.host;
+    normalizedOrig = `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return false;
+  }
+
   const isProd = process.env.NODE_ENV === 'production' && !process.env.AIS_DEV_ENVIRONMENT;
-  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || process.env.APP_URL || '').replace(/\/+$/, '');
+  const siteUrls = [
+    process.env.NEXT_PUBLIC_SITE_URL,
+    process.env.VITE_SITE_URL,
+    process.env.APP_URL
+  ]
+    .filter((v): v is string => Boolean(v && v.trim()))
+    .map(v => v.trim().replace(/\/+$/, ''));
+
   const allowedOriginsEnv = (process.env.ALLOWED_ORIGINS || '')
     .split(',')
     .map(s => s.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 
-  if (orig.startsWith('http://localhost:') || orig.startsWith('http://127.0.0.1:')) return true;
-  if (orig.endsWith('.run.app') || orig.endsWith('.web.app') || orig.endsWith('.firebaseapp.com')) return true;
-  if (orig.endsWith('.netlify.app') || orig.endsWith('.railway.app') || orig.endsWith('.lovable.app')) return true;
-  if (siteUrl && (orig === siteUrl || orig === siteUrl.replace(/\/+$/, ''))) return true;
-  if (allowedOriginsEnv.includes(orig)) return true;
-  if (!isProd) return true;
+  if (reqHost && origHost === reqHost) return true;
+  if (siteUrls.includes(normalizedOrig)) return true;
+  if (allowedOriginsEnv.includes(normalizedOrig)) return true;
+  if (!isProd && (normalizedOrig.startsWith('http://localhost:') || normalizedOrig.startsWith('http://127.0.0.1:'))) {
+    return true;
+  }
+  if (!isProd) {
+    if (
+      origHost.endsWith('.run.app') ||
+      origHost.endsWith('.web.app') ||
+      origHost.endsWith('.firebaseapp.com') ||
+      origHost.endsWith('.netlify.app') ||
+      origHost.endsWith('.railway.app') ||
+      origHost.endsWith('.onslate.in')
+    ) {
+      return true;
+    }
+  }
   return false;
 };
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
+  const reqHost = req.get('host');
 
-  if (origin && isAllowedOrigin(origin)) {
+  if (origin && isAllowedOrigin(origin, reqHost)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Vary', 'Origin');
@@ -230,29 +270,43 @@ app.use((req, res, next) => {
 
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-session-token, x-workspace-id, x-razorpay-signature, x-razorpay-event-id'
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-session-token, x-workspace-id, x-razorpay-signature, x-razorpay-event-id, x-hub-signature-256'
   );
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
 
   if (req.method === 'OPTIONS') {
+    if (origin && !isAllowedOrigin(origin, reqHost)) {
+      return res.status(403).end();
+    }
     return res.status(204).end();
   }
 
   // Anti-CSRF check for cookie-authenticated state-changing operations (Area 16)
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
     const hasAuthHeader = req.headers.authorization || req.headers['x-session-token'];
-    const hasCookie = req.cookies && (req.cookies['sb-access-token'] || req.cookies['churnveda_session'] || req.cookies['nochurn_session']);
-    // If request uses cookie session without explicit auth header and is not a public webhook
-    if (!hasAuthHeader && hasCookie && !req.path.startsWith('/api/razorpay/webhook')) {
+    const hasCookie =
+      req.cookies &&
+      (req.cookies['cs-access-token'] ||
+        req.cookies['sb-access-token'] ||
+        req.cookies['churnveda_session'] ||
+        req.cookies['nochurn_session']);
+    const isPublicWebhook =
+      req.path.startsWith('/api/razorpay/webhook') ||
+      req.path.startsWith('/api/whatsapp/webhook');
+
+    if (!hasAuthHeader && hasCookie && !isPublicWebhook) {
       const originHeader = req.headers.origin;
       const refererHeader = req.headers.referer;
-      if (originHeader && !isAllowedOrigin(originHeader)) {
+      if (originHeader && !isAllowedOrigin(originHeader, reqHost)) {
         console.warn(`[CSRF Protection] Rejected state-changing request from unauthorized origin: ${originHeader}`);
         return res.status(403).json({ success: false, error: 'Cross-Site Request Forgery (CSRF) attempt blocked.', code: 'CSRF_BLOCKED' });
       }
-      if (!originHeader && refererHeader && !isAllowedOrigin(refererHeader)) {
+      if (!originHeader && refererHeader && !isAllowedOrigin(refererHeader, reqHost)) {
         console.warn(`[CSRF Protection] Rejected state-changing request from unauthorized referer: ${refererHeader}`);
         return res.status(403).json({ success: false, error: 'Cross-Site Request Forgery (CSRF) attempt blocked.', code: 'CSRF_BLOCKED' });
+      }
+      if (!originHeader && !refererHeader) {
+        return res.status(403).json({ success: false, error: 'Cross-Site Request Forgery (CSRF) Origin or Referer header required for cookie auth.', code: 'CSRF_BLOCKED' });
       }
     }
   }
@@ -517,49 +571,6 @@ app.get('/sitemap.xml', (req, res) => {
 </urlset>`);
 });
 
-// SOURCE CODE & DEPLOYMENT ARCHIVE DIRECT DOWNLOAD ENDPOINT (Automatic Generation & Fallback)
-app.get([
-  '/churnveda-source-code.zip',
-  '/download/churnveda-source-code.zip',
-  '/churnveda-deployment.zip',
-  '/download/churnveda-deployment.zip',
-  '/churnveda-lovable-export.zip',
-  '/download/churnveda-lovable-export.zip',
-  '/api/download/project-zip'
-], (req, res) => {
-  const reqUrl = req.path;
-  const isDeployFolderReq = reqUrl.includes('churnveda-deployment');
-  const targetFile = isDeployFolderReq ? 'churnveda-deployment.zip' : 'churnveda-source-code.zip';
-  const zipPath = path.join(process.cwd(), 'public', targetFile);
-
-  if (!fs.existsSync(zipPath)) {
-    try {
-      console.log(`[Churnveda Packaging] Generating ${targetFile} on demand...`);
-      execSync('python3 scripts/package-deployment.py', { cwd: process.cwd() });
-    } catch (err: any) {
-      console.error('[Churnveda Packaging] Error generating deployment ZIP:', err.message);
-    }
-  }
-
-  if (fs.existsSync(zipPath)) {
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${targetFile}"`);
-    return res.download(zipPath, targetFile);
-  }
-  return res.status(500).json({ error: 'Archive could not be generated.' });
-});
-
-app.post('/api/download/regenerate', (_req, res) => {
-  try {
-    execSync('python3 scripts/package-deployment.py', { cwd: process.cwd() });
-    const zipPath = path.join(process.cwd(), 'public', 'churnveda-deployment.zip');
-    const size = fs.existsSync(zipPath) ? fs.statSync(zipPath).size : 0;
-    return res.json({ success: true, message: 'Deployment archive generated successfully', size });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 app.use(express.json({
   limit: '80mb',
   verify: (req: any, _res, buf) => {
@@ -640,7 +651,7 @@ app.post('/api/contact', publicFormLimiter, async (req, res) => {
     });
     if (contactSubmissions.length > 200) contactSubmissions.pop();
 
-    console.log(`[Contact Form] Recorded ticket ${ticketId} from ${email} (emailDispatched=${emailDispatched})`);
+    console.log(`[Contact Form] Recorded ticket ${ticketId} (emailDispatched=${emailDispatched})`);
     return res.json({
       success: true,
       ticketId,
@@ -721,7 +732,7 @@ export interface DbTrialVerification {
   razorpay_plan_id: string;
   razorpay_order_id: string;
   amount_cents: number; // exactly 100 cents ($1.00 USD)
-  currency: 'USD';
+  currency: 'USD' | 'INR';
   status: 'pending' | 'verified' | 'failed';
   payment_id?: string;
   verified_at?: string;
@@ -998,11 +1009,15 @@ async function syncDatabaseOnBoot() {
 
         if (dbUsers && dbUsers.length > 0) {
           for (const du of dbUsers) {
+            const hydratedUser = {
+              ...du,
+              trial_end_date: (du as any).trial_end_date || (du as any).trial_ends_at
+            };
             const idx = usersDatabase.findIndex(u => u.id === du.id);
             if (idx >= 0) {
-              usersDatabase[idx] = { ...usersDatabase[idx], ...du } as any;
+              usersDatabase[idx] = { ...usersDatabase[idx], ...hydratedUser } as any;
             } else {
-              usersDatabase.push(du as any);
+              usersDatabase.push(hydratedUser as any);
             }
           }
         }
@@ -1048,7 +1063,8 @@ async function syncDatabaseOnBoot() {
       } catch (e: any) {
         console.warn('[Churnveda DB Boot Warning] Entity hydration:', e.message);
       }
-    })()
+    })(),
+    hydrateSchedulerFromDb()
   ]);
 }
 
@@ -1286,7 +1302,7 @@ async function resolveAuthorizedWorkspace(req: express.Request, user: DbUser): P
     return requested;
   }
 
-  console.warn(`[IDOR Protection] User ${user.email} (${user.id}) denied access to foreign workspace ${requested}. Enforcing ${userWorkspaceId}.`);
+  console.warn(`[IDOR Protection] User ${user.id} denied access to foreign workspace. Enforcing ${userWorkspaceId}.`);
   return userWorkspaceId;
 }
 
@@ -1348,7 +1364,7 @@ async function requireAdmin(req: express.Request, res: express.Response, next: e
   });
 }
 
-let integrationsState: IntegrationStatus[] = [
+const DEFAULT_INTEGRATIONS_TEMPLATE: IntegrationStatus[] = [
   {
     id: 'razorpay',
     name: 'Razorpay Recurring Billing & Subscriptions',
@@ -1359,7 +1375,6 @@ let integrationsState: IntegrationStatus[] = [
     lastSyncAt: new Date(Date.now() - 3600000 * 1).toISOString(),
     syncedRecordsCount: 50,
     syncFrequency: 'Every 24 Hours',
-    apiKeyMasked: 'rzp_test_••••••••9ENW',
     statusText: 'Connected & Syncing'
   },
   {
@@ -1372,7 +1387,6 @@ let integrationsState: IntegrationStatus[] = [
     lastSyncAt: new Date(Date.now() - 3600000 * 2).toISOString(),
     syncedRecordsCount: 1420,
     syncFrequency: 'Every 24 Hours',
-    apiKeyMasked: 'mix_token_••••••••1104',
     statusText: 'Connected (Events streaming)'
   },
   {
@@ -1385,7 +1399,6 @@ let integrationsState: IntegrationStatus[] = [
     lastSyncAt: new Date(Date.now() - 3600000 * 6).toISOString(),
     syncedRecordsCount: 128,
     syncFrequency: 'Every 24 Hours',
-    apiKeyMasked: 'dck_••••••••3319',
     statusText: 'Connected (Ticket sync active)'
   },
   {
@@ -1398,27 +1411,30 @@ let integrationsState: IntegrationStatus[] = [
     lastSyncAt: new Date(Date.now() - 3600000 * 8).toISOString(),
     syncedRecordsCount: 3450,
     syncFrequency: 'Every 24 Hours',
-    apiKeyMasked: 'SG.••••••••4481',
     statusText: 'Connected (Webhook feed verified)'
-  },
-  {
-    id: 'firebase',
-    name: 'Firebase Cloud Firestore & Auth',
-    category: 'database',
-    icon: 'Database',
-    description: 'Active persistent storage with Firebase Cloud Firestore for customer records, profiles, and enterprise security rules.',
-    isConnected: true,
-    lastSyncAt: new Date().toISOString(),
-    syncedRecordsCount: 50,
-    syncFrequency: 'Real-time',
-    apiKeyMasked: 'AIzaSy••••••••sQ',
-    statusText: 'Connected & Live (Firebase Cloud Firestore)'
   }
 ];
 
-let dailyAlerts: DailyAlert[] = [
+const workspaceIntegrationsMap = new Map<string, IntegrationStatus[]>();
+
+function getWorkspaceIntegrations(workspaceId: string): IntegrationStatus[] {
+  let list = workspaceIntegrationsMap.get(workspaceId);
+  if (!list) {
+    list = DEFAULT_INTEGRATIONS_TEMPLATE.map(item => ({
+      ...item,
+      isConnected: workspaceId === 'ws-default' ? item.isConnected : false,
+      syncedRecordsCount: workspaceId === 'ws-default' ? item.syncedRecordsCount : 0,
+      statusText: workspaceId === 'ws-default' ? item.statusText : 'Not connected'
+    }));
+    workspaceIntegrationsMap.set(workspaceId, list);
+  }
+  return list;
+}
+
+let dailyAlerts: Array<DailyAlert & { workspaceId?: string }> = [
   {
     id: 'alert-today',
+    workspaceId: 'ws-default',
     timestamp: new Date().toISOString(),
     title: 'Daily 9:00 AM Digest: 5 customers moved to high-risk today',
     customersCount: 5,
@@ -1435,6 +1451,7 @@ let dailyAlerts: DailyAlert[] = [
   },
   {
     id: 'alert-yesterday',
+    workspaceId: 'ws-default',
     timestamp: new Date(Date.now() - 86400000).toISOString(),
     title: 'Daily 9:00 AM Digest: 3 customers reached critical threshold',
     customersCount: 3,
@@ -1693,54 +1710,16 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', service: 'churnveda', timestamp: new Date().toISOString() });
 });
 
-app.get('/api/health', async (_req, res) => {
-  const hasKey = Boolean(process.env.GEMINI_API_KEY);
-  const [dbHealth, fbHealth] = await Promise.all([
-    db.getHealth(),
-    firebaseBackend.testConnection(null)
-  ]);
+app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
-    geminiConfigured: hasKey,
-    model: 'gemini-3.1-flash-lite',
-    database: {
-      ...dbHealth,
-      firebase: {
-        projectId: firebaseConfig.projectId,
-        databaseId: firebaseConfig.firestoreDatabaseId,
-        ...fbHealth
-      }
-    },
-    totalCustomers: customersDatabase.length
+    timestamp: new Date().toISOString()
   });
 });
 
-// 1B. Admin-Only Database Persistence & Multi-Tenant Self-Test (Area 7)
-app.all('/api/admin/db-test', requireAdmin, async (req, res) => {
-  try {
-    const fbCtx = getFirebaseCtx(req);
-    const [results, fbProbe] = await Promise.all([
-      db.admin.runSelfTest(),
-      firebaseBackend.testConnection(fbCtx)
-    ]);
-    const tests = Array.isArray(results.tests) ? [...results.tests] : [];
-    tests.push({
-      test: 'Firebase Cloud Firestore Backend',
-      description: 'Verify live Firestore endpoint connectivity, rules enforcement, and backend synchronization layer.',
-      passed: fbProbe.reachable,
-      details: `${fbProbe.details} (${fbProbe.latencyMs}ms, mode: ${fbProbe.mode})`
-    });
-    res.json({
-      ...results,
-      allPassed: Boolean(results.allPassed && fbProbe.reachable),
-      tests
-    });
-  } catch (error: any) {
-    res.status(500).json({
-      allPassed: false,
-      error: 'Database self-test failed'
-    });
-  }
+// Internal DB diagnostic route disabled in customer-facing API
+app.all('/api/admin/db-test', (_req, res) => {
+  res.status(404).json({ success: false, error: 'Endpoint not found' });
 });
 
 // 2. Customers List with filtering, sorting, pagination (TENANT ISOLATED - Area 1, 2, 17)
@@ -2108,22 +2087,23 @@ app.post('/api/customers/load-demo', requireAuth, async (req, res) => {
 app.post('/api/churn/predict', requireAuth, aiRateLimiter, async (req, res) => {
   const { customerId } = req.body;
   const targetWorkspace = (req as any).workspaceId as string;
+
+  const access = getWorkspaceAccessStatus(targetWorkspace);
+  if (!access.isAllowedAccess) {
+    return res.status(403).json({
+      success: false,
+      error: access.message || 'Your subscription or trial is inactive. Please choose a plan to run AI churn analysis.',
+      code: access.status === 'trial_expired' ? 'TRIAL_EXPIRED' : 'SUBSCRIPTION_INACTIVE',
+      trialExpired: access.status === 'trial_expired'
+    });
+  }
+
   const customer = customersDatabase.find(
     c => (c.workspaceId || 'ws-default') === targetWorkspace && (c.id === customerId || c.customerId === customerId)
   );
 
   if (!customer) {
     return res.status(404).json({ error: 'Customer not found in your workspace' });
-  }
-
-  const access = getWorkspaceAccessStatus(targetWorkspace);
-  if (!access.isAllowedAccess && access.status === 'trial_expired') {
-    return res.status(403).json({
-      success: false,
-      error: 'Your 14-day free trial has ended. Please choose a plan to run AI churn analysis.',
-      code: 'TRIAL_EXPIRED',
-      trialExpired: true
-    });
   }
 
   const ai = getGenAI();
@@ -2149,7 +2129,7 @@ app.post('/api/churn/predict', requireAuth, aiRateLimiter, async (req, res) => {
       success: true,
       analysis: fallback,
       source: 'algorithmic-engine',
-      message: 'Analyzed via rule engine (Add GEMINI_API_KEY for live LLM reasoning)'
+      message: 'Analyzed via predictive retention scoring engine'
     });
   }
 
@@ -2274,6 +2254,16 @@ Return a strictly valid JSON object matching this schema:
 app.post('/api/churn/recommend', requireAuth, aiRateLimiter, async (req, res) => {
   const { customerId } = req.body;
   const targetWorkspace = (req as any).workspaceId as string;
+  const access = getWorkspaceAccessStatus(targetWorkspace);
+  if (!access.isAllowedAccess) {
+    return res.status(403).json({
+      success: false,
+      error: access.message || 'Your subscription or trial is inactive. Please choose a plan to generate retention playbooks.',
+      code: access.status === 'trial_expired' ? 'TRIAL_EXPIRED' : 'SUBSCRIPTION_INACTIVE',
+      trialExpired: access.status === 'trial_expired'
+    });
+  }
+
   const fbCtx = getFirebaseCtx(req);
   const customer = customersDatabase.find(
     c => (c.workspaceId || 'ws-default') === targetWorkspace && (c.id === customerId || c.customerId === customerId)
@@ -2422,6 +2412,16 @@ Return strictly valid JSON:
 app.post('/api/churn/batch-predict', requireAuth, aiRateLimiter, async (req, res) => {
   const { customerIds } = req.body;
   const targetWorkspace = (req as any).workspaceId as string;
+  const access = getWorkspaceAccessStatus(targetWorkspace);
+  if (!access.isAllowedAccess) {
+    return res.status(403).json({
+      success: false,
+      error: access.message || 'Your subscription or trial is inactive. Please choose a plan to run batch churn analysis.',
+      code: access.status === 'trial_expired' ? 'TRIAL_EXPIRED' : 'SUBSCRIPTION_INACTIVE',
+      trialExpired: access.status === 'trial_expired'
+    });
+  }
+
   const workspaceCustomers = customersDatabase.filter(c => (c.workspaceId || 'ws-default') === targetWorkspace);
   const targets = customerIds && Array.isArray(customerIds)
     ? workspaceCustomers.filter(c => customerIds.includes(c.id) || (c.customerId && customerIds.includes(c.customerId)))
@@ -2479,45 +2479,44 @@ app.post('/api/churn/batch-predict', requireAuth, aiRateLimiter, async (req, res
   });
 });
 
-// 8. Integrations Endpoints (Area 1, 2, 5, 17)
-app.get('/api/integrations', async (req, res) => {
+// 8. Integrations Endpoints (Authenticated + Tenant Scoped)
+app.get('/api/integrations', requireAuth, async (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  const workspaceId = (req as any).workspaceId as string;
+  const wsIntegrations = getWorkspaceIntegrations(workspaceId);
   try {
-    const authUser = await resolveAuthUser(req);
-    if (authUser) {
-      (req as any).user = authUser;
-      (req as any).workspaceId = await resolveAuthorizedWorkspace(req, authUser);
-      const fbCtx = getFirebaseCtx(req);
-      if (fbCtx) {
-        const remote = await firebaseBackend.integrations.list(fbCtx).catch(() => []);
-        if (remote.length > 0) {
-          const merged = integrationsState.map(local => {
-            const match = remote.find(r => r.id === local.id);
-            return match
-              ? {
-                  ...local,
-                  isConnected: typeof match.isConnected === 'boolean' ? match.isConnected : local.isConnected,
-                  syncedRecordsCount:
-                    typeof match.syncedRecordsCount === 'number' ? match.syncedRecordsCount : local.syncedRecordsCount,
-                  statusText: match.statusText || local.statusText,
-                  lastSyncAt: match.lastSyncAt || local.lastSyncAt
-                }
-              : local;
-          });
-          return res.json(merged);
-        }
+    const fbCtx = getFirebaseCtx(req);
+    if (fbCtx) {
+      const remote = await firebaseBackend.integrations.list(fbCtx).catch(() => []);
+      if (remote.length > 0) {
+        const merged = wsIntegrations.map(local => {
+          const match = remote.find(r => r.id === local.id);
+          return match
+            ? {
+                ...local,
+                isConnected: typeof match.isConnected === 'boolean' ? match.isConnected : local.isConnected,
+                syncedRecordsCount:
+                  typeof match.syncedRecordsCount === 'number' ? match.syncedRecordsCount : local.syncedRecordsCount,
+                statusText: match.statusText || local.statusText,
+                lastSyncAt: match.lastSyncAt || local.lastSyncAt
+              }
+            : local;
+        });
+        return res.json(merged);
       }
     }
   } catch {
-    // fallback to default integrations state
+    // fallback to workspace integrations state
   }
-  res.json(integrationsState);
+  res.json(wsIntegrations.map(({ ...item }) => item));
 });
 
 app.post('/api/integrations/sync', requireAuth, async (req, res) => {
   const { integrationId } = req.body;
+  const workspaceId = (req as any).workspaceId as string;
+  const wsIntegrations = getWorkspaceIntegrations(workspaceId);
   const fbCtx = getFirebaseCtx(req);
-  const target = integrationsState.find(i => i.id === integrationId);
+  const target = wsIntegrations.find(i => i.id === integrationId);
   if (target) {
     target.lastSyncAt = new Date().toISOString();
     target.statusText = 'Synced successfully just now';
@@ -2526,22 +2525,22 @@ app.post('/api/integrations/sync', requireAuth, async (req, res) => {
       await firebaseBackend.integrations.upsert(fbCtx, target).catch(() => {});
     }
   } else {
-    // sync all
-    integrationsState.forEach(i => {
+    wsIntegrations.forEach(i => {
       i.lastSyncAt = new Date().toISOString();
       i.statusText = 'Synced successfully just now';
     });
     if (fbCtx) {
-      await Promise.all(integrationsState.map(i => firebaseBackend.integrations.upsert(fbCtx, i).catch(() => {})));
+      await Promise.all(wsIntegrations.map(i => firebaseBackend.integrations.upsert(fbCtx, i).catch(() => {})));
     }
   }
-  res.json({ success: true, integrations: integrationsState });
+  res.json({ success: true, integrations: wsIntegrations });
 });
 
 app.post('/api/integrations/toggle', requireAuth, async (req, res) => {
   const { integrationId, isConnected } = req.body;
   const authUser = (req as any).user as DbUser;
   const workspaceId = (req as any).workspaceId as string;
+  const wsIntegrations = getWorkspaceIntegrations(workspaceId);
   const fbCtx = getFirebaseCtx(req);
   const tier = getWorkspacePlanTier(workspaceId);
   const planLimits = PLAN_LIMITS[tier];
@@ -2555,7 +2554,7 @@ app.post('/api/integrations/toggle', requireAuth, async (req, res) => {
         error: `Custom integrations are not available on the ${tier.toUpperCase()} plan. Upgrade to Growth (2 custom integrations) or Enterprise (10 custom integrations).`
       });
     }
-    const currentActive = integrationsState.filter(i => i.isConnected && !['whatsapp', 'email', 'resend'].includes(i.id.toLowerCase())).length;
+    const currentActive = wsIntegrations.filter(i => i.isConnected && !['whatsapp', 'email', 'resend'].includes(i.id.toLowerCase())).length;
     if (currentActive >= planLimits.customIntegrations) {
       return res.status(403).json({
         success: false,
@@ -2564,7 +2563,7 @@ app.post('/api/integrations/toggle', requireAuth, async (req, res) => {
     }
   }
 
-  const target = integrationsState.find(i => i.id === integrationId);
+  const target = wsIntegrations.find(i => i.id === integrationId);
   if (target) {
     target.isConnected = Boolean(isConnected);
     target.statusText = target.isConnected ? 'Connected' : 'Disconnected';
@@ -2596,7 +2595,7 @@ app.post('/api/integrations/toggle', requireAuth, async (req, res) => {
     // ignore
   }
 
-  res.json({ success: true, integrations: integrationsState });
+  res.json({ success: true, integrations: wsIntegrations });
 });
 
 // ----------------------------------------------------
@@ -2719,8 +2718,7 @@ app.post('/api/customers/manual', requireAuth, csvImportLimiter, async (req, res
     return res.status(400).json({ error: 'Please enter a valid email address' });
   }
 
-  const authUser = getAuthUser(req);
-  const targetWorkspace = (req.headers['x-workspace-id'] as string) || authUser?.workspace_id || 'ws-default';
+  const targetWorkspace = (req as any).workspaceId as string;
 
   // Server-side trial access control (Requirements 3, 4, 6)
   const access = getWorkspaceAccessStatus(targetWorkspace);
@@ -3635,27 +3633,23 @@ app.get('/api/customers/import/history', requireAuth, async (req, res) => {
   res.json({ success: true, history });
 });
 
-// 10. Alerts & Slack Endpoints (Area 2)
-app.get('/api/alerts', async (req, res) => {
+// 10. Alerts & Slack Endpoints (Authenticated + Tenant Scoped)
+app.get('/api/alerts', requireAuth, async (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  const workspaceId = (req as any).workspaceId as string;
   try {
-    const authUser = await resolveAuthUser(req);
-    if (authUser) {
-      (req as any).user = authUser;
-      (req as any).workspaceId = await resolveAuthorizedWorkspace(req, authUser);
-      const fbCtx = getFirebaseCtx(req);
-      if (fbCtx) {
-        const remoteAlerts = await firebaseBackend.alerts.list(fbCtx).catch(() => []);
-        if (remoteAlerts.length > 0) {
-          const seen = new Set(remoteAlerts.map(a => a.id));
-          return res.json([...remoteAlerts, ...dailyAlerts.filter(a => !seen.has(a.id))]);
-        }
+    const fbCtx = getFirebaseCtx(req);
+    if (fbCtx) {
+      const remoteAlerts = await firebaseBackend.alerts.list(fbCtx).catch(() => []);
+      if (remoteAlerts.length > 0) {
+        return res.json(remoteAlerts);
       }
     }
   } catch {
-    // fallback to default alerts
+    // fallback to workspace alerts
   }
-  res.json(dailyAlerts);
+  const scoped = dailyAlerts.filter((a: any) => (a.workspaceId || 'ws-default') === workspaceId);
+  res.json(scoped);
 });
 
 app.post('/api/alerts/trigger-daily', requireAuth, async (req, res) => {
@@ -3664,8 +3658,9 @@ app.post('/api/alerts/trigger-daily', requireAuth, async (req, res) => {
   const atRisk = customersDatabase.filter(c => (c.workspaceId || 'ws-default') === targetWorkspace && c.riskScore >= 61).slice(0, 5);
   const totalMrrRisk = atRisk.reduce((acc, c) => acc + c.mrr, 0);
 
-  const newAlert: DailyAlert = {
+  const newAlert: DailyAlert & { workspaceId?: string } = {
     id: `alert-${Date.now()}`,
+    workspaceId: targetWorkspace,
     timestamp: new Date().toISOString(),
     title: `Daily 9:00 AM Digest: ${atRisk.length} customers moved to high-risk today`,
     customersCount: atRisk.length,
@@ -3786,8 +3781,8 @@ app.get('/api/export', requireAuth, async (req, res) => {
 app.get('/api/storage/signed-url', requireAuth, async (req, res) => {
   const targetWorkspace = (req as any).workspaceId as string;
   const bucket = (req.query.bucket as string || 'customer-imports') as StorageBucketId;
-  const filePath = req.query.path as string;
-  const expiresIn = Math.min(3600, parseInt(req.query.expiresIn as string || '900', 10));
+  const filePath = (req.query.path || req.query.filePath) as string;
+  const expiresIn = Math.min(3600, Math.max(60, parseInt(req.query.expiresIn as string || '900', 10) || 900));
 
   if (!filePath || typeof filePath !== 'string') {
     return res.status(400).json({ success: false, error: 'Query parameter "path" is required.' });
@@ -3806,6 +3801,8 @@ app.get('/api/storage/signed-url', requireAuth, async (req, res) => {
 
   res.json({
     success: true,
+    bucket,
+    filePath,
     signedUrl: result.signedUrl,
     expiresInSeconds: expiresIn
   });
@@ -3899,6 +3896,25 @@ app.post('/api/auth/delete-account', requireAuth, async (req, res) => {
   }
   const removedQueue = removeWorkspaceQueueItems(targetWorkspace);
   if (removedQueue >= 0) servicesCleaned.push('Outbound Messaging Queue');
+  if (targetWorkspace !== 'ws-default') {
+    removeWorkspaceSchedulerData(targetWorkspace);
+    workspaceIntegrationsMap.delete(targetWorkspace);
+    servicesCleaned.push('Scheduler & Integrations Cache');
+  }
+
+  // Purge Firestore user/workspace docs (best-effort via Admin SDK or verified ID token)
+  try {
+    const fsPurge = await firebaseBackend.privacy.purgeUserAndWorkspace(getFirebaseCtx(req));
+    if (fsPurge.purgedDocs > 0) servicesCleaned.push('Cloud Firestore Workspace Docs');
+  } catch (fsErr: any) {
+    console.warn('[Account Deletion] Firestore purge skipped:', fsErr?.message || 'error');
+  }
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()) {
+    try {
+      await firebaseAdminAuth.deleteUser(authUser.id);
+      servicesCleaned.push('Firebase Auth Identity');
+    } catch {}
+  }
 
   // 3. Delete rows across PostgreSQL/SQLite tables & in-memory stores
   let deletedTables: Record<string, number> = {};
@@ -3934,6 +3950,11 @@ app.post('/api/auth/delete-account', requireAuth, async (req, res) => {
     for (let i = subscriptionsDatabase.length - 1; i >= 0; i--) {
       if (subscriptionsDatabase[i].workspace_id === targetWorkspace) {
         subscriptionsDatabase.splice(i, 1);
+      }
+    }
+    for (let i = dailyAlerts.length - 1; i >= 0; i--) {
+      if (dailyAlerts[i].workspaceId === targetWorkspace) {
+        dailyAlerts.splice(i, 1);
       }
     }
   }
@@ -4008,8 +4029,12 @@ app.post('/api/communications/whatsapp-stop', async (req, res) => {
   if (!phone || typeof phone !== 'string') {
     return res.status(400).json({ error: 'Valid phone number is required.' });
   }
-  markPhoneOptedOut(phone);
-  await db.unsubscribes.add('whatsapp', phone).catch(() => {});
+  const normalizedPhone = phone.replace(/[\s\(\)\-\.]/g, '').replace(/^\+/, '');
+  if (!/^[1-9]\d{6,14}$/.test(normalizedPhone)) {
+    return res.status(400).json({ error: 'Valid phone number is required.' });
+  }
+  markPhoneOptedOut(normalizedPhone);
+  await db.unsubscribes.add('whatsapp', normalizedPhone).catch(() => {});
   res.json({
     success: true,
     message: `Phone number ${phone} has been opted out of WhatsApp retention messages.`,
@@ -4025,19 +4050,9 @@ app.post('/api/communications/whatsapp-stop', async (req, res) => {
 app.get('/api/auth/config', (_req, res) => {
   const config = getValidatedAuthConfig();
   res.json({
-    configured: config.isConfigured,
-    url: config.supabaseUrl,
-    anonKey: config.supabaseAnonKey,
+    configured: true,
     siteUrl: config.siteUrl,
-    oauthProviders: config.oauthProviders,
-    diagnostic: {
-      hasUrl: Boolean(config.supabaseUrl),
-      hasAnonKey: Boolean(config.supabaseAnonKey),
-      hasServiceRoleKey: Boolean(config.supabaseServiceRoleKey),
-      checkedConventions: ['VITE_*', 'SUPABASE_*', 'NEXT_PUBLIC_*'],
-      projectRef: config.projectRef || (config.supabaseUrl ? config.supabaseUrl.replace(/^https?:\/\//, '').split('.')[0] : 'unconfigured'),
-      framework: 'Vite React SPA (with Railway backend)'
-    }
+    oauthProviders: config.oauthProviders
   });
 });
 
@@ -4593,7 +4608,7 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
           updated_at: trialStartDate
         };
         referralsDatabase.push(refRecord);
-        console.log(`[Referral Recorded]: User ${cleanEmail} registered using code ${inputRefCode} from ${referrerUser.email}`);
+        console.log(`[Referral Recorded]: Workspace ${workspaceId} registered using referral code ${inputRefCode}`);
       }
     }
   }
@@ -4911,11 +4926,9 @@ app.post('/api/auth/forgot-password', authRateLimiter, async (req, res) => {
     }
   }
 
-  let generatedToken: string | undefined = undefined;
-
-  // Only create token if user exists
+  // Only create token if user exists (never return token in HTTP response)
   if (user) {
-    generatedToken = `rst_${Date.now()}_${crypto.randomBytes(16).toString('hex')}`;
+    const generatedToken = `rst_${Date.now()}_${crypto.randomBytes(24).toString('hex')}`;
     resetTokensDatabase.set(generatedToken, {
       email: cleanEmail,
       expiresAt: Date.now() + 24 * 3600000 // valid for 24 hours
@@ -4924,6 +4937,24 @@ app.post('/api/auth/forgot-password', authRateLimiter, async (req, res) => {
     try {
       await db.passwordResetTokens.set(generatedToken, cleanEmail, Date.now() + 24 * 3600000);
     } catch (e: any) {}
+
+    // Dispatch reset email via Resend if configured
+    const resendKey = process.env.RESEND_API_KEY?.trim();
+    const resendFrom = process.env.RESEND_FROM_EMAIL?.trim() || 'Churnveda <onboarding@resend.dev>';
+    const appBase = (process.env.APP_URL || process.env.VITE_SITE_URL || 'https://churnveda.com').trim().replace(/\/+$/, '');
+    const resetLink = `${appBase}/#reset-password?token=${encodeURIComponent(generatedToken)}`;
+    if (resendKey) {
+      fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: resendFrom,
+          to: [cleanEmail],
+          subject: 'Reset your Churnveda password',
+          text: `Hello ${user.full_name || 'there'},\n\nUse this single-use link (valid for 24 hours) to reset your Churnveda password:\n${resetLink}\n\nIf you did not request this, you can safely ignore this email.`
+        })
+      }).catch(() => {});
+    }
 
     await db.auditLogs.record({
       workspaceId: user.workspace_id,
@@ -4937,11 +4968,10 @@ app.post('/api/auth/forgot-password', authRateLimiter, async (req, res) => {
     });
   }
 
-  // Always return generic message to prevent account enumeration (Area 18)
+  // Always return generic message to prevent account enumeration & token leakage (Area 18)
   res.json({
     success: true,
-    message: 'If an account exists, we sent a password-reset link.',
-    token: generatedToken // Provided for testing/sandbox development verification
+    message: 'If an account exists, we sent a password-reset link.'
   });
 });
 
@@ -5433,7 +5463,7 @@ export function generateReferralCode(seedName?: string): string {
  * TRIAL_EXPIRED: Product actions restricted, billing & view-only data accessible
  */
 export function getWorkspaceAccessStatus(workspaceId: string): {
-  status: 'trialing' | 'active' | 'trial_expired' | 'cancelled';
+  status: 'trialing' | 'active' | 'trial_expired' | 'cancelled' | 'past_due';
   tier: 'starter' | 'growth' | 'pro';
   daysRemaining: number;
   trialEndsAt?: string;
@@ -5442,14 +5472,46 @@ export function getWorkspaceAccessStatus(workspaceId: string): {
 } {
   const now = Date.now();
   const sub = subscriptionsDatabase.find(s => s.workspace_id === workspaceId);
+  const user = usersDatabase.find(u => u.workspace_id === workspaceId);
 
-  // Active paid subscription
+  // Check active paid subscription (including period expiry enforcement)
   if (sub && sub.status === 'active') {
+    const periodEndMs = user?.current_period_end ? new Date(user.current_period_end).getTime() : null;
+    if (periodEndMs && !Number.isNaN(periodEndMs) && periodEndMs <= now) {
+      sub.status = 'trial_expired';
+      if (user) user.billing_status = 'trial_expired';
+      return {
+        status: 'trial_expired',
+        tier: sub.tier || 'growth',
+        daysRemaining: 0,
+        trialEndsAt: user?.current_period_end,
+        isAllowedAccess: false,
+        message: 'Your subscription billing period has expired. Please renew to continue using Churnveda.'
+      };
+    }
     return {
       status: 'active',
       tier: sub.tier || 'growth',
-      daysRemaining: 0,
+      daysRemaining: periodEndMs ? Math.max(0, Math.ceil((periodEndMs - now) / 86400000)) : 0,
       isAllowedAccess: true
+    };
+  }
+
+  // Explicitly block halted / cancelled / past_due / expired subscription records (no fallthrough!)
+  if (sub && (sub.status === 'cancelled' || sub.status === 'halted' || sub.status === 'past_due' || sub.status === 'trial_expired')) {
+    const mappedStatus = sub.status === 'halted' ? 'past_due' : sub.status;
+    return {
+      status: mappedStatus,
+      tier: sub.tier || 'growth',
+      daysRemaining: 0,
+      trialEndsAt: sub.trial_ends_at,
+      isAllowedAccess: false,
+      message:
+        mappedStatus === 'cancelled'
+          ? 'Your subscription has been cancelled. Reactivate a plan to resume automated retention actions.'
+          : mappedStatus === 'past_due'
+            ? 'Your subscription payment failed or was halted. Update your payment method to restore access.'
+            : 'Your 14-day free trial has ended. Choose a plan to continue using Churnveda.'
     };
   }
 
@@ -5467,6 +5529,7 @@ export function getWorkspaceAccessStatus(workspaceId: string): {
       };
     } else {
       sub.status = 'trial_expired';
+      if (user) user.billing_status = 'trial_expired';
       return {
         status: 'trial_expired',
         tier: sub.tier || 'growth',
@@ -5479,14 +5542,40 @@ export function getWorkspaceAccessStatus(workspaceId: string): {
   }
 
   // Check user record directly if no sub record
-  const user = usersDatabase.find(u => u.workspace_id === workspaceId);
   if (user) {
     if (user.billing_status === 'active') {
+      const periodEndMs = user.current_period_end ? new Date(user.current_period_end).getTime() : null;
+      if (periodEndMs && !Number.isNaN(periodEndMs) && periodEndMs <= now) {
+        user.billing_status = 'trial_expired';
+        return {
+          status: 'trial_expired',
+          tier: (user.selected_plan as any) || 'growth',
+          daysRemaining: 0,
+          trialEndsAt: user.current_period_end,
+          isAllowedAccess: false,
+          message: 'Your subscription billing period has expired. Please renew to continue.'
+        };
+      }
       return {
         status: 'active',
         tier: (user.selected_plan as any) || 'growth',
-        daysRemaining: 0,
+        daysRemaining: periodEndMs ? Math.max(0, Math.ceil((periodEndMs - now) / 86400000)) : 0,
         isAllowedAccess: true
+      };
+    }
+    if (user.billing_status === 'cancelled' || user.billing_status === 'past_due' || user.billing_status === 'trial_expired') {
+      return {
+        status: user.billing_status,
+        tier: (user.selected_plan as any) || 'growth',
+        daysRemaining: 0,
+        trialEndsAt: user.trial_end_date,
+        isAllowedAccess: false,
+        message:
+          user.billing_status === 'cancelled'
+            ? 'Your subscription has been cancelled. Reactivate a plan to resume access.'
+            : user.billing_status === 'past_due'
+              ? 'Your subscription payment is past due. Update your billing method to continue.'
+              : 'Your 14-day free trial has ended. Choose a plan to continue using Churnveda.'
       };
     }
     const endsAtMs = user.trial_end_date ? new Date(user.trial_end_date).getTime() : (now + 14 * 86400000);
@@ -5512,12 +5601,21 @@ export function getWorkspaceAccessStatus(workspaceId: string): {
     }
   }
 
-  // Default fallback for default workspace (allow trialing)
+  // Only allow default workspace fallback; unknown/unprovisioned workspaces fail closed
+  if (workspaceId === 'ws-default') {
+    return {
+      status: 'trialing',
+      tier: 'growth',
+      daysRemaining: 14,
+      isAllowedAccess: true
+    };
+  }
   return {
-    status: 'trialing',
-    tier: 'growth',
-    daysRemaining: 14,
-    isAllowedAccess: true
+    status: 'trial_expired',
+    tier: 'starter',
+    daysRemaining: 0,
+    isAllowedAccess: false,
+    message: 'No active trial or subscription found for this workspace.'
   };
 }
 
@@ -5750,20 +5848,21 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
       });
     }
 
-    // Resolve workspace & authenticated user
-    const authUser = getAuthUser(req);
-    const user = authUser || usersDatabase[0];
-    const workspaceId = user?.workspace_id || (req.headers['x-workspace-id'] as string) || 'ws-default';
-    const userId = user?.id || 'usr-default';
-    const userEmail = (user?.email || 'founder@churnveda.com').toLowerCase();
+    // Resolve workspace & authenticated user (never fall back to arbitrary usersDatabase[0])
+    const authUser = await resolveAuthUser(req);
+    const workspaceId = authUser
+      ? await resolveAuthorizedWorkspace(req, authUser)
+      : `ws_guest_${crypto.randomBytes(4).toString('hex')}`;
+    const userId = authUser?.id || 'usr_guest';
+    const userEmail = (authUser?.email || (typeof req.body.email === 'string' && req.body.email.trim()) || 'guest@churnveda.com').toLowerCase();
 
-    // Prevent workspace from repeatedly starting trials: allow only ONE trial per workspace
-    const alreadyVerifiedTrial = trialVerificationsDatabase.find(
-      t => t.workspace_id === workspaceId && t.status === 'verified'
-    );
-    const existingActiveSubscription = subscriptionsDatabase.find(
-      s => s.workspace_id === workspaceId && (s.status === 'trialing' || s.status === 'active')
-    );
+    // Prevent authenticated workspace from repeatedly starting trials: allow only ONE trial per workspace
+    const alreadyVerifiedTrial = authUser
+      ? trialVerificationsDatabase.find(t => t.workspace_id === workspaceId && t.status === 'verified')
+      : undefined;
+    const existingActiveSubscription = authUser
+      ? subscriptionsDatabase.find(s => s.workspace_id === workspaceId && (s.status === 'trialing' || s.status === 'active'))
+      : undefined;
 
     if (alreadyVerifiedTrial && existingActiveSubscription?.status === 'trialing') {
       return res.status(400).json({
@@ -5782,47 +5881,99 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
       });
     }
 
-    const amountCents = 100; // Exactly 100 cents = $1.00 USD
+    const isProd = process.env.NODE_ENV === 'production' && !process.env.AIS_DEV_ENVIRONMENT;
+    const hasRazorpayKeys = Boolean(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
+
+    if (!hasRazorpayKeys && isProd) {
+      return res.status(503).json({
+        success: false,
+        error: 'Payment gateway is temporarily unavailable. Please try again shortly.'
+      });
+    }
+
+    let orderAmount = 100; // Exactly 100 cents = $1.00 USD
+    let orderCurrency: 'USD' | 'INR' = 'USD';
     const receiptId = `rcpt_trial_${Date.now().toString().slice(-8)}_${crypto.randomBytes(3).toString('hex')}`;
     let razorpayOrderId = `order_trial_${crypto.randomBytes(8).toString('hex')}`;
 
-    // Call official Razorpay Orders API for exactly $1.00 USD (100 cents)
-    try {
+    // Call official Razorpay Orders API (USD first; auto-fallback to INR equivalent if account doesn't have USD international enabled)
+    if (hasRazorpayKeys) {
       const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-      const rzpRes = await fetch('https://api.razorpay.com/v1/orders', {
-        method: 'POST',
-        headers: {
-          'Authorization': authHeader,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          amount: amountCents,
-          currency: 'USD',
-          receipt: receiptId,
-          notes: {
-            workspace_id: workspaceId,
-            user_id: userId,
-            tier: selectedTier,
-            billing_cycle: selectedCycle,
-            billing_plan_id: billingPlan.id,
-            purpose: 'trial_verification',
-            currency: 'USD',
-            customer_email: userEmail
-          }
-        })
-      });
+      const createRzpOrder = async (amount: number, currency: 'USD' | 'INR') => {
+        return fetch('https://api.razorpay.com/v1/orders', {
+          method: 'POST',
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            amount,
+            currency,
+            receipt: receiptId,
+            notes: {
+              workspace_id: workspaceId,
+              user_id: userId,
+              tier: selectedTier,
+              billing_cycle: selectedCycle,
+              billing_plan_id: billingPlan.id,
+              purpose: 'trial_verification',
+              currency,
+              customer_email: userEmail
+            }
+          })
+        });
+      };
 
-      if (rzpRes.ok) {
-        const rzpData = await rzpRes.json();
-        if (rzpData?.id) {
-          razorpayOrderId = rzpData.id;
+      try {
+        let rzpRes = await createRzpOrder(100, 'USD');
+        if (rzpRes.ok) {
+          const rzpData = await rzpRes.json();
+          if (rzpData?.id) {
+            razorpayOrderId = rzpData.id;
+          }
+        } else {
+          const errJson: any = await rzpRes.json().catch(() => ({}));
+          const errDesc = String(errJson?.error?.description || errJson?.message || '');
+          const isCurrencyUnsupported = /currency|international/i.test(errDesc);
+          if (isCurrencyUnsupported) {
+            const conv = await convertUsdToInr(1.0);
+            const inrRes = await createRzpOrder(conv.amountPaise, 'INR');
+            if (inrRes.ok) {
+              const inrData = await inrRes.json();
+              if (inrData?.id) {
+                razorpayOrderId = inrData.id;
+                orderAmount = conv.amountPaise;
+                orderCurrency = 'INR';
+              }
+            } else {
+              const inrErr: any = await inrRes.json().catch(() => ({}));
+              console.warn('[Razorpay API Trial Order INR Fallback Error]:', inrErr);
+              if (isProd) {
+                return res.status(502).json({
+                  success: false,
+                  error: inrErr?.error?.description || 'Payment gateway could not initialize the verification order. Please try again.'
+                });
+              }
+            }
+          } else {
+            console.warn('[Razorpay API Trial Order Warning]:', errJson);
+            if (isProd) {
+              return res.status(502).json({
+                success: false,
+                error: errDesc || 'Payment gateway could not initialize the verification order. Please try again.'
+              });
+            }
+          }
         }
-      } else {
-        const errJson = await rzpRes.json().catch(() => ({}));
-        console.warn('[Razorpay API Trial Order Warning]:', errJson);
+      } catch (apiErr: any) {
+        console.warn('[Razorpay API Network Warning]:', apiErr);
+        if (isProd) {
+          return res.status(502).json({
+            success: false,
+            error: 'Unable to reach Razorpay API from the server. Please try again.'
+          });
+        }
       }
-    } catch (apiErr) {
-      console.warn('[Razorpay API Network Warning]:', apiErr);
     }
 
     // Authoritative trial verification record (pending state)
@@ -5837,8 +5988,8 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
       razorpay_plan_id: billingPlan.razorpay_plan_id,
       razorpay_order_id: razorpayOrderId,
       amount_cents: 100,
-      amount_paise: 100,
-      currency: 'USD',
+      amount_paise: orderCurrency === 'INR' ? orderAmount : 100,
+      currency: orderCurrency,
       status: 'pending',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
@@ -5855,14 +6006,14 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
       success: true,
       keyId: RAZORPAY_KEY_ID,
       orderId: razorpayOrderId,
-      amount: 100,
+      amount: orderAmount,
       amountCents: 100,
       amountUsd: 1,
-      currency: 'USD',
+      currency: orderCurrency,
       tier: selectedTier,
       billing_cycle: selectedCycle,
       plan_name: billingPlan.name,
-      formatted_amount: '$1.00',
+      formatted_amount: orderCurrency === 'INR' ? `₹${(orderAmount / 100).toFixed(2)}` : '$1.00',
       future_plan_price: billingPlan.amount_usd,
       trial_days: 14
     });
@@ -5896,12 +6047,19 @@ app.post('/api/billing/verify-trial-payment', async (req, res) => {
     }
 
     // 2. Tenant isolation check: Confirm row belongs to current workspace
-    const authUser = getAuthUser(req);
-    const currentWorkspaceId = authUser?.workspace_id || (usersDatabase[0] ? usersDatabase[0].workspace_id : 'ws-default');
-    if (authUser && verification.workspace_id !== currentWorkspaceId && verification.user_id !== authUser.id) {
-      return res.status(403).json({
+    const authUser = await resolveAuthUser(req);
+    if (authUser) {
+      const currentWorkspaceId = await resolveAuthorizedWorkspace(req, authUser);
+      if (verification.workspace_id !== currentWorkspaceId && verification.user_id !== authUser.id) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access denied: Order belongs to a different workspace.'
+        });
+      }
+    } else if (!verification.workspace_id.startsWith('ws_guest_')) {
+      return res.status(401).json({
         success: false,
-        error: 'Access denied: Order belongs to a different workspace.'
+        error: 'Authentication required to verify this workspace trial order.'
       });
     }
 
@@ -5929,16 +6087,39 @@ app.post('/api/billing/verify-trial-payment', async (req, res) => {
       });
     }
 
+    const isProd = process.env.NODE_ENV === 'production' && !process.env.AIS_DEV_ENVIRONMENT;
+    if (!RAZORPAY_KEY_SECRET) {
+      return res.status(503).json({
+        success: false,
+        error: 'Payment verification secret is not configured on the server.'
+      });
+    }
+
     const expectedSignature = crypto
       .createHmac('sha256', RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest('hex');
 
-    const isValidSignature =
-      expectedSignature === razorpay_signature ||
-      razorpay_signature === 'test_bypass_token' ||
-      razorpay_signature.startsWith('sig_mock_') ||
-      razorpay_signature.startsWith('test_');
+    let isValidSignature = false;
+    try {
+      const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+      const sigBuf = Buffer.from(String(razorpay_signature), 'utf8');
+      if (expectedBuf.length === sigBuf.length && crypto.timingSafeEqual(expectedBuf, sigBuf)) {
+        isValidSignature = true;
+      }
+    } catch {
+      isValidSignature = false;
+    }
+
+    if (
+      !isValidSignature &&
+      !isProd &&
+      (razorpay_signature === 'test_bypass_token' ||
+        String(razorpay_signature).startsWith('sig_mock_') ||
+        String(razorpay_signature).startsWith('test_'))
+    ) {
+      isValidSignature = true;
+    }
 
     if (!isValidSignature) {
       verification.status = 'failed';
@@ -5949,33 +6130,73 @@ app.post('/api/billing/verify-trial-payment', async (req, res) => {
       });
     }
 
-    // 5. Server-side payment validation with Razorpay API (confirm exact $1.00 / 100 cents USD)
-    try {
-      const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-      const rzpRes = await fetch(`https://api.razorpay.com/v1/payments/${razorpay_payment_id}`, {
-        headers: { 'Authorization': authHeader }
-      });
-      if (rzpRes.ok) {
-        const paymentData = await rzpRes.json();
-        if (paymentData?.amount && paymentData.amount !== 100) {
-          verification.status = 'failed';
-          verification.updated_at = new Date().toISOString();
-          return res.status(400).json({
-            success: false,
-            error: `Payment amount mismatch: Expected 100 cents ($1.00 USD), got ${paymentData.amount}.`
-          });
+    // 5. Server-side payment validation with Razorpay API (confirm status, order binding, currency, amount)
+    const hasLiveGateway = Boolean(
+      RAZORPAY_KEY_ID &&
+      RAZORPAY_KEY_SECRET &&
+      !RAZORPAY_KEY_ID.startsWith('rzp_test_placeholder') &&
+      !String(razorpay_payment_id).startsWith('pay_test_') &&
+      !String(razorpay_payment_id).startsWith('pay_mock_')
+    );
+    if (hasLiveGateway) {
+      try {
+        const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
+        const rzpRes = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(razorpay_payment_id)}`, {
+          headers: { 'Authorization': authHeader },
+          signal: AbortSignal.timeout(8000)
+        });
+        if (!rzpRes.ok) {
+          if (isProd) {
+            return res.status(400).json({
+              success: false,
+              error: 'Unable to confirm trial payment with payment gateway.'
+            });
+          }
+        } else {
+          const paymentData = await rzpRes.json();
+          if (paymentData?.status && !['captured', 'authorized'].includes(String(paymentData.status).toLowerCase())) {
+            verification.status = 'failed';
+            verification.updated_at = new Date().toISOString();
+            return res.status(400).json({
+              success: false,
+              error: `Payment status "${paymentData.status}" is not authorized or captured.`
+            });
+          }
+          if (paymentData?.order_id && paymentData.order_id !== razorpay_order_id) {
+            verification.status = 'failed';
+            verification.updated_at = new Date().toISOString();
+            return res.status(400).json({
+              success: false,
+              error: 'Payment order mismatch detected.'
+            });
+          }
+          const expectedVerificationAmount = verification.currency === 'INR' ? verification.amount_paise : 100;
+          if (paymentData?.amount && expectedVerificationAmount && Number(paymentData.amount) !== Number(expectedVerificationAmount)) {
+            verification.status = 'failed';
+            verification.updated_at = new Date().toISOString();
+            return res.status(400).json({
+              success: false,
+              error: `Payment amount mismatch: Expected ${expectedVerificationAmount} (${verification.currency}), got ${paymentData.amount}.`
+            });
+          }
+          if (paymentData?.currency && paymentData.currency.toUpperCase() !== verification.currency) {
+            verification.status = 'failed';
+            verification.updated_at = new Date().toISOString();
+            return res.status(400).json({
+              success: false,
+              error: `Payment currency mismatch: Expected ${verification.currency}, got ${paymentData.currency}.`
+            });
+          }
         }
-        if (paymentData?.currency && paymentData.currency.toUpperCase() !== 'USD') {
-          verification.status = 'failed';
-          verification.updated_at = new Date().toISOString();
-          return res.status(400).json({
+      } catch (fetchErr) {
+        console.warn('[Razorpay Payment Verify Network Warning]:', fetchErr);
+        if (isProd) {
+          return res.status(502).json({
             success: false,
-            error: `Payment currency mismatch: Expected USD, got ${paymentData.currency}.`
+            error: 'Payment gateway verification temporarily unavailable.'
           });
         }
       }
-    } catch (fetchErr) {
-      console.warn('[Razorpay Payment Verify Network Warning]:', fetchErr);
     }
 
     // 6. Mark verification as verified
@@ -6024,7 +6245,7 @@ app.post('/api/billing/verify-trial-payment', async (req, res) => {
     // 8. Update user state in usersDatabase
     const userToUpdate = usersDatabase.find(
       u => u.id === verification.user_id || u.email.toLowerCase() === verification.email.toLowerCase()
-    ) || (authUser || usersDatabase[0]);
+    ) || authUser;
 
     if (userToUpdate) {
       userToUpdate.selected_plan = verification.tier;
@@ -6045,7 +6266,7 @@ app.post('/api/billing/verify-trial-payment', async (req, res) => {
       }
     }
 
-    console.log(`[Trial Verification Success]: Workspace ${verification.workspace_id} verified with $1.00 USD. Trial started for ${verification.tier} until ${trialEndsAt}.`);
+    console.log(`[Trial Verification Success]: Workspace ${verification.workspace_id} verified. Trial started for ${verification.tier} until ${trialEndsAt}.`);
 
     res.json({
       success: true,
@@ -6063,78 +6284,88 @@ app.post('/api/billing/verify-trial-payment', async (req, res) => {
   }
 });
 
-// 15B3. Activate Subscription after Trial (Area 2, 3, 5)
+// 15B3. Activate Subscription after Trial (Strictly requires verified payment/subscription — never free bypass)
 app.post('/api/billing/activate-subscription', requireAuth, async (req, res) => {
   try {
     const authUser = (req as any).user as DbUser;
     const workspaceId = (req as any).workspaceId as string;
-    const user = authUser;
 
-    const sub = subscriptionsDatabase.find(s => s.workspace_id === workspaceId);
-    const tier = (req.body.tier || sub?.tier || user?.selected_plan || 'growth').toLowerCase() as 'starter' | 'growth' | 'pro';
-    const cycle = (req.body.billing_cycle || sub?.billing_cycle || 'monthly').toLowerCase() as 'monthly' | 'annual';
-    const isFounding = Boolean(
-      req.body.isFoundingOffer ||
-      req.body.is_founding_offer ||
-      sub?.billing_plan_id?.includes('founding') ||
-      user?.billing_plan_id?.includes('founding')
+    const {
+      razorpay_subscription_id,
+      razorpay_payment_id,
+      razorpay_signature
+    } = req.body || {};
+
+    if (!razorpay_subscription_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(402).json({
+        success: false,
+        requiresPayment: true,
+        error: 'Verified Razorpay subscription payment is required before activating a paid plan. Please complete checkout.'
+      });
+    }
+
+    if (!RAZORPAY_KEY_SECRET) {
+      return res.status(503).json({
+        success: false,
+        error: 'Payment verification secret is not configured on the server.'
+      });
+    }
+
+    const sub = subscriptionsDatabase.find(
+      s => s.workspace_id === workspaceId && s.razorpay_subscription_id === razorpay_subscription_id
     );
+    if (!sub) {
+      return res.status(404).json({
+        success: false,
+        error: 'Matching subscription checkout record not found for this workspace.'
+      });
+    }
 
+    const expectedSignature = crypto
+      .createHmac('sha256', RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
+      .digest('hex');
+
+    let isValidSig = false;
+    try {
+      const a = Buffer.from(expectedSignature, 'utf8');
+      const b = Buffer.from(String(razorpay_signature), 'utf8');
+      isValidSig = a.length === b.length && crypto.timingSafeEqual(a, b);
+    } catch {
+      isValidSig = false;
+    }
+
+    if (!isValidSig) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid Razorpay subscription signature.'
+      });
+    }
+
+    const tier = sub.tier || 'growth';
+    const cycle = sub.billing_cycle || 'monthly';
+    const isFounding = Boolean(sub.billing_plan_id?.includes('founding'));
     const billingPlan = getAuthoritativeBillingPlan(tier, cycle, isFounding);
-
     if (!billingPlan) {
       return res.status(404).json({ success: false, error: 'Active billing plan not found' });
     }
 
-    let rzpSubscriptionId = `sub_${crypto.randomBytes(8).toString('hex')}`;
-    try {
-      const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-      const rzpRes = await fetch('https://api.razorpay.com/v1/subscriptions', {
-        method: 'POST',
-        headers: {
-          'Authorization': authHeader,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          plan_id: billingPlan.razorpay_plan_id,
-          total_count: cycle === 'annual' ? 5 : 12,
-          quantity: 1,
-          customer_notify: 1,
-          notes: {
-            workspace_id: workspaceId,
-            tier,
-            billing_cycle: cycle,
-            billing_plan_id: billingPlan.id
-          }
-        })
-      });
-      if (rzpRes.ok) {
-        const rzpData = await rzpRes.json();
-        if (rzpData?.id) rzpSubscriptionId = rzpData.id;
-      }
-    } catch (e) {
-      console.warn('Subscription activation fallback:', e);
-    }
+    const periodEndIso = new Date(Date.now() + (cycle === 'annual' ? 365 : 30) * 86400000).toISOString();
+    const nowIso = new Date().toISOString();
 
-    if (user) {
-      user.billing_status = 'active';
-      user.payment_status = 'paid';
-      user.selected_plan = tier;
-      user.razorpay_subscription_id = rzpSubscriptionId;
-      user.updated_at = new Date().toISOString();
-      try {
-        await db.users.upsert(user as any);
-      } catch (e: any) {}
-    }
+    authUser.billing_status = 'active';
+    authUser.payment_status = 'paid';
+    authUser.selected_plan = tier;
+    authUser.razorpay_subscription_id = razorpay_subscription_id;
+    authUser.current_period_end = periodEndIso;
+    authUser.updated_at = nowIso;
+    await db.users.upsert(authUser as any).catch(() => {});
 
-    if (sub) {
-      sub.status = 'active';
-      sub.razorpay_subscription_id = rzpSubscriptionId;
-      sub.updated_at = new Date().toISOString();
-      try {
-        await db.subscriptions.upsert(sub as any);
-      } catch (e: any) {}
-    }
+    sub.status = 'active';
+    sub.payment_verification_status = 'verified';
+    sub.razorpay_verification_payment_id = razorpay_payment_id;
+    sub.updated_at = nowIso;
+    await db.subscriptions.upsert(sub as any).catch(() => {});
 
     const fbCtx = getFirebaseCtx(req);
     await Promise.all([
@@ -6144,7 +6375,7 @@ app.post('/api/billing/activate-subscription', requireAuth, async (req, res) => 
         actorEmail: authUser.email,
         action: 'billing.subscription_activated',
         targetType: 'subscription',
-        targetId: rzpSubscriptionId,
+        targetId: razorpay_subscription_id,
         metadata: { plan: tier, cycle, planId: billingPlan.id }
       }),
       fbCtx
@@ -6154,7 +6385,8 @@ app.post('/api/billing/activate-subscription', requireAuth, async (req, res) => 
             tier,
             billingCycle: cycle,
             status: 'active',
-            razorpaySubscriptionId: rzpSubscriptionId,
+            razorpaySubscriptionId: razorpay_subscription_id,
+            currentPeriodEnd: periodEndIso,
             ctx: fbCtx
           })
         : Promise.resolve(),
@@ -6162,7 +6394,7 @@ app.post('/api/billing/activate-subscription', requireAuth, async (req, res) => 
         ? firebaseBackend.auditLogs.record(fbCtx, {
             action: 'billing.subscription_activated',
             targetType: 'subscription',
-            targetId: rzpSubscriptionId
+            targetId: razorpay_subscription_id
           }).catch(() => {})
         : Promise.resolve()
     ]);
@@ -6170,7 +6402,7 @@ app.post('/api/billing/activate-subscription', requireAuth, async (req, res) => 
     res.json({
       success: true,
       message: `Successfully activated ${billingPlan.name} subscription.`,
-      subscriptionId: rzpSubscriptionId,
+      subscriptionId: razorpay_subscription_id,
       plan: billingPlan
     });
   } catch (err: any) {
@@ -6224,7 +6456,8 @@ app.get('/api/billing/limits', requireAuth, (req, res) => {
   const csvImportsThisMonth = (importData && importData.month === monthKey) ? importData.csv : 0;
   const pdfImportsThisMonth = (importData && importData.month === monthKey) ? importData.pdf : 0;
 
-  const customIntegrationsActive = integrationsState.filter(i => i.isConnected && !['whatsapp', 'email', 'resend'].includes(i.id.toLowerCase())).length;
+  const wsIntegrations = getWorkspaceIntegrations(workspaceId);
+  const customIntegrationsActive = wsIntegrations.filter(i => i.isConnected && !['whatsapp', 'email', 'resend'].includes(i.id.toLowerCase())).length;
 
   res.json({
     success: true,
@@ -6337,25 +6570,74 @@ app.post('/api/billing/cancel-trial', requireAuth, cancelSubscriptionHandler);
 app.post('/api/razorpay/cancel-subscription', requireAuth, cancelSubscriptionHandler);
 app.post('/api/cancel-subscription', requireAuth, cancelSubscriptionHandler);
 
-// 15B3. Upgrade Plan Endpoint (Area 2, 3, 5)
+// 15B3. Upgrade Plan Endpoint (Strictly payment-verified; redirects unverified UI calls to checkout)
 app.post('/api/billing/upgrade', requireAuth, async (req, res) => {
   const authUser = (req as any).user as DbUser;
   const workspaceId = (req as any).workspaceId as string;
-  const newPlan = (req.body.plan || 'growth').toLowerCase();
-  const user = authUser;
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
 
-  const authoritativePlan = getExpectedPlanAmount(newPlan, 'monthly');
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    return res.status(402).json({
+      success: false,
+      requiresPayment: true,
+      error: 'Payment checkout verification is required to upgrade your plan.'
+    });
+  }
+
+  if (!RAZORPAY_KEY_SECRET) {
+    return res.status(503).json({ success: false, error: 'Payment secret key is not configured on the server.' });
+  }
+
+  const storedOrder = await db.razorpayOrders.getByOrderId(String(razorpay_order_id));
+  if (!storedOrder) {
+    return res.status(404).json({ success: false, error: 'Checkout order record not found.' });
+  }
+  if (storedOrder.workspace_id !== workspaceId && storedOrder.user_id !== authUser.id) {
+    return res.status(403).json({ success: false, error: 'Access denied: Order belongs to a different workspace.' });
+  }
+  if (storedOrder.status === 'paid') {
+    return res.status(409).json({ success: false, error: 'This checkout order has already been redeemed.' });
+  }
+
+  const expectedSig = crypto
+    .createHmac('sha256', RAZORPAY_KEY_SECRET)
+    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+    .digest('hex');
+
+  let isValidSig = false;
+  try {
+    const a = Buffer.from(expectedSig, 'utf8');
+    const b = Buffer.from(String(razorpay_signature), 'utf8');
+    isValidSig = a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch {
+    isValidSig = false;
+  }
+
+  if (!isValidSig) {
+    return res.status(400).json({ success: false, error: 'Invalid payment signature for upgrade.' });
+  }
+
+  const orderMeta = storedOrder.metadata_json || {};
+  const authoritativePlan = getExpectedPlanAmount(
+    orderMeta.tier || 'growth',
+    orderMeta.billingCycle === 'annual' ? 'annual' : 'monthly',
+    Boolean(orderMeta.isFounding)
+  );
   const planPrice = authoritativePlan.amountUsd;
 
-  if (user) {
-    user.selected_plan = authoritativePlan.tier;
-    user.plan_price = planPrice;
-    user.billing_status = 'active';
-    user.payment_status = 'paid';
-    user.updated_at = new Date().toISOString();
-    try {
-      await db.users.upsert(user as any);
-    } catch (e: any) {}
+  storedOrder.status = 'paid';
+  storedOrder.metadata_json = { ...orderMeta, payment_id: razorpay_payment_id };
+  storedOrder.updated_at = new Date().toISOString();
+  await db.razorpayOrders.upsert(storedOrder).catch(() => {});
+
+  if (authUser) {
+    authUser.selected_plan = authoritativePlan.tier;
+    authUser.plan_price = planPrice;
+    authUser.billing_status = 'active';
+    authUser.payment_status = 'paid';
+    authUser.current_period_end = new Date(Date.now() + (authoritativePlan.billingCycle === 'annual' ? 365 : 30) * 86400000).toISOString();
+    authUser.updated_at = new Date().toISOString();
+    await db.users.upsert(authUser as any).catch(() => {});
   }
 
   await db.auditLogs.record({
@@ -6365,21 +6647,21 @@ app.post('/api/billing/upgrade', requireAuth, async (req, res) => {
     action: 'billing.plan_upgraded',
     targetType: 'plan',
     targetId: authoritativePlan.tier,
-    metadata: { newPlan: authoritativePlan.tier, priceUsd: planPrice }
+    metadata: { newPlan: authoritativePlan.tier, priceUsd: planPrice, orderId: razorpay_order_id }
   });
 
   res.json({
     success: true,
     message: `Plan successfully upgraded to ${authoritativePlan.name}.`,
     plan: authoritativePlan.tier,
-    planPrice: planPrice,
+    planPrice,
     currency: 'USD',
     billingStatus: 'active'
   });
 });
 
-// 15B4. Add / Save Payment Method (PCI-DSS Safe: Disallows raw PAN/CVC)
-app.post('/api/billing/payment-method', requireAuth, (req, res) => {
+// 15B4. Add / Save Payment Method (PCI-DSS Safe: Disallows raw PAN/CVC; never grants paid status)
+app.post('/api/billing/payment-method', requireAuth, async (req, res) => {
   const authUser = (req as any).user as DbUser;
   const user = authUser;
 
@@ -6411,7 +6693,6 @@ app.post('/api/billing/payment-method', requireAuth, (req, res) => {
   const rawDigits = String(cardNumber).replace(/\D/g, '');
   const last4 = rawDigits.length >= 4 ? rawDigits.slice(-4) : '4242';
 
-  // Detect card brand
   let brand = 'visa';
   if (/^5[1-5]/.test(rawDigits) || /^2[2-7]/.test(rawDigits)) {
     brand = 'mastercard';
@@ -6436,7 +6717,6 @@ app.post('/api/billing/payment-method', requireAuth, (req, res) => {
     user.payment_methods = [];
   }
 
-  // Handle default flag
   if (isDefault || user.payment_methods.length === 0) {
     user.payment_methods.forEach(pm => { pm.isDefault = false; });
     newPaymentMethod.isDefault = true;
@@ -6447,9 +6727,9 @@ app.post('/api/billing/payment-method', requireAuth, (req, res) => {
   user.card_brand = newPaymentMethod.brand;
   user.card_exp = `${String(newPaymentMethod.expMonth).padStart(2, '0')}/${String(newPaymentMethod.expYear).slice(-2)}`;
   user.cardholder_name = newPaymentMethod.cardholderName;
-  user.payment_status = 'paid';
   user.razorpay_customer_id = user.razorpay_customer_id || `cust_${Date.now()}`;
   user.updated_at = new Date().toISOString();
+  await db.users.upsert(user as any).catch(() => {});
 
   const userProfile = {
     id: user.id,
@@ -6464,7 +6744,7 @@ app.post('/api/billing/payment-method', requireAuth, (req, res) => {
     billingStatus: user.billing_status,
     trialStartDate: user.trial_start_date,
     trialEndDate: user.trial_end_date,
-    paymentStatus: 'paid' as const,
+    paymentStatus: user.payment_status || 'pending',
     cardLast4: user.card_last4,
     cardBrand: user.card_brand,
     cardExp: user.card_exp,
@@ -6639,18 +6919,19 @@ app.get('/api/razorpay/config', (req, res) => {
   });
 });
 
-// 16A1. International USD Subscription & Settlement Status
-app.get('/api/razorpay/international-status', async (_req, res) => {
+// 16A1. International USD Subscription & Settlement Status (Authenticated + Tenant Scoped)
+app.get('/api/razorpay/international-status', requireAuth, async (req, res) => {
+  const targetWorkspace = (req as any).workspaceId as string;
   const isConfigured = Boolean(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
   const internationalEnabled = process.env.RAZORPAY_INTERNATIONAL_ENABLED === 'true';
   const domesticInrEnabled = process.env.ENABLE_DOMESTIC_INR_PRICING === 'true';
 
-  // Check whether any verified USD transaction exists in database or memory
+  // Check whether any verified USD transaction exists in workspace database or memory
   let allPayments: DbSubscriptionPayment[] = [];
   try {
-    allPayments = await db.subscriptionPayments.getByWorkspace('ws-default');
-  } catch (e) {
-    allPayments = subscriptionPaymentsDatabase;
+    allPayments = await db.subscriptionPayments.getByWorkspace(targetWorkspace);
+  } catch {
+    allPayments = subscriptionPaymentsDatabase.filter(p => p.workspace_id === targetWorkspace);
   }
   const liveVerified = allPayments.some(p => p.currency === 'USD' && (p.settlement_status === 'settled' || p.settlement_status === 'pending'));
 
@@ -6676,33 +6957,19 @@ app.get('/api/razorpay/international-status', async (_req, res) => {
       { tier: 'growth', interval: 'annual', name: 'Growth Annual', priceUsd: 790, priceInr: 75082, amountCents: 79000, billing: 'recurring' },
       { tier: 'pro', interval: 'monthly', name: 'Enterprise Monthly', priceUsd: 349, priceInr: 33169, amountCents: 34900, billing: 'recurring' },
       { tier: 'pro', interval: 'annual', name: 'Enterprise Annual', priceUsd: 3490, priceInr: 331690, amountCents: 349000, billing: 'recurring' }
-    ],
-    settlementPolicy: {
-      destinationBank: 'Indian Merchant Bank Account (Current Account)',
-      inrSettlementMode: 'Internal Indian Bank FX conversion upon Razorpay batch settlement',
-      dailyExchangeRateFixedInUsd: true,
-      purposeCodeP0802Required: true
-    },
-    checklist: {
-      keysConfigured: isConfigured,
-      webhookConfigured: Boolean(RAZORPAY_WEBHOOK_SECRET),
-      internationalCardsApproved: internationalEnabled,
-      purposeCodeP0802Configured: true,
-      testMandateVerified: liveVerified
-    }
+    ]
   });
 });
 
 // 16A2. Billing & Subscription Payments Ledger
 app.get('/api/billing/transactions', requireAuth, async (req, res) => {
   try {
-    const authUser = getAuthUser(req);
-    const targetWorkspace = (req.headers['x-workspace-id'] as string) || authUser?.workspace_id || 'ws-default';
+    const targetWorkspace = (req as any).workspaceId as string;
 
     let transactions: DbSubscriptionPayment[] = [];
     try {
       transactions = await db.subscriptionPayments.getByWorkspace(targetWorkspace);
-    } catch (e) {
+    } catch {
       transactions = subscriptionPaymentsDatabase.filter(p => p.workspace_id === targetWorkspace);
     }
 
@@ -6726,118 +6993,10 @@ app.get('/api/billing/transactions', requireAuth, async (req, res) => {
   }
 });
 
-// 16B. Admin Billing Plans: Fetch All 6 Plans (Area 7)
-const getAdminBillingPlansHandler = (req: express.Request, res: express.Response) => {
-  res.json({
-    success: true,
-    currency: 'USD',
-    mode: RAZORPAY_KEY_ID.startsWith('rzp_test_') ? 'test' : 'live',
-    keyId: RAZORPAY_KEY_ID,
-    plans: billingPlansDatabase.map(p => ({
-      ...p,
-      amount_usd: p.amount_usd,
-      amount_cents: p.amount_cents,
-      currency: 'USD',
-      formatted: p.formatted,
-      formattedInr: p.formatted,
-      discountDescription: p.discountDescription
-    })),
-    subscriptionsCount: subscriptionsDatabase.length,
-    activeSubscriptionsCount: subscriptionsDatabase.filter(s => s.status === 'active').length
-  });
-};
-
-app.get('/api/admin/billing/plans', requireAdmin, getAdminBillingPlansHandler);
-app.get('/admin/billing/plans', (req, res, next) => {
-  if (req.headers.accept?.includes('application/json')) {
-    return requireAdmin(req, res, () => getAdminBillingPlansHandler(req, res));
-  }
-  next(); // Allow SPA to render Admin Billing Plans UI
+// Internal admin billing test-plan routes disabled in customer-facing API
+app.all(['/api/admin/billing/plans', '/api/admin/billing/plans/create-missing', '/admin/billing/plans/create-missing'], (_req, res) => {
+  res.status(404).json({ success: false, error: 'Endpoint not found' });
 });
-
-// 16C. Admin Action: Create Missing Razorpay Test Plans (Area 5, 7)
-// Requires confirmationText: "CREATE_RAZORPAY_TEST_PLANS"
-
-const createMissingPlansHandler = async (req: express.Request, res: express.Response) => {
-  try {
-    const { confirmationText } = req.body;
-    if (confirmationText !== 'CREATE_RAZORPAY_TEST_PLANS') {
-      return res.status(400).json({
-        success: false,
-        error: 'Confirmation phrase mismatch. Please type exactly "CREATE_RAZORPAY_TEST_PLANS" to execute plan creation.'
-      });
-    }
-
-    const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-    let createdCount = 0;
-    const planCreationLogs: string[] = [];
-
-    for (const plan of billingPlansDatabase) {
-      // Check if plan already has a valid Razorpay plan ID
-      if (plan.razorpay_plan_id && plan.razorpay_plan_id.startsWith('plan_')) {
-        planCreationLogs.push(`Plan ${plan.id} (${plan.tier} ${plan.billing_cycle}) already has active Razorpay ID ${plan.razorpay_plan_id}. Skipped duplicate creation.`);
-        continue;
-      }
-
-      // Create only missing Razorpay TEST MODE plans
-      const period = plan.billing_cycle === 'annual' ? 'yearly' : 'monthly';
-      const planName = `Churnveda ${plan.tier.charAt(0).toUpperCase() + plan.tier.slice(1)} ${plan.billing_cycle === 'annual' ? 'Annual' : 'Monthly'}`;
-      const description = `Churnveda ${plan.tier.toUpperCase()} Plan - ${plan.billing_cycle === 'annual' ? 'Annual Billing ($' + plan.amount_usd + '/year)' : 'Monthly Billing ($' + plan.amount_usd + '/month)'}`;
-
-      try {
-        const rzpRes = await fetch('https://api.razorpay.com/v1/plans', {
-          method: 'POST',
-          headers: {
-            'Authorization': authHeader,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            period,
-            interval: 1,
-            item: {
-              name: planName,
-              amount: plan.amount_cents,
-              currency: 'USD',
-              description
-            }
-          })
-        });
-
-        if (rzpRes.ok) {
-          const rzpData = await rzpRes.json();
-          if (rzpData?.id) {
-            plan.razorpay_plan_id = rzpData.id;
-            plan.updated_at = new Date().toISOString();
-            createdCount++;
-            planCreationLogs.push(`Successfully created ${planName} on Razorpay TEST MODE: ${rzpData.id}`);
-          }
-        } else {
-          const errData = await rzpRes.json().catch(() => ({}));
-          console.warn(`[Razorpay Plan Creation Failed for ${plan.id}]:`, errData);
-          planCreationLogs.push(`Failed to create plan on Razorpay for ${planName}: ${(errData as any)?.error?.description || 'API Error'}`);
-        }
-      } catch (err: any) {
-        console.warn(`[Network Error creating plan ${plan.id}]:`, err);
-        planCreationLogs.push(`Network error creating plan on Razorpay for ${planName}: ${err?.message || 'Network Error'}`);
-      }
-    }
-
-    res.json({
-      success: true,
-      message: createdCount > 0
-        ? `Created ${createdCount} missing Razorpay test plan(s) successfully.`
-        : 'All 6 Razorpay plans are already active and up to date. Zero duplicate plans were created.',
-      createdCount,
-      logs: planCreationLogs,
-      plans: billingPlansDatabase
-    });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error?.message || 'Failed to create missing Razorpay plans' });
-  }
-};
-
-app.post('/api/admin/billing/plans/create-missing', requireAdmin, createMissingPlansHandler);
-app.post('/admin/billing/plans/create-missing', requireAdmin, createMissingPlansHandler);
 
 // 16C2. Fetch Current USD -> INR Exchange Rate
 app.get('/api/billing/exchange-rate', async (req, res) => {
@@ -6861,9 +7020,18 @@ app.get('/api/billing/exchange-rate', async (req, res) => {
   }
 });
 
-// 16D. Create Razorpay Payment Order (Server-Authoritative USD -> INR Conversion)
+// 16D. Create Razorpay Payment Order (Server-Authoritative USD -> INR Conversion + DB Persistence)
 app.post('/api/razorpay/create-order', async (req, res) => {
   try {
+    const authUser = await resolveAuthUser(req);
+    const isProd = process.env.NODE_ENV === 'production' && !process.env.AIS_DEV_ENVIRONMENT;
+    if (!authUser && isProd) {
+      return res.status(401).json({ success: false, error: 'Authentication required to create a payment order.' });
+    }
+
+    const workspaceId = authUser ? await resolveAuthorizedWorkspace(req, authUser) : 'ws-guest';
+    const userId = authUser?.id || 'usr_guest';
+
     // Requirements 12-15: Backend MUST NOT trust any price, rate, or amount sent by the frontend
     const { plan, tier, billingCycle, billing_cycle, customerName, customerEmail, isFoundingOffer, is_founding_offer, offer } = req.body;
     const selectedTier = normalizePlanTier(plan || tier || 'growth');
@@ -6887,51 +7055,99 @@ app.post('/api/razorpay/create-order', async (req, res) => {
     }
 
     const { inrAmount, amountPaise, rate, displayRate } = conversion;
-    const receiptId = `rcpt_${expected.tier}_${Date.now().toString().slice(-8)}`;
+    const receiptId = `rcpt_${expected.tier}_${Date.now().toString().slice(-8)}_${crypto.randomBytes(2).toString('hex')}`;
+
+    const hasRazorpayKeys = Boolean(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
+    if (!hasRazorpayKeys && isProd) {
+      return res.status(503).json({
+        success: false,
+        error: 'Payment gateway is not configured on this server.'
+      });
+    }
 
     let razorpayOrderId = `order_${crypto.randomBytes(8).toString('hex')}`;
     let isProviderLive = false;
-    let providerErrorDesc = '';
 
     // 3. Create real order on Razorpay using payable INR amount (supported across Cards, UPI, Netbanking, Wallets)
-    try {
-      const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-      const rzpRes = await fetch('https://api.razorpay.com/v1/orders', {
-        method: 'POST',
-        headers: {
-          'Authorization': authHeader,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          amount: amountPaise,
-          currency: 'INR',
-          receipt: receiptId,
-          notes: {
-            planTier: expected.tier,
-            billingCycle: expected.billingCycle,
-            amountUsd: String(amountInUsd),
-            amountInr: String(inrAmount),
-            exchangeRate: String(rate),
-            customerName: customerName || 'SaaS Founder',
-            customerEmail: customerEmail || 'user@example.com'
-          }
-        })
-      });
+    if (hasRazorpayKeys) {
+      try {
+        const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
+        const rzpRes = await fetch('https://api.razorpay.com/v1/orders', {
+          method: 'POST',
+          signal: AbortSignal.timeout(8000),
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            amount: amountPaise,
+            currency: 'INR',
+            receipt: receiptId,
+            notes: {
+              workspaceId,
+              userId,
+              planTier: expected.tier,
+              billingCycle: expected.billingCycle,
+              isFounding: String(isFounding),
+              amountUsd: String(amountInUsd),
+              amountInr: String(inrAmount),
+              exchangeRate: String(rate),
+              customerName: customerName || authUser?.full_name || 'SaaS Founder',
+              customerEmail: authUser?.email || customerEmail || 'user@example.com'
+            }
+          })
+        });
 
-      if (rzpRes.ok) {
-        const rzpData = await rzpRes.json();
-        if (rzpData?.id) {
-          razorpayOrderId = rzpData.id;
-          isProviderLive = true;
+        if (rzpRes.ok) {
+          const rzpData = await rzpRes.json();
+          if (rzpData?.id) {
+            razorpayOrderId = rzpData.id;
+            isProviderLive = true;
+          }
+        } else {
+          const errJson = await rzpRes.json().catch(() => ({}));
+          console.warn('[Razorpay API Order Notice]:', errJson);
+          if (isProd) {
+            return res.status(502).json({
+              success: false,
+              error: (errJson as any)?.error?.description || 'Payment gateway failed to create checkout order.'
+            });
+          }
         }
-      } else {
-        const errJson = await rzpRes.json().catch(() => ({}));
-        providerErrorDesc = (errJson as any)?.error?.description || 'Gateway returned non-200';
-        console.warn('[Razorpay API Order Notice]:', errJson);
+      } catch (apiErr: any) {
+        if (isProd) {
+          return res.status(502).json({
+            success: false,
+            error: 'Unable to reach Razorpay Orders API. Please try again.'
+          });
+        }
       }
-    } catch (apiErr: any) {
-      providerErrorDesc = apiErr?.message || 'Network error reaching payment gateway';
     }
+
+    const nowIso = new Date().toISOString();
+    await db.razorpayOrders.upsert({
+      id: `ordrec_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      workspace_id: workspaceId,
+      user_id: userId,
+      order_id: razorpayOrderId,
+      amount_paise: amountPaise,
+      currency: 'INR',
+      receipt: receiptId,
+      status: 'created',
+      metadata_json: {
+        tier: expected.tier,
+        billingCycle: expected.billingCycle,
+        isFounding,
+        amountUsd: amountInUsd,
+        amountCents: expected.amountCents,
+        amountPaise,
+        exchangeRate: rate
+      },
+      created_at: nowIso,
+      updated_at: nowIso
+    }).catch((err: any) => {
+      console.error('[Razorpay Order DB Error]:', err?.message || err);
+    });
 
     res.json({
       success: true,
@@ -6939,7 +7155,7 @@ app.post('/api/razorpay/create-order', async (req, res) => {
       currency: 'INR',
       amount: amountPaise,
       amountInr: inrAmount,
-      amountPaise: amountPaise,
+      amountPaise,
       amountUsd: amountInUsd,
       exchangeRate: rate,
       displayExchangeRate: displayRate,
@@ -6958,24 +7174,20 @@ app.post('/api/razorpay/create-order', async (req, res) => {
   }
 });
 
-// 16E. Verify Razorpay Payment Signature
+// 16E. Verify Razorpay Payment Signature (Authoritatively Bound to Persisted Order + Workspace)
 app.post('/api/razorpay/verify-payment', async (req, res) => {
   try {
+    const authUser = await resolveAuthUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, error: 'Authentication required to verify payment.' });
+    }
+    const workspaceId = await resolveAuthorizedWorkspace(req, authUser);
+
     const {
       razorpay_order_id,
       razorpay_payment_id,
-      razorpay_signature,
-      plan = 'growth',
-      tier,
-      billingCycle = 'monthly',
-      billing_cycle,
-      amount,
-      currency,
-      email,
-      isFoundingOffer,
-      is_founding_offer,
-      offer
-    } = req.body;
+      razorpay_signature
+    } = req.body || {};
 
     if (!razorpay_order_id || !razorpay_payment_id) {
       return res.status(400).json({ success: false, error: 'Missing order_id or payment_id' });
@@ -6985,17 +7197,42 @@ app.post('/api/razorpay/verify-payment', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing payment signature' });
     }
 
-    const selectedTier = normalizePlanTier(plan || tier);
-    const selectedCycle = String(billingCycle || billing_cycle || 'monthly').toLowerCase() === 'annual' ? 'annual' : 'monthly';
-    const isFounding = Boolean(isFoundingOffer || is_founding_offer || offer === 'founding');
-    const expected = getExpectedPlanAmount(selectedTier, selectedCycle, isFounding);
+    if (!RAZORPAY_KEY_SECRET) {
+      return res.status(503).json({ success: false, error: 'Razorpay secret key is not configured on the server.' });
+    }
 
-    // Requirement 6: Reject payment verification if currency or amount does not match expected plan
-    const matchValidation = validatePaymentMatch(selectedTier, selectedCycle, amount, currency, isFounding);
-    if (!matchValidation.isValid) {
-      return res.status(400).json({
-        success: false,
-        error: matchValidation.error || 'Payment verification rejected due to amount or currency mismatch'
+    // Bind verification strictly to server-persisted order record (never trust client plan/amount/currency/email)
+    const storedOrder = await db.razorpayOrders.getByOrderId(String(razorpay_order_id));
+    if (!storedOrder) {
+      return res.status(404).json({ success: false, error: 'Order record not found. Please initiate a fresh checkout.' });
+    }
+    if (storedOrder.workspace_id !== workspaceId && storedOrder.user_id !== authUser.id && storedOrder.workspace_id !== 'ws-guest') {
+      return res.status(403).json({ success: false, error: 'Access denied: Order belongs to a different workspace.' });
+    }
+
+    const orderMeta = storedOrder.metadata_json || {};
+    const expected = getExpectedPlanAmount(
+      orderMeta.tier || 'growth',
+      orderMeta.billingCycle === 'annual' ? 'annual' : 'monthly',
+      Boolean(orderMeta.isFounding)
+    );
+
+    if (storedOrder.status === 'paid') {
+      if (orderMeta.payment_id && orderMeta.payment_id !== razorpay_payment_id) {
+        return res.status(409).json({ success: false, error: 'Order has already been paid with a different payment.' });
+      }
+      return res.json({
+        success: true,
+        verified: true,
+        already_verified: true,
+        message: `Payment already verified for ${expected.name}.`,
+        paymentId: razorpay_payment_id,
+        orderId: razorpay_order_id,
+        plan: expected.tier,
+        billingCycle: expected.billingCycle,
+        amountUsd: expected.amountUsd,
+        currency: 'USD',
+        billingStatus: 'active'
       });
     }
 
@@ -7010,16 +7247,21 @@ app.post('/api/razorpay/verify-payment', async (req, res) => {
     let isValidSignature = false;
     try {
       const expectedBuf = Buffer.from(generatedSignature, 'utf8');
-      const sigBuf = Buffer.from(razorpay_signature, 'utf8');
+      const sigBuf = Buffer.from(String(razorpay_signature), 'utf8');
       if (expectedBuf.length === sigBuf.length && crypto.timingSafeEqual(expectedBuf, sigBuf)) {
         isValidSignature = true;
       }
-    } catch (e) {
+    } catch {
       isValidSignature = false;
     }
 
-    // Disallow bypass tokens in production beta environments (Area 11)
-    if (!isProd && (razorpay_signature === 'test_bypass_token' || razorpay_signature.startsWith('sig_mock_') || razorpay_signature.startsWith('test_'))) {
+    if (
+      !isValidSignature &&
+      !isProd &&
+      (razorpay_signature === 'test_bypass_token' ||
+        String(razorpay_signature).startsWith('sig_mock_') ||
+        String(razorpay_signature).startsWith('test_'))
+    ) {
       isValidSignature = true;
     }
 
@@ -7027,60 +7269,88 @@ app.post('/api/razorpay/verify-payment', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid Razorpay payment signature' });
     }
 
-    // Optional check with Razorpay API if real live key
-    if (RAZORPAY_KEY_ID && !RAZORPAY_KEY_ID.startsWith('rzp_test_placeholder') && !razorpay_payment_id.startsWith('pay_test_') && !razorpay_payment_id.startsWith('pay_mock_') && !razorpay_payment_id.startsWith('pay_sim_')) {
+    // Verify with live Razorpay API when live credentials are configured
+    const hasLiveGateway = Boolean(
+      RAZORPAY_KEY_ID &&
+      RAZORPAY_KEY_SECRET &&
+      !RAZORPAY_KEY_ID.startsWith('rzp_test_placeholder') &&
+      !String(razorpay_payment_id).startsWith('pay_test_') &&
+      !String(razorpay_payment_id).startsWith('pay_mock_') &&
+      !String(razorpay_payment_id).startsWith('pay_sim_')
+    );
+    if (hasLiveGateway) {
       try {
         const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-        const rzpRes = await fetch(`https://api.razorpay.com/v1/payments/${razorpay_payment_id}`, {
-          headers: { 'Authorization': authHeader }
+        const rzpRes = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(razorpay_payment_id)}`, {
+          headers: { 'Authorization': authHeader },
+          signal: AbortSignal.timeout(8000)
         });
-        if (rzpRes.ok) {
+        if (!rzpRes.ok) {
+          if (isProd) {
+            return res.status(400).json({ success: false, error: 'Unable to confirm payment status with Razorpay.' });
+          }
+        } else {
           const paymentData = await rzpRes.json();
-          if (paymentData?.currency && paymentData.currency.toUpperCase() !== 'USD') {
+          if (paymentData?.status && !['captured', 'authorized'].includes(String(paymentData.status).toLowerCase())) {
             return res.status(400).json({
               success: false,
-              error: `Currency rejection: Payment was charged in ${paymentData.currency}. Expected USD.`
+              error: `Payment status "${paymentData.status}" is not captured or authorized.`
             });
           }
-          if (paymentData?.amount && paymentData.amount !== expected.amountCents) {
+          if (paymentData?.order_id && paymentData.order_id !== razorpay_order_id) {
             return res.status(400).json({
               success: false,
-              error: `Amount rejection: Payment was charged ${paymentData.amount} cents. Expected ${expected.amountCents} cents ($${expected.amountUsd} USD).`
+              error: 'Payment order ID mismatch detected.'
+            });
+          }
+          const actualCurrency = String(paymentData?.currency || '').toUpperCase();
+          const expectedOrderCurrency = String(storedOrder.currency || 'INR').toUpperCase();
+          if (actualCurrency && actualCurrency !== expectedOrderCurrency) {
+            return res.status(400).json({
+              success: false,
+              error: `Currency rejection: Payment was charged in ${actualCurrency}. Expected ${expectedOrderCurrency}.`
+            });
+          }
+          if (paymentData?.amount && Number(paymentData.amount) !== Number(storedOrder.amount_paise)) {
+            return res.status(400).json({
+              success: false,
+              error: `Amount rejection: Payment was charged ${paymentData.amount}. Expected ${storedOrder.amount_paise} (${expectedOrderCurrency}).`
             });
           }
         }
       } catch (fetchErr) {
         console.warn('[Razorpay Live Verify Warning]:', fetchErr);
+        if (isProd) {
+          return res.status(502).json({ success: false, error: 'Unable to verify payment with Razorpay API.' });
+        }
       }
     }
 
-    // Update user in usersDatabase
-    const authUser = getAuthUser(req);
-    const targetEmail = (email || authUser?.email || (usersDatabase[0] ? usersDatabase[0].email : '')).toLowerCase();
-    const user = usersDatabase.find(u => u.email.toLowerCase() === targetEmail);
-
-    if (user) {
-      user.billing_status = 'active';
-      user.payment_status = 'paid';
-      user.selected_plan = expected.tier;
-      user.plan_price = expected.amountUsd;
-      user.subscription_start_date = new Date().toISOString();
-      user.current_period_end = new Date(Date.now() + (expected.billingCycle === 'annual' ? 365 : 30) * 86400000).toISOString();
-      user.updated_at = new Date().toISOString();
-      try {
-        await db.users.upsert(user as any);
-      } catch (e: any) {}
-    }
-
-    // Synchronize subscriptionsDatabase
-    const workspaceId = user?.workspace_id || authUser?.workspace_id || 'ws-default';
-    const subIndex = subscriptionsDatabase.findIndex(s => s.workspace_id === workspaceId);
     const nowIso = new Date().toISOString();
+    const periodEndIso = new Date(Date.now() + (expected.billingCycle === 'annual' ? 365 : 30) * 86400000).toISOString();
+
+    // Mark order paid so it cannot be replayed
+    storedOrder.status = 'paid';
+    storedOrder.metadata_json = { ...orderMeta, payment_id: razorpay_payment_id, verified_at: nowIso };
+    storedOrder.updated_at = nowIso;
+    await db.razorpayOrders.upsert(storedOrder).catch(() => {});
+
+    const user = usersDatabase.find(u => u.id === authUser.id) || authUser;
+    user.billing_status = 'active';
+    user.payment_status = 'paid';
+    user.selected_plan = expected.tier;
+    user.plan_price = expected.amountUsd;
+    user.subscription_start_date = nowIso;
+    user.current_period_end = periodEndIso;
+    user.updated_at = nowIso;
+    await db.users.upsert(user as any).catch(() => {});
+
+    const subIndex = subscriptionsDatabase.findIndex(s => s.workspace_id === workspaceId);
     const updatedSub: DbSubscription = {
       id: subIndex >= 0 ? subscriptionsDatabase[subIndex].id : `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
       workspace_id: workspaceId,
-      user_id: user?.id || authUser?.id || 'usr-default',
-      email: targetEmail,
+      user_id: user.id,
+      email: user.email.toLowerCase(),
       tier: expected.tier,
       billing_cycle: expected.billingCycle,
       billing_plan_id: `plan_tier_${expected.tier}_${expected.billingCycle}`,
@@ -7097,9 +7367,35 @@ app.post('/api/razorpay/verify-payment', async (req, res) => {
     } else {
       subscriptionsDatabase.push(updatedSub);
     }
-    try {
-      await db.subscriptions.upsert(updatedSub as any);
-    } catch (e: any) {}
+    await db.subscriptions.upsert(updatedSub as any).catch(() => {});
+
+    const ledgerPayment: DbSubscriptionPayment = {
+      id: `spay_${razorpay_payment_id}`,
+      workspace_id: workspaceId,
+      user_id: user.id,
+      subscription_id: updatedSub.id,
+      razorpay_payment_id,
+      currency: storedOrder.currency || 'INR',
+      amount_usd: expected.amountUsd,
+      amount_cents: expected.amountCents,
+      converted_inr_amount: Math.round(storedOrder.amount_paise / 100),
+      settlement_status: 'settled',
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+    subscriptionPaymentsDatabase.unshift(ledgerPayment);
+    await db.subscriptionPayments.recordPayment(ledgerPayment).catch(() => {});
+
+    await syncSubscriptionToFirestore({
+      userId: user.id,
+      workspaceId,
+      tier: expected.tier,
+      billingCycle: expected.billingCycle,
+      status: 'active',
+      currentPeriodEnd: periodEndIso,
+      amountUsd: expected.amountUsd,
+      ctx: getFirebaseCtx(req)
+    }).catch(() => {});
 
     res.json({
       success: true,
@@ -7118,7 +7414,7 @@ app.post('/api/razorpay/verify-payment', async (req, res) => {
   }
 });
 
-// 16E2. Verify Razorpay Subscription Signature (Monthly Recurring Mandate)
+// 16E2. Verify Razorpay Subscription Signature (Authoritatively Bound to Pending Workspace Subscription)
 app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
   try {
     const authUser = (req as any).user as DbUser;
@@ -7127,16 +7423,8 @@ app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
     const {
       razorpay_subscription_id,
       razorpay_payment_id,
-      razorpay_signature,
-      tier = 'growth',
-      plan,
-      billing_cycle = 'monthly',
-      billingCycle,
-      currency,
-      isFoundingOffer,
-      is_founding_offer,
-      offer
-    } = req.body;
+      razorpay_signature
+    } = req.body || {};
 
     if (!razorpay_subscription_id || !razorpay_payment_id) {
       return res.status(400).json({ success: false, error: 'Missing subscription_id or payment_id' });
@@ -7147,19 +7435,41 @@ app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
     }
 
     if (!RAZORPAY_KEY_SECRET) {
-      return res.status(500).json({ success: false, error: 'Razorpay secret key is not configured on the server.' });
+      return res.status(503).json({ success: false, error: 'Razorpay secret key is not configured on the server.' });
     }
 
-    const selectedTier = normalizePlanTier(tier || plan);
-    const selectedCycle = String(billing_cycle || billingCycle || 'monthly').toLowerCase() === 'annual' ? 'annual' : 'monthly';
-    const isFounding = Boolean(isFoundingOffer || is_founding_offer || offer === 'founding');
-    const expected = getExpectedPlanAmount(selectedTier, selectedCycle, isFounding);
+    // Bind strictly to authoritative server-side subscription record for this workspace
+    const subIndex = subscriptionsDatabase.findIndex(
+      s => s.razorpay_subscription_id === razorpay_subscription_id
+    );
+    if (subIndex < 0) {
+      return res.status(404).json({ success: false, error: 'Subscription checkout record not found.' });
+    }
+    const existingSub = subscriptionsDatabase[subIndex];
+    if (existingSub.workspace_id !== workspaceId && existingSub.user_id !== authUser.id) {
+      return res.status(403).json({ success: false, error: 'Access denied: Subscription belongs to a different workspace.' });
+    }
 
-    // Validate currency if provided
-    if (currency && currency.toUpperCase() !== 'USD') {
-      return res.status(400).json({
-        success: false,
-        error: `Currency rejection: Expected USD, received ${currency}`
+    const isFounding = Boolean(existingSub.billing_plan_id?.includes('founding'));
+    const expected = getExpectedPlanAmount(existingSub.tier || 'growth', existingSub.billing_cycle || 'monthly', isFounding);
+
+    // Idempotent return if already verified with this payment ID
+    if (existingSub.status === 'active' && existingSub.razorpay_verification_payment_id === razorpay_payment_id) {
+      return res.json({
+        success: true,
+        verified: true,
+        already_verified: true,
+        message: `Subscription already verified for ${expected.name}.`,
+        subscriptionId: razorpay_subscription_id,
+        paymentId: razorpay_payment_id,
+        tier: expected.tier,
+        billing_interval: expected.billingCycle,
+        billing_cycle: expected.billingCycle,
+        amount: expected.amountUsd,
+        amountUsd: expected.amountUsd,
+        amountInr: expected.amountInr,
+        currency: 'USD',
+        billingStatus: 'active'
       });
     }
 
@@ -7173,16 +7483,50 @@ app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
     let isValidSignature = false;
     try {
       const expectedBuf = Buffer.from(generatedSignature, 'utf8');
-      const sigBuf = Buffer.from(razorpay_signature, 'utf8');
+      const sigBuf = Buffer.from(String(razorpay_signature), 'utf8');
       if (expectedBuf.length === sigBuf.length && crypto.timingSafeEqual(expectedBuf, sigBuf)) {
         isValidSignature = true;
       }
-    } catch (e) {
+    } catch {
       isValidSignature = false;
     }
 
     if (!isValidSignature) {
       return res.status(400).json({ success: false, error: 'Invalid Razorpay subscription signature' });
+    }
+
+    const isProd = process.env.NODE_ENV === 'production' && !process.env.AIS_DEV_ENVIRONMENT;
+    const hasLiveGateway = Boolean(
+      RAZORPAY_KEY_ID &&
+      RAZORPAY_KEY_SECRET &&
+      !RAZORPAY_KEY_ID.startsWith('rzp_test_placeholder') &&
+      !String(razorpay_payment_id).startsWith('pay_test_')
+    );
+    if (hasLiveGateway) {
+      try {
+        const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
+        const rzpRes = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(razorpay_payment_id)}`, {
+          headers: { 'Authorization': authHeader },
+          signal: AbortSignal.timeout(8000)
+        });
+        if (!rzpRes.ok) {
+          if (isProd) {
+            return res.status(400).json({ success: false, error: 'Unable to verify subscription payment with Razorpay.' });
+          }
+        } else {
+          const paymentData = await rzpRes.json();
+          if (paymentData?.status && !['captured', 'authorized'].includes(String(paymentData.status).toLowerCase())) {
+            return res.status(400).json({
+              success: false,
+              error: `Subscription payment status "${paymentData.status}" is not captured or authorized.`
+            });
+          }
+        }
+      } catch (err) {
+        if (isProd) {
+          return res.status(502).json({ success: false, error: 'Payment gateway verification temporarily unavailable.' });
+        }
+      }
     }
 
     const targetEmail = authUser.email.toLowerCase();
@@ -7197,22 +7541,14 @@ app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
     authUser.subscription_start_date = nowIso;
     authUser.current_period_end = periodEndIso;
     authUser.updated_at = nowIso;
-    try {
-      await db.users.upsert(authUser as any);
-    } catch (e: any) {}
+    await db.users.upsert(authUser as any).catch(() => {});
 
-    // Synchronize subscriptionsDatabase
-    const subIndex = subscriptionsDatabase.findIndex(s => s.workspace_id === workspaceId);
     const updatedSub: DbSubscription = {
-      id: subIndex >= 0 ? subscriptionsDatabase[subIndex].id : `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-      workspace_id: workspaceId,
-      user_id: authUser.id,
+      ...existingSub,
       email: targetEmail,
       tier: expected.tier,
       billing_cycle: expected.billingCycle,
       billing_interval: expected.billingCycle,
-      billing_plan_id: `plan_${expected.tier}_${expected.billingCycle}`,
-      razorpay_plan_id: `plan_sub_${expected.tier}_${expected.billingCycle}`,
       razorpay_subscription_id,
       currency: 'USD',
       amount: expected.amountUsd,
@@ -7223,41 +7559,28 @@ app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
       subscription_status: 'active',
       payment_verification_status: 'verified',
       razorpay_verification_payment_id: razorpay_payment_id,
-      created_at: subIndex >= 0 ? subscriptionsDatabase[subIndex].created_at : nowIso,
       updated_at: nowIso
     };
-    if (subIndex >= 0) {
-      subscriptionsDatabase[subIndex] = updatedSub;
-    } else {
-      subscriptionsDatabase.push(updatedSub);
-    }
-    try {
-      await db.subscriptions.upsert(updatedSub as any);
-    } catch (e: any) {}
+    subscriptionsDatabase[subIndex] = updatedSub;
+    await db.subscriptions.upsert(updatedSub as any).catch(() => {});
 
-    // Record verified subscription payment into authoritative ledger
     const ledgerPayment: DbSubscriptionPayment = {
       id: `spay_${razorpay_payment_id}`,
       workspace_id: workspaceId,
       user_id: authUser.id,
       subscription_id: razorpay_subscription_id,
-      razorpay_payment_id: razorpay_payment_id,
+      razorpay_payment_id,
       currency: 'USD',
       amount_usd: expected.amountUsd,
       amount_cents: expected.amountCents,
       converted_inr_amount: expected.amountInr,
-      settlement_status: 'pending',
+      settlement_status: 'settled',
       created_at: nowIso,
       updated_at: nowIso
     };
     subscriptionPaymentsDatabase.unshift(ledgerPayment);
-    try {
-      await db.subscriptionPayments.recordPayment(ledgerPayment);
-    } catch (payErr: any) {
-      console.warn('[Subscription Payment Ledger Warning]:', payErr.message);
-    }
+    await db.subscriptionPayments.recordPayment(ledgerPayment).catch(() => {});
 
-    // Synchronize to Firestore
     await syncSubscriptionToFirestore({
       userId: authUser.id,
       workspaceId,
@@ -7268,7 +7591,7 @@ app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
       currentPeriodEnd: periodEndIso,
       amountUsd: expected.amountUsd,
       ctx: getFirebaseCtx(req)
-    });
+    }).catch(() => {});
 
     res.json({
       success: true,
@@ -7339,7 +7662,11 @@ app.post('/api/razorpay/webhook', async (req, res) => {
 
     const event = req.body?.event;
     const payload = req.body?.payload;
-    const eventId = (req.body?.id as string) || (req.headers['x-razorpay-event-id'] as string) || `${event}_${Date.now()}`;
+    const bodyHash = crypto.createHash('sha256').update(String(rawBody)).digest('hex').slice(0, 24);
+    const eventId =
+      (req.headers['x-razorpay-event-id'] as string) ||
+      (req.body?.id as string) ||
+      `rzp_${event || 'unknown'}_${bodyHash}`;
 
     // Database-backed strict idempotency check
     const isNew = await db.webhookEvents.recordIfNew(eventId, event || 'unknown', eventId, req.body);
@@ -7363,26 +7690,32 @@ app.post('/api/razorpay/webhook', async (req, res) => {
     } else if (event === 'subscription.activated') {
       const subscription = payload?.subscription?.entity;
       console.log(`[Razorpay Subscription Activated]: ID ${subscription?.id}`);
-      const subRec = subscriptionsDatabase.find(s => s.razorpay_subscription_id === subscription?.id);
+      const user = usersDatabase.find(u =>
+        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
+        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
+        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
+      );
+      const subRec = subscriptionsDatabase.find(
+        s =>
+          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
+          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
+          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
+      );
       if (subRec) {
         subRec.status = 'active';
+        if (subscription?.id) subRec.razorpay_subscription_id = subscription.id;
         subRec.updated_at = new Date().toISOString();
         await db.subscriptions.upsert(subRec as any);
       }
-
-      // Mark associated user active
-      const user = usersDatabase.find(u =>
-        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
-        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase())
-      );
       if (user) {
         user.billing_status = 'active';
         user.payment_status = 'paid';
+        if (subscription?.id) user.razorpay_subscription_id = subscription.id;
         user.subscription_start_date = new Date().toISOString();
         user.current_period_end = new Date(Date.now() + 30 * 86400000).toISOString();
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
-        console.log(`[Razorpay Webhook]: User ${user.email} marked active.`);
+        console.log(`[Razorpay Webhook]: User ${user.id} subscription marked active.`);
 
         await syncSubscriptionToFirestore({
           userId: user.id,
@@ -7399,22 +7732,30 @@ app.post('/api/razorpay/webhook', async (req, res) => {
       const payment = payload?.payment?.entity;
       console.log(`[Razorpay Subscription Charged]: ID ${subscription?.id}, payment ${payment?.id}`);
 
-      const subRec = subscriptionsDatabase.find(s => s.razorpay_subscription_id === subscription?.id);
+      const user = usersDatabase.find(u =>
+        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
+        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
+        (payment?.email && u.email.toLowerCase() === payment.email.toLowerCase()) ||
+        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
+      );
+      const subRec = subscriptionsDatabase.find(
+        s =>
+          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
+          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
+          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
+      );
       if (subRec) {
         subRec.status = 'active';
+        if (subscription?.id) subRec.razorpay_subscription_id = subscription.id;
         subRec.updated_at = new Date().toISOString();
         await db.subscriptions.upsert(subRec as any);
       }
 
-      const user = usersDatabase.find(u =>
-        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
-        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
-        (payment?.email && u.email.toLowerCase() === payment.email.toLowerCase())
-      );
       if (user) {
         user.billing_status = 'active';
         user.payment_status = 'paid';
-        user.current_period_end = new Date(Date.now() + 30 * 86400000).toISOString();
+        if (subscription?.id) user.razorpay_subscription_id = subscription.id;
+        user.current_period_end = new Date(Date.now() + ((subRec?.billing_cycle === 'annual' ? 365 : 30) * 86400000)).toISOString();
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
 
@@ -7429,7 +7770,6 @@ app.post('/api/razorpay/webhook', async (req, res) => {
         });
       }
 
-      // Record in subscription_payments ledger (Requirement 7)
       if (payment?.id) {
         const paymentCurrency = (payment.currency || 'USD').toUpperCase();
         const amountCents = Number(payment.amount) || 0;
@@ -7470,22 +7810,28 @@ app.post('/api/razorpay/webhook', async (req, res) => {
           console.warn('[Razorpay Webhook DB Error]: Failed to save subscription payment ledger:', dbErr.message);
         }
       }
-    } else if (event === 'subscription.halted') {
+    } else if (event === 'subscription.halted' || event === 'subscription.pending' || event === 'subscription.paused') {
       const subscription = payload?.subscription?.entity;
-      console.warn(`[Razorpay Subscription Halted]: ID ${subscription?.id}`);
-      const subRec = subscriptionsDatabase.find(s => s.razorpay_subscription_id === subscription?.id);
+      console.warn(`[Razorpay ${event}]: ID ${subscription?.id}`);
+      const user = usersDatabase.find(u =>
+        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
+        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
+        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
+      );
+      const subRec = subscriptionsDatabase.find(
+        s =>
+          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
+          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
+          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
+      );
       if (subRec) {
-        subRec.status = 'halted';
+        subRec.status = event === 'subscription.paused' ? 'cancelled' : 'halted';
         subRec.updated_at = new Date().toISOString();
         await db.subscriptions.upsert(subRec as any);
       }
 
-      const user = usersDatabase.find(u =>
-        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
-        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase())
-      );
       if (user) {
-        user.billing_status = 'past_due';
+        user.billing_status = event === 'subscription.paused' ? 'cancelled' : 'past_due';
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
 
@@ -7494,24 +7840,30 @@ app.post('/api/razorpay/webhook', async (req, res) => {
           workspaceId: user.workspace_id || subRec?.workspace_id,
           tier: subRec?.tier || user.selected_plan || 'growth',
           billingCycle: subRec?.billing_cycle || 'monthly',
-          status: 'past_due',
+          status: user.billing_status,
           razorpaySubscriptionId: subscription?.id
         });
       }
     } else if (event === 'subscription.cancelled') {
       const subscription = payload?.subscription?.entity;
       console.log(`[Razorpay Subscription Cancelled]: ID ${subscription?.id}`);
-      const subRec = subscriptionsDatabase.find(s => s.razorpay_subscription_id === subscription?.id);
+      const user = usersDatabase.find(u =>
+        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
+        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
+        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
+      );
+      const subRec = subscriptionsDatabase.find(
+        s =>
+          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
+          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
+          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
+      );
       if (subRec) {
         subRec.status = 'cancelled';
         subRec.updated_at = new Date().toISOString();
         await db.subscriptions.upsert(subRec as any);
       }
 
-      const user = usersDatabase.find(u =>
-        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
-        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase())
-      );
       if (user) {
         user.billing_status = 'cancelled';
         user.updated_at = new Date().toISOString();
@@ -7526,12 +7878,52 @@ app.post('/api/razorpay/webhook', async (req, res) => {
           razorpaySubscriptionId: subscription?.id
         });
       }
+    } else if (event === 'payment.refunded' || event === 'refund.created' || event === 'refund.processed') {
+      const payment = payload?.payment?.entity;
+      const refund = payload?.refund?.entity;
+      const paymentId = payment?.id || refund?.payment_id;
+      const orderId = payment?.order_id;
+      console.log(`[Razorpay Refund Event ${event}]: Payment ${paymentId || 'unknown'}`);
+
+      const ledgerRec = subscriptionPaymentsDatabase.find(p => p.razorpay_payment_id === paymentId);
+      if (ledgerRec) {
+        ledgerRec.settlement_status = 'failed';
+        ledgerRec.updated_at = new Date().toISOString();
+        await db.subscriptionPayments.recordPayment(ledgerRec).catch(() => {});
+      }
+
+      const subRec = subscriptionsDatabase.find(
+        s =>
+          (paymentId && s.razorpay_verification_payment_id === paymentId) ||
+          (orderId && s.razorpay_verification_order_id === orderId) ||
+          (ledgerRec && s.workspace_id === ledgerRec.workspace_id)
+      );
+      if (subRec) {
+        subRec.status = 'cancelled';
+        subRec.updated_at = new Date().toISOString();
+        await db.subscriptions.upsert(subRec as any).catch(() => {});
+
+        const ownerUser = usersDatabase.find(u => u.workspace_id === subRec.workspace_id);
+        if (ownerUser) {
+          ownerUser.billing_status = 'cancelled';
+          ownerUser.payment_status = 'failed';
+          ownerUser.updated_at = new Date().toISOString();
+          await db.users.upsert(ownerUser as any).catch(() => {});
+          await syncSubscriptionToFirestore({
+            userId: ownerUser.id,
+            workspaceId: subRec.workspace_id,
+            tier: subRec.tier,
+            billingCycle: subRec.billing_cycle,
+            status: 'cancelled',
+            razorpaySubscriptionId: subRec.razorpay_subscription_id
+          }).catch(() => {});
+        }
+      }
     } else if (event === 'payment.captured' || event === 'order.paid') {
       const payment = payload?.payment?.entity;
       const orderId = payment?.order_id || payload?.order?.entity?.id;
       console.log(`[Razorpay ${event}]: Payment ${payment?.id || 'none'}, Order ${orderId || 'none'}`);
 
-      // If this order corresponds to a pending trial verification, activate the trial idempotently
       if (orderId) {
         const verification = trialVerificationsDatabase.find(v => v.razorpay_order_id === orderId);
         if (verification && verification.status !== 'verified') {
@@ -7599,13 +7991,22 @@ app.post('/api/razorpay/webhook', async (req, res) => {
     } else if (event === 'subscription.failed') {
       const subscription = payload?.subscription?.entity;
       console.warn(`[Razorpay Subscription Failed]: ID ${subscription?.id}`);
-      const subRec = subscriptionsDatabase.find(s => s.razorpay_subscription_id === subscription?.id);
+      const user = usersDatabase.find(u =>
+        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
+        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
+        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
+      );
+      const subRec = subscriptionsDatabase.find(
+        s =>
+          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
+          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
+          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
+      );
       if (subRec) {
         subRec.status = 'halted';
         subRec.updated_at = new Date().toISOString();
         await db.subscriptions.upsert(subRec as any);
       }
-      const user = usersDatabase.find(u => u.razorpay_subscription_id === subscription?.id);
       if (user) {
         user.billing_status = 'past_due';
         user.updated_at = new Date().toISOString();
@@ -7644,124 +8045,17 @@ app.post('/api/razorpay/webhook', async (req, res) => {
 
 // ----------------------------------------------------
 // 17. SUPABASE REST DATABASE INTEGRATION
-// ----------------------------------------------------
-// 17. DATABASE INTEGRATION (Persistent Engine + Firebase Cloud Firestore)
-// ----------------------------------------------------
-// 17A. Database Status Check (Firebase Cloud Firestore + Persistent Engine)
-const handleDatabaseStatus = async (req: express.Request, res: express.Response) => {
-  try {
-    const fbCtx = getFirebaseCtx(req);
-    const [stats, fbProbe] = await Promise.all([
-      db.admin.getTableStats(),
-      firebaseBackend.testConnection(fbCtx)
-    ]);
-    const checklist = firebaseBackend.getConnectionChecklist(fbCtx, fbProbe);
-    res.json({
-      success: true,
-      url: `firebase://${firebaseConfig.projectId}/${firebaseConfig.firestoreDatabaseId}`,
-      projectId: firebaseConfig.projectId,
-      databaseId: firebaseConfig.firestoreDatabaseId,
-      authDomain: firebaseConfig.authDomain,
-      isConfigured: true,
-      isConnected: fbProbe.reachable,
-      responseCode: fbProbe.reachable ? 200 : 503,
-      statusText: `Connected & Live (${stats.engine} + Firebase Cloud Firestore: ${fbProbe.mode})`,
-      latencyMs: stats.latencyMs,
-      firebaseLatencyMs: fbProbe.latencyMs,
-      firebaseMode: fbProbe.mode,
-      checklist,
-      tables: stats.tables
-    });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      isConfigured: true,
-      isConnected: false,
-      responseCode: 500,
-      statusText: 'Database check failed',
-      error: error?.message || 'Failed to inspect database tables',
-      tables: []
-    });
-  }
-};
-app.get('/api/supabase/status', requireAdmin, handleDatabaseStatus);
-app.get('/api/firebase/status', requireAdmin, handleDatabaseStatus);
-
-// 17B. Database Sync Customers & Integrations to Firebase Cloud Firestore
-const handleDatabaseSync = async (req: express.Request, res: express.Response) => {
-  try {
-    const { action = 'export', table = 'customers' } = req.body;
-    const workspaceId = (req as any).workspaceId as string;
-    const fbCtx = getFirebaseCtx(req);
-
-    // Persist any in-memory workspace customer changes and synchronize with Firebase Cloud Firestore
-    const workspaceCustomers = customersDatabase.filter(
-      c => (c.workspaceId || 'ws-default') === workspaceId
-    );
-    await Promise.all([
-      ...workspaceCustomers.map(c => db.customers.upsert(workspaceId, c)),
-      fbCtx && workspaceCustomers.length > 0
-        ? firebaseBackend.customers.batchUpsert(fbCtx, workspaceCustomers).catch(() => {})
-        : Promise.resolve(),
-      fbCtx
-        ? Promise.all(integrationsState.map(i => firebaseBackend.integrations.upsert(fbCtx, i).catch(() => {})))
-        : Promise.resolve()
-    ]);
-    const refreshedWorkspaceCustomers = await db.customers.listByWorkspace(workspaceId);
-
-    const nowIso = new Date().toISOString();
-    const fbIntegration = integrationsState.find(i => i.id === 'firebase');
-    if (fbIntegration) {
-      fbIntegration.lastSyncAt = nowIso;
-      fbIntegration.isConnected = true;
-      fbIntegration.statusText = `Synced ${refreshedWorkspaceCustomers.length} customer telemetry records to Firestore`;
-      fbIntegration.syncedRecordsCount = refreshedWorkspaceCustomers.length;
-    }
-
-    res.json({
-      success: true,
-      action,
-      table,
-      syncedRecordsCount: refreshedWorkspaceCustomers.length,
-      firebaseSynced: Boolean(fbCtx && firebaseBackend.isReady(fbCtx)),
-      timestamp: nowIso,
-      message: `Synchronized ${refreshedWorkspaceCustomers.length} workspace customer records with Firebase Cloud Firestore & local persistence.`
-    });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error?.message || 'Failed to sync database records' });
-  }
-};
-app.post('/api/supabase/sync', requireAdmin, handleDatabaseSync);
-app.post('/api/firebase/sync', requireAdmin, handleDatabaseSync);
-
-// 17C. Database Test Connection
-const handleDatabaseTest = async (req: express.Request, res: express.Response) => {
-  try {
-    const fbCtx = getFirebaseCtx(req);
-    const [stats, fbProbe] = await Promise.all([
-      db.admin.getTableStats(),
-      firebaseBackend.testConnection(fbCtx)
-    ]);
-    res.json({
-      success: fbProbe.reachable,
-      url: `firebase://${firebaseConfig.projectId}/${firebaseConfig.firestoreDatabaseId}`,
-      status: fbProbe.reachable ? 'online' : 'error',
-      latencyMs: stats.latencyMs,
-      firebaseLatencyMs: fbProbe.latencyMs,
-      firebaseMode: fbProbe.mode,
-      engine: stats.engine,
-      message: `Verified Firebase Cloud Firestore (${fbProbe.details}) & ${stats.engine} persistence (${stats.latencyMs}ms).`
-    });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      status: 'error',
-      error: error?.message || 'Database connection test failed'
-    });
-  }
-};
-app.post('/api/supabase/test', requireAdmin, handleDatabaseTest);
-app.post('/api/firebase/test', requireAdmin, handleDatabaseTest);
+// Internal database inspection endpoints disabled in customer-facing API
+app.all([
+  '/api/supabase/status',
+  '/api/firebase/status',
+  '/api/supabase/sync',
+  '/api/firebase/sync',
+  '/api/supabase/test',
+  '/api/firebase/test'
+], (_req, res) => {
+  res.status(404).json({ success: false, error: 'Endpoint not found' });
+});
 
 // 17D. Admin Audit Logs Endpoint (Area 5, 7)
 app.get('/api/admin/audit-logs', requireAdmin, async (req, res) => {
@@ -7788,45 +8082,7 @@ app.get('/api/admin/audit-logs', requireAdmin, async (req, res) => {
   }
 });
 
-// 17E. Supabase Storage Signed Download URL (Area 8 - Secure Multi-Tenant File Access)
-app.get('/api/storage/signed-url', requireAuth, async (req, res) => {
-  try {
-    const bucket = req.query.bucket as StorageBucketId;
-    const filePath = req.query.filePath as string;
-    const expiresIn = parseInt(req.query.expiresIn as string) || 900; // 15 mins
-    const userWorkspace = (req as any).workspaceId as string;
-
-    if (!bucket || !filePath) {
-      return res.status(400).json({ success: false, error: 'bucket and filePath are required query parameters' });
-    }
-
-    // Verify tenant boundary: the filePath must start with user's workspaceId
-    const pathPrefix = filePath.split('/')[0];
-    if (pathPrefix !== userWorkspace && (req as any).userRole !== 'superadmin') {
-      return res.status(403).json({ success: false, error: 'Forbidden: Cannot access files outside your assigned workspace' });
-    }
-
-    const result = await createSignedDownloadUrl({
-      workspaceId: userWorkspace,
-      bucketId: bucket,
-      storagePath: filePath,
-      expiresInSeconds: expiresIn
-    });
-    if (!result.success) {
-      return res.status(500).json({ success: false, error: result.error || 'Failed to generate signed URL' });
-    }
-
-    res.json({
-      success: true,
-      bucket,
-      filePath,
-      signedUrl: result.signedUrl,
-      expiresIn
-    });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err?.message || 'Storage signed URL error' });
-  }
-});
+// Duplicate /api/storage/signed-url consolidated into canonical route in Section 12C.
 
 
 // ----------------------------------------------------
@@ -7914,8 +8170,8 @@ function escapeHtml(str: string): string {
     .replace(/'/g, '&#039;');
 }
 
-// 18A. Get Outbound Integrations Status (Area 2, 7)
-app.get('/api/integrations/outbound-status', requireAuth, async (req, res) => {
+// 18A. Get Outbound Integrations Status (Sanitized — no env var names or masked identifiers)
+app.get('/api/integrations/outbound-status', requireAuth, async (_req, res) => {
   const isWhatsAppConfigured = Boolean(
     WHATSAPP_ACCESS_TOKEN && WHATSAPP_PHONE_NUMBER_ID && WHATSAPP_BUSINESS_ACCOUNT_ID
   );
@@ -7925,30 +8181,20 @@ app.get('/api/integrations/outbound-status', requireAuth, async (req, res) => {
     whatsapp: {
       configured: isWhatsAppConfigured,
       status: isWhatsAppConfigured ? 'connected' : 'not_configured',
-      provider: 'WhatsApp Business Cloud API (Meta)',
-      maskedIdentifier: WHATSAPP_PHONE_NUMBER_ID ? maskSecret(WHATSAPP_PHONE_NUMBER_ID) : null,
-      phoneNumberIdMasked: WHATSAPP_PHONE_NUMBER_ID ? maskSecret(WHATSAPP_PHONE_NUMBER_ID) : null,
-      businessAccountIdMasked: WHATSAPP_BUSINESS_ACCOUNT_ID ? maskSecret(WHATSAPP_BUSINESS_ACCOUNT_ID) : null,
-      error: isWhatsAppConfigured
-        ? null
-        : 'Missing WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, or WHATSAPP_BUSINESS_ACCOUNT_ID',
-      requiredEnvVars: ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_BUSINESS_ACCOUNT_ID'],
+      provider: 'WhatsApp Business',
       lastCheckedAt: new Date().toISOString()
     },
     email: {
       configured: isEmailConfigured,
       status: isEmailConfigured ? 'connected' : 'not_configured',
-      provider: 'Resend Email API',
-      maskedIdentifier: RESEND_API_KEY ? maskSecret(RESEND_API_KEY) : null,
-      fromEmail: RESEND_FROM_EMAIL,
-      error: isEmailConfigured ? null : 'Missing RESEND_API_KEY',
-      requiredEnvVars: ['RESEND_API_KEY', 'RESEND_FROM_EMAIL'],
+      provider: 'Email Outreach',
+      fromEmail: isEmailConfigured ? RESEND_FROM_EMAIL : null,
       lastCheckedAt: new Date().toISOString()
     }
   });
 });
 
-// 18B. Safe Outbound Configuration Verification Test (NO customer messages sent) (Area 2, 7)
+// 18B. Safe Outbound Configuration Verification Test (NO customer messages sent)
 app.post('/api/integrations/test-config', requireAuth, async (req, res) => {
   try {
     const { channel } = req.body;
@@ -7965,9 +8211,7 @@ app.post('/api/integrations/test-config', requireAuth, async (req, res) => {
           channel: 'whatsapp',
           verified: false,
           status: 'not_configured',
-          message: 'WhatsApp sending is not configured yet. Server-side environment variables WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, and WHATSAPP_BUSINESS_ACCOUNT_ID are required.',
-          distinction: 'CONFIGURATION_VERIFIED_ONLY_NO_MESSAGE_SENT',
-          requiredEnvVars: ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_BUSINESS_ACCOUNT_ID']
+          message: 'WhatsApp Business messaging is not enabled yet for this environment.'
         });
       }
 
@@ -7985,18 +8229,16 @@ app.post('/api/integrations/test-config', requireAuth, async (req, res) => {
             channel: 'whatsapp',
             verified: true,
             status: 'connected',
-            message: `Configuration verified! Connected to WhatsApp Business Phone: ${metaData.display_phone_number || WHATSAPP_PHONE_NUMBER_ID}`,
-            distinction: 'CONFIGURATION_VERIFIED_ONLY_NO_MESSAGE_SENT',
+            message: `WhatsApp Business channel verified${metaData.display_phone_number ? ` (${metaData.display_phone_number})` : ''}.`,
             safeDetails: `Verified Name: ${metaData.verified_name || 'Active'}, Quality: ${metaData.quality_rating || 'GREEN'}`
           });
         } else {
-          const errDetail = metaData?.error?.message || 'Invalid WhatsApp Business credentials or phone number ID.';
+          const errDetail = metaData?.error?.message || 'WhatsApp verification failed.';
           return res.json({
             channel: 'whatsapp',
             verified: false,
             status: 'error',
-            message: `WhatsApp API verification failed: ${sanitizeErrorMessage(errDetail)}`,
-            distinction: 'CONFIGURATION_VERIFIED_ONLY_NO_MESSAGE_SENT'
+            message: `WhatsApp verification failed: ${sanitizeErrorMessage(errDetail)}`
           });
         }
       } catch (networkErr: any) {
@@ -8004,8 +8246,7 @@ app.post('/api/integrations/test-config', requireAuth, async (req, res) => {
           channel: 'whatsapp',
           verified: false,
           status: 'error',
-          message: `Network error verifying WhatsApp API: ${sanitizeErrorMessage(networkErr.message)}`,
-          distinction: 'CONFIGURATION_VERIFIED_ONLY_NO_MESSAGE_SENT'
+          message: `Network error verifying WhatsApp channel: ${sanitizeErrorMessage(networkErr.message)}`
         });
       }
     }
@@ -8016,9 +8257,7 @@ app.post('/api/integrations/test-config', requireAuth, async (req, res) => {
           channel: 'email',
           verified: false,
           status: 'not_configured',
-          message: 'Email sending is not configured yet. Server-side environment variable RESEND_API_KEY is required.',
-          distinction: 'CONFIGURATION_VERIFIED_ONLY_NO_MESSAGE_SENT',
-          requiredEnvVars: ['RESEND_API_KEY', 'RESEND_FROM_EMAIL']
+          message: 'Email outreach is not enabled yet for this environment.'
         });
       }
 
@@ -8036,12 +8275,11 @@ app.post('/api/integrations/test-config', requireAuth, async (req, res) => {
             channel: 'email',
             verified: true,
             status: 'connected',
-            message: 'Configuration verified! Connected to Resend Email API successfully.',
-            distinction: 'CONFIGURATION_VERIFIED_ONLY_NO_MESSAGE_SENT',
+            message: 'Email outreach channel verified successfully.',
             safeDetails: `Sender Address: ${RESEND_FROM_EMAIL}`
           });
         } else {
-          const errDetail = resendData?.message || 'Invalid Resend API key or unauthorized.';
+          const errDetail = resendData?.message || 'Email verification failed.';
           return res.json({
             channel: 'email',
             verified: false,
@@ -8068,7 +8306,89 @@ app.post('/api/integrations/test-config', requireAuth, async (req, res) => {
   }
 });
 
-// 18C. Send Message via Real WhatsApp Business Cloud API or Resend Email API (Area 2, 4, 5)
+// 18B2. Meta WhatsApp Cloud API Webhook (Verification Challenge + HMAC-SHA256 Signature + STOP Opt-Out)
+app.get('/api/whatsapp/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = String(req.query['hub.verify_token'] || '');
+  const challenge = String(req.query['hub.challenge'] || '');
+  const expectedToken = (process.env.WHATSAPP_VERIFY_TOKEN || '').trim();
+
+  if (!expectedToken) {
+    return res.status(503).send('WhatsApp webhook verification token not configured.');
+  }
+
+  let matches = false;
+  try {
+    const a = Buffer.from(token, 'utf8');
+    const b = Buffer.from(expectedToken, 'utf8');
+    matches = a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch {
+    matches = false;
+  }
+
+  if (mode === 'subscribe' && matches) {
+    return res.status(200).type('text/plain').send(challenge);
+  }
+  return res.status(403).send('Forbidden');
+});
+
+app.post('/api/whatsapp/webhook', async (req, res) => {
+  try {
+    const appSecret = (process.env.WHATSAPP_APP_SECRET || '').trim();
+    const isProd = process.env.NODE_ENV === 'production' && !process.env.AIS_DEV_ENVIRONMENT;
+
+    if (!appSecret) {
+      if (isProd) {
+        return res.status(503).json({ success: false, error: 'WHATSAPP_APP_SECRET is not configured on the server.' });
+      }
+      return res.status(503).json({ success: false, error: 'WhatsApp webhook signature secret not configured.' });
+    }
+
+    const sigHeader = String(req.headers['x-hub-signature-256'] || '').trim();
+    if (!sigHeader.startsWith('sha256=')) {
+      return res.status(401).json({ success: false, error: 'Missing required x-hub-signature-256 header.' });
+    }
+
+    const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+    const expectedSig = 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
+
+    let isValid = false;
+    try {
+      const a = Buffer.from(expectedSig, 'utf8');
+      const b = Buffer.from(sigHeader, 'utf8');
+      isValid = a.length === b.length && crypto.timingSafeEqual(a, b);
+    } catch {
+      isValid = false;
+    }
+
+    if (!isValid) {
+      return res.status(403).json({ success: false, error: 'Invalid Meta WhatsApp webhook signature.' });
+    }
+
+    // Handle incoming STOP / UNSUBSCRIBE keywords
+    const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
+    for (const entry of entries) {
+      const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+      for (const change of changes) {
+        const messages = Array.isArray(change?.value?.messages) ? change.value.messages : [];
+        for (const msg of messages) {
+          const from = String(msg?.from || '').replace(/[\s\(\)\-\.]/g, '').replace(/^\+/, '');
+          const bodyText = String(msg?.text?.body || '').trim().toUpperCase();
+          if (from && /^(STOP|UNSUBSCRIBE|CANCEL|END|QUIT|OPTOUT)$/.test(bodyText)) {
+            markPhoneOptedOut(from);
+            await db.unsubscribes.add('whatsapp', from).catch(() => {});
+          }
+        }
+      }
+    }
+
+    return res.json({ status: 'ok', received: true });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: sanitizeErrorMessage(err?.message || 'WhatsApp webhook error') });
+  }
+});
+
+// 18C. Send Message via Real WhatsApp Business Cloud API or Resend Email API (Consent, Dedup & Retry Hardened)
 app.post('/api/messages/send', requireAuth, messagingLimiter, async (req, res) => {
   try {
     const {
@@ -8099,20 +8419,19 @@ app.post('/api/messages/send', requireAuth, messagingLimiter, async (req, res) =
       });
     }
 
-    const authUser = (req as any).user as DbUser;
     const targetWorkspace = (req as any).workspaceId as string;
     const access = getWorkspaceAccessStatus(targetWorkspace);
-    if (!access.isAllowedAccess && access.status === 'trial_expired') {
+    if (!access.isAllowedAccess) {
       return res.status(403).json({
         success: false,
         status: 'FAILED',
-        error: 'Your 14-day free trial has ended. Please choose a plan to dispatch outreach messages.',
-        code: 'TRIAL_EXPIRED',
-        trialExpired: true
+        error: access.message || 'Your subscription or trial is inactive. Please choose a plan to dispatch outreach messages.',
+        code: access.status === 'trial_expired' ? 'TRIAL_EXPIRED' : 'SUBSCRIPTION_INACTIVE',
+        trialExpired: access.status === 'trial_expired'
       });
     }
 
-    // 1. REQUIRE MESSAGE APPROVAL (Section 1 & 2)
+    // 1. REQUIRE MESSAGE APPROVAL
     if (!isApproved) {
       return res.status(400).json({
         success: false,
@@ -8121,33 +8440,36 @@ app.post('/api/messages/send', requireAuth, messagingLimiter, async (req, res) =
       });
     }
 
-
-    // 1B. Server-side Monthly Message Quota Check (Limits: Starter 50/mo, Growth 500/mo, Enterprise 2,500/mo)
-    const msgUsage = checkAndRecordMessageUsage(targetWorkspace, channel);
-    if (!msgUsage.allowed) {
-      return res.status(403).json({
+    // 1A. Persistent Duplicate & Same-Day Customer Outreach Prevention
+    const dupCheck = await checkPersistentIdempotencyOrDailyDuplicate({
+      workspaceId: targetWorkspace,
+      messageId: String(messageId),
+      channel,
+      customerId: customerId ? String(customerId) : undefined,
+      content: String(content)
+    });
+    if (dupCheck.isDuplicate) {
+      return res.status(409).json({
         success: false,
-        status: 'FAILED',
-        error: msgUsage.error,
-        code: 'MESSAGE_LIMIT_REACHED'
+        status: 'DUPLICATE_SUPPRESSED',
+        duplicate: true,
+        providerMessageId: dupCheck.existingProviderId,
+        error: dupCheck.reason || 'Duplicate outbound message prevented.'
       });
     }
 
-    // 2. DISPATCH THROUGH REAL WHATSAPP BUSINESS CLOUD API
+    // 1B. Check customer consent / opt-out BEFORE deducting monthly quota or dispatching
     if (channel === 'whatsapp') {
-      // Validate WhatsApp configuration
       if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID || !WHATSAPP_BUSINESS_ACCOUNT_ID) {
         return res.status(400).json({
           success: false,
           status: 'FAILED',
-          error: 'WhatsApp sending is not configured yet. Server-side environment variables WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, and WHATSAPP_BUSINESS_ACCOUNT_ID are required.',
-          requiredEnvVars: ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_BUSINESS_ACCOUNT_ID']
+          error: 'WhatsApp Business messaging is not enabled yet.'
         });
       }
 
-      // Validate customer phone number
       const phoneValidation = validateWhatsAppPhone(recipientPhone);
-      if (!phoneValidation.isValid) {
+      if (!phoneValidation.isValid || !phoneValidation.normalized) {
         return res.status(400).json({
           success: false,
           status: 'FAILED',
@@ -8155,86 +8477,123 @@ app.post('/api/messages/send', requireAuth, messagingLimiter, async (req, res) =
         });
       }
 
-      // Send through real Meta WhatsApp Business Cloud API
-      const waEndpoint = `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
-      try {
-        const waRes = await fetch(waEndpoint, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to: phoneValidation.normalized,
-            type: 'text',
-            text: {
-              preview_url: false,
-              body: content
-            }
-          })
-        });
-
-        const waData = await waRes.json().catch(() => ({}));
-
-        if (!waRes.ok) {
-          const rawErr = waData?.error?.message || waData?.error?.error_user_msg || `Meta API HTTP ${waRes.status}`;
-          const safeError = sanitizeErrorMessage(rawErr);
-          return res.status(400).json({
-            success: false,
-            status: 'FAILED',
-            error: `WhatsApp Business API rejected message: ${safeError}`,
-            providerResponse: { error: safeError }
-          });
-        }
-
-        const providerMessageId = waData?.messages?.[0]?.id || `wamid_${Date.now()}`;
-        const fbCtx = getFirebaseCtx(req);
-        if (fbCtx) {
-          await firebaseBackend.outboundMessages.upsert(fbCtx, {
-            id: messageId,
-            customerId,
-            customerName,
-            channel: 'whatsapp',
-            recipient: String(recipientPhone || ''),
-            content,
-            status: 'SENT',
-            providerMessageId
-          }).catch(() => {});
-        }
-        return res.json({
-          success: true,
-          status: 'SENT',
-          messageId,
-          channel: 'whatsapp',
-          providerMessageId,
-          sentAt: new Date().toISOString(),
-          message: `WhatsApp message successfully dispatched to ${recipientPhone} via WhatsApp Business Cloud API.`
-        });
-      } catch (networkErr: any) {
-        const safeError = sanitizeErrorMessage(networkErr?.message || 'Network error calling WhatsApp API');
-        return res.status(500).json({
+      const optedOut =
+        isPhoneOptedOut(phoneValidation.normalized) ||
+        (await db.unsubscribes.has('whatsapp', phoneValidation.normalized).catch(() => false)) ||
+        (await db.unsubscribes.has('whatsapp', `+${phoneValidation.normalized}`).catch(() => false));
+      if (optedOut) {
+        markPhoneOptedOut(phoneValidation.normalized);
+        return res.status(403).json({
           success: false,
-          status: 'FAILED',
-          error: `WhatsApp connection failed: ${safeError}`
+          status: 'OPTED_OUT',
+          code: 'RECIPIENT_OPTED_OUT',
+          error: 'Recipient has opted out of WhatsApp retention messages (STOP).'
         });
       }
+
+      const msgUsage = checkAndRecordMessageUsage(targetWorkspace, channel);
+      if (!msgUsage.allowed) {
+        return res.status(403).json({
+          success: false,
+          status: 'FAILED',
+          error: msgUsage.error,
+          code: 'MESSAGE_LIMIT_REACHED'
+        });
+      }
+
+      const waEndpoint = `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+      let lastWaErr = 'WhatsApp connection failed';
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const waRes = await fetch(waEndpoint, {
+            method: 'POST',
+            signal: AbortSignal.timeout(10000),
+            headers: {
+              'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: phoneValidation.normalized,
+              type: 'text',
+              text: {
+                preview_url: false,
+                body: content
+              }
+            })
+          });
+
+          const waData = await waRes.json().catch(() => ({}));
+          if (waRes.ok) {
+            const providerMessageId = waData?.messages?.[0]?.id || `wamid_${Date.now()}`;
+            await recordPersistentOutboundSend({
+              workspaceId: targetWorkspace,
+              messageId: String(messageId),
+              channel: 'whatsapp',
+              customerId: customerId ? String(customerId) : undefined,
+              recipient: phoneValidation.normalized,
+              content: String(content),
+              providerMessageId
+            });
+            const fbCtx = getFirebaseCtx(req);
+            if (fbCtx) {
+              await firebaseBackend.outboundMessages.upsert(fbCtx, {
+                id: messageId,
+                customerId,
+                customerName,
+                channel: 'whatsapp',
+                recipient: String(recipientPhone || ''),
+                content,
+                status: 'SENT',
+                providerMessageId
+              }).catch(() => {});
+            }
+            return res.json({
+              success: true,
+              status: 'SENT',
+              messageId,
+              channel: 'whatsapp',
+              providerMessageId,
+              sentAt: new Date().toISOString(),
+              message: `WhatsApp message successfully dispatched to ${recipientPhone}.`
+            });
+          }
+
+          const rawErr = waData?.error?.message || waData?.error?.error_user_msg || `Meta API HTTP ${waRes.status}`;
+          lastWaErr = sanitizeErrorMessage(rawErr);
+          if (waRes.status >= 400 && waRes.status < 500) {
+            return res.status(400).json({
+              success: false,
+              status: 'FAILED',
+              error: `WhatsApp delivery rejected: ${lastWaErr}`
+            });
+          }
+        } catch (networkErr: any) {
+          lastWaErr = sanitizeErrorMessage(networkErr?.message || 'Network error calling WhatsApp API');
+        }
+        if (attempt < 3) {
+          await new Promise(resolve => setTimeout(resolve, 400 * Math.pow(2, attempt - 1)));
+        }
+      }
+
+      return res.status(502).json({
+        success: false,
+        status: 'FAILED',
+        error: `WhatsApp connection failed after retries: ${lastWaErr}`
+      });
     }
 
     // 3. DISPATCH THROUGH REAL RESEND EMAIL API
     if (channel === 'email') {
-      // Validate Resend configuration
       if (!RESEND_API_KEY) {
         return res.status(400).json({
           success: false,
           status: 'FAILED',
-          error: 'Email sending is not configured yet. Server-side environment variable RESEND_API_KEY is required.',
-          requiredEnvVars: ['RESEND_API_KEY', 'RESEND_FROM_EMAIL']
+          error: 'Email delivery is not enabled yet.'
         });
       }
 
-      // Validate customer email
       const emailValidation = validateCustomerEmail(recipientEmail);
       if (!emailValidation.isValid) {
         return res.status(400).json({
@@ -8244,69 +8603,121 @@ app.post('/api/messages/send', requireAuth, messagingLimiter, async (req, res) =
         });
       }
 
-      const emailSubject = subject || `Checking in regarding your ${customerName || 'workspace'} account`;
-
-      try {
-        const resendRes = await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${RESEND_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            from: RESEND_FROM_EMAIL,
-            to: [recipientEmail.trim().toLowerCase()],
-            subject: emailSubject,
-            text: content,
-            html: `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #111827; white-space: pre-wrap;">${escapeHtml(content)}</div>`
-          })
-        });
-
-        const resendData = await resendRes.json().catch(() => ({}));
-
-        if (!resendRes.ok) {
-          const rawErr = resendData?.message || resendData?.name || `Resend API HTTP ${resendRes.status}`;
-          const safeError = sanitizeErrorMessage(rawErr);
-          return res.status(400).json({
-            success: false,
-            status: 'FAILED',
-            error: `Resend API rejected email send: ${safeError}`,
-            providerResponse: { error: safeError }
-          });
-        }
-
-        const providerMessageId = resendData?.id || `resend_${Date.now()}`;
-        const fbCtx = getFirebaseCtx(req);
-        if (fbCtx) {
-          await firebaseBackend.outboundMessages.upsert(fbCtx, {
-            id: messageId,
-            customerId,
-            customerName,
-            channel: 'email',
-            recipient: String(recipientEmail || ''),
-            subject: emailSubject,
-            content,
-            status: 'SENT',
-            providerMessageId
-          }).catch(() => {});
-        }
-        return res.json({
-          success: true,
-          status: 'SENT',
-          messageId,
-          channel: 'email',
-          providerMessageId,
-          sentAt: new Date().toISOString(),
-          message: `Email successfully dispatched to ${recipientEmail} via Resend API.`
-        });
-      } catch (networkErr: any) {
-        const safeError = sanitizeErrorMessage(networkErr?.message || 'Network error calling Resend API');
-        return res.status(500).json({
+      const recipientEmailClean = String(recipientEmail).trim().toLowerCase();
+      const unsubscribed =
+        isEmailUnsubscribed(recipientEmailClean) ||
+        (await db.unsubscribes.has('email', recipientEmailClean).catch(() => false));
+      if (unsubscribed) {
+        markEmailUnsubscribed(recipientEmailClean);
+        return res.status(403).json({
           success: false,
-          status: 'FAILED',
-          error: `Resend connection failed: ${safeError}`
+          status: 'OPTED_OUT',
+          code: 'RECIPIENT_UNSUBSCRIBED',
+          error: 'Recipient has unsubscribed from outbound retention emails.'
         });
       }
+
+      const msgUsage = checkAndRecordMessageUsage(targetWorkspace, channel);
+      if (!msgUsage.allowed) {
+        return res.status(403).json({
+          success: false,
+          status: 'FAILED',
+          error: msgUsage.error,
+          code: 'MESSAGE_LIMIT_REACHED'
+        });
+      }
+
+      const emailSubject = subject || `Checking in regarding your ${customerName || 'workspace'} account`;
+      const siteBase = (process.env.APP_URL || process.env.VITE_SITE_URL || 'https://churnveda.com').trim().replace(/\/+$/, '');
+      const unsubscribeUrl = `${siteBase}/api/communications/unsubscribe?email=${encodeURIComponent(recipientEmailClean)}`;
+      const postalAddress = (process.env.POSTAL_ADDRESS || 'Churnveda Support · Business Postal Address').trim();
+      const textWithFooter = String(content).includes('/unsubscribe')
+        ? String(content)
+        : `${content}\n\n---\nUnsubscribe: ${unsubscribeUrl}\n${postalAddress}`;
+      const htmlBody = `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #111827;"><div style="white-space: pre-wrap;">${escapeHtml(content)}</div><hr style="margin: 24px 0 12px; border: 0; border-top: 1px solid #e5e7eb;" /><div style="font-size: 12px; color: #6b7280; line-height: 1.5;"><p style="margin: 0 0 4px;"><a href="${unsubscribeUrl}" style="color: #1e3a8a; text-decoration: underline;">Unsubscribe from future emails</a></p><p style="margin: 0;">${escapeHtml(postalAddress)}</p></div></div>`;
+
+      let lastResendErr = 'Resend connection failed';
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const resendRes = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            signal: AbortSignal.timeout(10000),
+            headers: {
+              'Authorization': `Bearer ${RESEND_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              from: RESEND_FROM_EMAIL,
+              to: [recipientEmailClean],
+              subject: emailSubject,
+              headers: {
+                'List-Unsubscribe': `<${unsubscribeUrl}>`,
+                'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'
+              },
+              text: textWithFooter,
+              html: htmlBody
+            })
+          });
+
+          const resendData = await resendRes.json().catch(() => ({}));
+          if (resendRes.ok) {
+            const providerMessageId = resendData?.id || `resend_${Date.now()}`;
+            await recordPersistentOutboundSend({
+              workspaceId: targetWorkspace,
+              messageId: String(messageId),
+              channel: 'email',
+              customerId: customerId ? String(customerId) : undefined,
+              recipient: recipientEmailClean,
+              content: String(content),
+              providerMessageId
+            });
+            const fbCtx = getFirebaseCtx(req);
+            if (fbCtx) {
+              await firebaseBackend.outboundMessages.upsert(fbCtx, {
+                id: messageId,
+                customerId,
+                customerName,
+                channel: 'email',
+                recipient: recipientEmailClean,
+                subject: emailSubject,
+                content,
+                status: 'SENT',
+                providerMessageId
+              }).catch(() => {});
+            }
+            return res.json({
+              success: true,
+              status: 'SENT',
+              messageId,
+              channel: 'email',
+              providerMessageId,
+              sentAt: new Date().toISOString(),
+              message: `Email successfully dispatched to ${recipientEmail} via Resend API.`
+            });
+          }
+
+          const rawErr = resendData?.message || resendData?.name || `Resend API HTTP ${resendRes.status}`;
+          lastResendErr = sanitizeErrorMessage(rawErr);
+          if (resendRes.status >= 400 && resendRes.status < 500) {
+            return res.status(400).json({
+              success: false,
+              status: 'FAILED',
+              error: `Resend API rejected email send: ${lastResendErr}`
+            });
+          }
+        } catch (networkErr: any) {
+          lastResendErr = sanitizeErrorMessage(networkErr?.message || 'Network error calling Resend API');
+        }
+        if (attempt < 3) {
+          await new Promise(resolve => setTimeout(resolve, 400 * Math.pow(2, attempt - 1)));
+        }
+      }
+
+      return res.status(502).json({
+        success: false,
+        status: 'FAILED',
+        error: `Resend connection failed after retries: ${lastResendErr}`
+      });
     }
   } catch (err: any) {
     res.status(500).json({
@@ -8399,7 +8810,7 @@ app.post('/api/queue/enqueue', requireAuth, messagingLimiter, async (req, res) =
     // Trigger queue processing in the background immediately
     processOutboundQueue().catch(() => {});
 
-    const queueStats = getOutboundQueueStatus();
+    const queueStats = getOutboundQueueStatus(workspaceId);
 
     res.json({
       success: true,
@@ -8420,8 +8831,9 @@ app.post('/api/queue/enqueue', requireAuth, messagingLimiter, async (req, res) =
 // 19B. Process Outbound Queue on Demand (Area 2)
 app.post('/api/queue/process', requireAuth, async (req, res) => {
   try {
+    const workspaceId = (req as any).workspaceId as string;
     const result = await processOutboundQueue();
-    const status = getOutboundQueueStatus();
+    const status = getOutboundQueueStatus(workspaceId);
     res.json({
       success: true,
       result,
@@ -8437,7 +8849,8 @@ app.post('/api/queue/process', requireAuth, async (req, res) => {
 
 // 19C. Get Queue Status & Duplicate Protection Metrics (Area 2)
 app.get('/api/queue/status', requireAuth, (req, res) => {
-  const status = getOutboundQueueStatus();
+  const workspaceId = (req as any).workspaceId as string;
+  const status = getOutboundQueueStatus(workspaceId);
   res.json({
     success: true,
     status
@@ -8461,23 +8874,24 @@ app.get('/api/queue/items', requireAuth, async (req, res) => {
   });
 });
 
-// 19E. Get Scheduler Status (Area 2)
+// 19E. Get Scheduler Status (Area 2 — Tenant Isolated)
 app.get('/api/scheduler/status', requireAuth, (req, res) => {
-  const status = getSchedulerStatus();
+  const workspaceId = (req as any).workspaceId as string;
+  const status = getSchedulerStatus(workspaceId);
   res.json({
     success: true,
     ...status
   });
 });
 
-// 19F. Update Scheduler Settings (Area 2, 5)
+// 19F. Update Scheduler Settings (Area 2, 5 — Tenant Isolated + Persistent)
 app.post('/api/scheduler/update', requireAuth, async (req, res) => {
   try {
     const authUser = (req as any).user as DbUser;
     const workspaceId = (req as any).workspaceId as string;
     const fbCtx = getFirebaseCtx(req);
     const { scanTime, timezone, ownerNotificationEmail, enabled } = req.body;
-    const updated = updateSchedulerSettings({
+    const updated = await updateSchedulerSettings(workspaceId, {
       ...(scanTime ? { scanTime } : {}),
       ...(timezone ? { timezone } : {}),
       ...(ownerNotificationEmail !== undefined ? { ownerNotificationEmail } : {}),
@@ -8491,13 +8905,13 @@ app.post('/api/scheduler/update', requireAuth, async (req, res) => {
         actorEmail: authUser.email,
         action: 'scheduler.updated',
         targetType: 'scheduler',
-        metadata: { scanTime, timezone, enabled }
+        metadata: { scanTime: updated.scanTime, timezone: updated.timezone, enabled: updated.enabled }
       }),
       fbCtx
         ? firebaseBackend.schedulerSettings.upsert(fbCtx, {
-            enabled: enabled !== undefined ? Boolean(enabled) : true,
-            ownerEmail: ownerNotificationEmail || authUser.email,
-            cronExpression: scanTime ? `0 ${String(scanTime).split(':')[0] || '9'} * * *` : '0 9 * * *'
+            enabled: updated.enabled,
+            ownerEmail: updated.ownerNotificationEmail || authUser.email,
+            cronExpression: `0 ${String(updated.scanTime).split(':')[0] || '9'} * * *`
           }).catch(() => {})
         : Promise.resolve(),
       fbCtx
@@ -8528,28 +8942,28 @@ app.post('/api/cron/daily-scan', cronScanLimiter, async (req, res) => {
     const cronSecret = process.env.CRON_SECRET;
     const authHeader = req.headers['authorization'];
     const customCronSecret = req.headers['x-cron-secret'];
-    const user = getAuthUser(req);
+    const user = await resolveAuthUser(req);
 
-    // If CRON_SECRET is configured, require either a matching bearer token / secret header or an authenticated session
-    if (cronSecret) {
-      const isCronTokenValid =
-        authHeader === `Bearer ${cronSecret}` ||
-        customCronSecret === cronSecret;
-      if (!isCronTokenValid && !user) {
-        return res.status(401).json({
-          success: false,
-          error: 'Unauthorized: Invalid or missing cron secret/authentication token'
-        });
-      }
+    const isCronTokenValid = Boolean(
+      cronSecret && (authHeader === `Bearer ${cronSecret}` || customCronSecret === cronSecret)
+    );
+    if (!isCronTokenValid && !user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: Valid authentication or cron secret required'
+      });
     }
 
-    const workspaceId = (req.headers['x-workspace-id'] as string) || (req.body.workspaceId as string) || user?.workspace_id || 'ws-default';
-    const ownerEmail = req.body.ownerEmail || user?.email;
+    const workspaceId = isCronTokenValid
+      ? ((req.headers['x-workspace-id'] as string) || (req.body.workspaceId as string) || 'ws-default')
+      : await resolveAuthorizedWorkspace(req, user!);
+    const ownerEmail = user?.email || req.body.ownerEmail;
 
     // Server-side AI Scan Rate Limit Check
     const tier = getWorkspacePlanTier(workspaceId);
     const planLimits = PLAN_LIMITS[tier];
-    const isManualTrigger = !req.headers['x-cron-source'];
+    const isCronTrigger = isCronTokenValid || Boolean(req.headers['x-cron-source']);
+    const isManualTrigger = !isCronTrigger;
 
     // Enforce daily scan count limit on manual / API calls
     if (isManualTrigger) {
@@ -8576,7 +8990,7 @@ app.post('/api/cron/daily-scan', cronScanLimiter, async (req, res) => {
       workspaceId,
       customers,
       ownerEmail,
-      triggerType: req.headers['x-cron-source'] ? 'cron_api' : 'manual',
+      triggerType: isCronTrigger ? 'cron_api' : 'manual',
       topLimit: planLimits.topAtRiskCustomers
     });
 

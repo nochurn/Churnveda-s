@@ -779,7 +779,6 @@ class AuthService {
   public async requestPasswordReset(email: string): Promise<{
     success: boolean;
     message: string;
-    resetToken?: string;
   }> {
     const emailNorm = email.trim().toLowerCase();
     if (!emailNorm) {
@@ -793,8 +792,7 @@ class AuthService {
       }
       return {
         success: true,
-        message: apiRes?.message || 'If an account matches that email, a password reset link has been dispatched.',
-        resetToken: apiRes?.token
+        message: apiRes?.message || 'If an account matches that email, a password reset link has been dispatched.'
       };
     } catch (err: any) {
       return {

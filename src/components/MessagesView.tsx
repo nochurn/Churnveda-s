@@ -463,7 +463,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
             <span>
               <strong>Automatic Sending Queue Active:</strong> {counts.queued} message(s) awaiting delivery.
               {!outboundStatus?.whatsapp.configured && !outboundStatus?.email.configured
-                ? ' Messages will remain safely queued and will automatically dispatch once provider credentials are added server-side.'
+                ? ' Messages will remain safely queued and will automatically dispatch once messaging delivery is enabled in Settings.'
                 : ' Background worker is actively dispatching messages with duplicate prevention.'}
             </span>
           </div>

@@ -21,6 +21,7 @@ import {
   ONE_TIME_PAYMENT_DISCLOSURE,
   buildRazorpayOneTimeOptions
 } from '../services/razorpayConfig';
+import { ensureRazorpaySdk } from '../services/razorpaySdk';
 
 interface TrialVerificationModalProps {
   isOpen: boolean;
@@ -115,7 +116,8 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
       }
 
       // 2. Open Razorpay Checkout modal with ALL supported payment methods
-      if (typeof (window as any).Razorpay !== 'undefined' && orderRes.keyId) {
+      const sdkReady = await ensureRazorpaySdk();
+      if (sdkReady && typeof (window as any).Razorpay !== 'undefined' && orderRes.keyId) {
         const chargeAmount = orderRes.amount || orderRes.amountCents || 100;
         const options = buildRazorpayOneTimeOptions({
           keyId: orderRes.keyId,
@@ -191,35 +193,8 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
         });
         rzp.open();
       } else {
-        // Fallback test sandbox simulation if Razorpay script is blocked in iframe preview
-        const verifyRes = await apiService.verifyTrialPayment({
-          razorpay_order_id: orderRes.orderId,
-          razorpay_payment_id: `pay_test_${Date.now()}`,
-          razorpay_signature: 'test_bypass_token'
-        });
-
-        const user = authService.getCurrentUser();
-        if (user) {
-          user.selectedPlan = tier;
-          user.plan = (tier.charAt(0).toUpperCase() + tier.slice(1)) as any;
-          user.billingStatus = 'trialing';
-          user.paymentStatus = 'paid';
-          user.trialStartDate = new Date().toISOString();
-          user.trialEndDate = verifyRes.trial_ends_at;
-          authService.setCurrentUser(user);
-        }
-
-        if (onShowToast) {
-          onShowToast('🎉 Verification successful! Your 14-day trial has begun.', 'success');
-        }
-
-        onSuccess({
-          tier,
-          billing_cycle: billingCycle,
-          trial_ends_at: verifyRes.trial_ends_at,
-          message: verifyRes.message
-        });
-        onClose();
+        setErrorMessage('Razorpay Checkout SDK could not load. Please check your internet connection or disable content blockers and try again.');
+        setIsLoading(false);
       }
     } catch (error: any) {
       setErrorMessage(error.message || 'Failed to start trial verification order.');

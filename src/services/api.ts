@@ -866,6 +866,9 @@ export async function createRazorpaySubscription(payload: {
   billing_cycle: string;
   amountPaise: number;
   amountInr: number;
+  amountUsd?: number;
+  amountCents?: number;
+  formattedAmount?: string;
   status: string;
   error?: string;
 }> {
@@ -929,7 +932,9 @@ export interface BillingTransaction {
 }
 
 export async function fetchInternationalBillingStatus(): Promise<InternationalBillingStatusResponse> {
-  const res = await apiFetch('/api/razorpay/international-status');
+  const res = await apiFetch('/api/razorpay/international-status', {
+    headers: getAuthHeaders()
+  });
   return res.json();
 }
 

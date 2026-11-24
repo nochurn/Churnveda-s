@@ -227,7 +227,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         authService.setCurrentUser(res.user);
         if (onUpdateUser) onUpdateUser(res.user);
       }
-      onShowToast(`Upgraded to ${targetPlan === 'growth' ? 'Growth ($149/mo)' : 'Enterprise ($349/mo)'} plan.`, 'success');
+      onShowToast(`Upgraded to ${targetPlan === 'growth' ? 'Growth ($79/mo)' : 'Enterprise ($349/mo)'} plan.`, 'success');
     } catch (err: any) {
       onNavigate('pricing', { plan: targetPlan });
     } finally {
@@ -265,133 +265,162 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
       onShowToast('Initializing Razorpay secure checkout...', 'info');
 
       const selectedCycle: 'monthly' | 'annual' = billingCycle === 'annual' ? 'annual' : 'monthly';
+      const normalizedTier = (targetPlan === 'starter' || targetPlan === 'pro' ? targetPlan : 'growth') as 'starter' | 'growth' | 'pro';
+      const customerName = currentUser?.name || 'SaaS Founder';
+      const customerEmail = currentUser?.email || 'founder@example.com';
 
-      const subRes = await apiService.createRazorpaySubscription({
-        tier: targetPlan as 'starter' | 'growth' | 'pro',
-        billing_cycle: selectedCycle
-      });
-
-      if (!subRes.success) {
-        if (selectedCycle === 'annual') {
-          throw new Error('Annual billing is not configured yet.');
+      const syncActivatedUser = async () => {
+        if (currentUser) {
+          const updated = {
+            ...currentUser,
+            selectedPlan: normalizedTier,
+            plan: (normalizedTier.charAt(0).toUpperCase() + normalizedTier.slice(1)) as any,
+            billingCycle: selectedCycle,
+            billingStatus: 'active' as const,
+            paymentStatus: 'paid' as const
+          };
+          authService.setCurrentUser(updated as any);
+          if (onUpdateUser) onUpdateUser(updated as any);
         }
-        throw new Error(subRes.error || 'Failed to initialize Razorpay subscription');
-      }
+        try {
+          const txData = await apiService.fetchBillingTransactions();
+          if (txData.success && Array.isArray(txData.transactions)) {
+            setTransactions(txData.transactions);
+          }
+        } catch {
+          // Non-fatal ledger refresh
+        }
+      };
 
-      if (subRes.success && subRes.subscriptionId) {
+      if (selectedCycle === 'annual') {
+        // Annual billing uses One-Time Order Checkout Flow
+        const orderRes = await apiService.createRazorpayOrder({
+          plan: normalizedTier,
+          billingCycle: 'annual',
+          customerName,
+          customerEmail
+        });
+
+        if (!orderRes.success) {
+          throw new Error(orderRes.error || 'Could not generate Razorpay order');
+        }
+
         const sdkReady = await ensureRazorpaySdk();
-        if (sdkReady && typeof (window as any).Razorpay !== 'undefined') {
-          const options = buildRazorpaySubscriptionOptions({
-            keyId: subRes.keyId,
-            subscriptionId: subRes.subscriptionId,
-            planName: (AUTHORITATIVE_PLANS[targetPlan as 'starter' | 'growth' | 'pro']?.name || targetPlan).toUpperCase(),
-            customerName: currentUser?.name || 'SaaS Founder',
-            customerEmail: currentUser?.email || 'founder@example.com',
-            handler: async (response: any) => {
-              try {
-                const verifyRes = await apiService.verifyRazorpaySubscription({
-                  razorpay_subscription_id: response.razorpay_subscription_id,
-                  razorpay_payment_id: response.razorpay_payment_id,
-                  razorpay_signature: response.razorpay_signature,
-                  tier: targetPlan,
-                  billing_cycle: selectedCycle,
-                  email: currentUser?.email
-                });
-
-                if (verifyRes.success) {
-                  onShowToast(`🎉 ${selectedCycle === 'annual' ? 'Annual' : 'Monthly'} recurring subscription activated for ${targetPlan.toUpperCase()} Plan!`, 'success');
-                  if (currentUser && onUpdateUser) {
-                    const updated = {
-                      ...currentUser,
-                      selectedPlan: targetPlan,
-                      billingStatus: 'active' as const,
-                      paymentStatus: 'paid' as const
-                    };
-                    onUpdateUser(updated as any);
-                  }
-                } else {
-                  onShowToast(verifyRes.error || 'Recurring subscription verification failed.', 'error');
-                }
-              } catch (err: any) {
-                onShowToast('Verification error: ' + err.message, 'error');
-              }
-            }
-          });
-
-          const rzpInstance = new (window as any).Razorpay(options);
-          rzpInstance.open();
-          return;
-        } else {
-          onShowToast('Razorpay Checkout SDK is still loading. Please check your internet connection and try again.', 'error');
+        if (!sdkReady || typeof (window as any).Razorpay === 'undefined') {
+          onShowToast('Razorpay Checkout SDK could not load. Please check your internet connection and try again.', 'error');
+          setIsProcessing(false);
           return;
         }
-      }
 
-      // One-time Annual or standard Order Flow
-      const orderRes = await apiService.createRazorpayOrder({
-        plan: targetPlan,
-        billingCycle,
-        customerName: currentUser?.name || 'SaaS Founder',
-        customerEmail: currentUser?.email || 'founder@example.com'
-      });
-
-      if (!orderRes.success) {
-        throw new Error(orderRes.error || 'Could not generate Razorpay order');
-      }
-
-      const sdkReady = await ensureRazorpaySdk();
-      if (sdkReady && typeof (window as any).Razorpay !== 'undefined') {
+        const orderCurrency = orderRes.currency || 'INR';
         const options = buildRazorpayOneTimeOptions({
           keyId: orderRes.keyId,
           orderId: orderRes.orderId,
           amountCents: orderRes.amount,
           amount: orderRes.amount,
-          currency: orderRes.currency || 'USD',
-          description: `${(AUTHORITATIVE_PLANS[targetPlan]?.name || targetPlan).toUpperCase()} Plan (${billingCycle})`,
-          customerName: currentUser?.name || 'SaaS Founder',
-          customerEmail: currentUser?.email || 'founder@example.com',
+          currency: orderCurrency,
+          description: `${(AUTHORITATIVE_PLANS[normalizedTier]?.name || normalizedTier).toUpperCase()} Plan (Annual)`,
+          customerName,
+          customerEmail,
           handler: async (response: any) => {
             try {
               const verifyRes = await apiService.verifyRazorpayPayment({
                 razorpay_order_id: response.razorpay_order_id,
                 razorpay_payment_id: response.razorpay_payment_id,
                 razorpay_signature: response.razorpay_signature,
-                plan: targetPlan,
-                billingCycle,
+                plan: normalizedTier,
+                billingCycle: 'annual',
                 amount: orderRes.amount,
-                currency: 'USD',
-                email: currentUser?.email
+                currency: orderCurrency,
+                email: customerEmail
               });
 
               if (verifyRes.success) {
-                onShowToast(`🎉 Razorpay payment verified! Plan upgraded to ${targetPlan.toUpperCase()}.`, 'success');
-                if (currentUser && onUpdateUser) {
-                  const updated = {
-                    ...currentUser,
-                    selectedPlan: targetPlan,
-                    billingStatus: 'active' as const,
-                    paymentStatus: 'paid' as const
-                  };
-                  onUpdateUser(updated as any);
-                }
+                onShowToast(`🎉 Annual Razorpay payment verified! Plan upgraded to ${normalizedTier.toUpperCase()}.`, 'success');
+                await syncActivatedUser();
               } else {
                 onShowToast(verifyRes.error || 'Razorpay signature verification failed.', 'error');
               }
             } catch (err: any) {
               onShowToast('Verification error: ' + err.message, 'error');
+            } finally {
+              setIsProcessing(false);
             }
+          },
+          onDismiss: () => {
+            setIsProcessing(false);
           }
         });
 
         const rzpInstance = new (window as any).Razorpay(options);
+        rzpInstance.on('payment.failed', (resp: any) => {
+          setIsProcessing(false);
+          onShowToast(resp?.error?.description || 'Razorpay payment failed or was declined.', 'error');
+        });
         rzpInstance.open();
-      } else {
-        onShowToast('Razorpay Checkout SDK is still loading. Please check your internet connection and try again.', 'error');
+        return;
       }
+
+      // Monthly billing uses Recurring Subscription Mandate Flow
+      const subRes = await apiService.createRazorpaySubscription({
+        tier: normalizedTier,
+        billing_cycle: 'monthly'
+      });
+
+      if (!subRes.success || !subRes.subscriptionId) {
+        throw new Error(subRes.error || 'Failed to initialize Razorpay subscription');
+      }
+
+      const sdkReady = await ensureRazorpaySdk();
+      if (!sdkReady || typeof (window as any).Razorpay === 'undefined') {
+        onShowToast('Razorpay Checkout SDK could not load. Please check your internet connection and try again.', 'error');
+        setIsProcessing(false);
+        return;
+      }
+
+      const options = buildRazorpaySubscriptionOptions({
+        keyId: subRes.keyId,
+        subscriptionId: subRes.subscriptionId,
+        planName: (AUTHORITATIVE_PLANS[normalizedTier]?.name || normalizedTier).toUpperCase(),
+        customerName,
+        customerEmail,
+        handler: async (response: any) => {
+          try {
+            const verifyRes = await apiService.verifyRazorpaySubscription({
+              razorpay_subscription_id: response.razorpay_subscription_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              tier: normalizedTier,
+              billing_cycle: 'monthly',
+              email: customerEmail
+            });
+
+            if (verifyRes.success) {
+              onShowToast(`🎉 Monthly recurring subscription activated for ${normalizedTier.toUpperCase()} Plan!`, 'success');
+              await syncActivatedUser();
+            } else {
+              onShowToast(verifyRes.error || 'Recurring subscription verification failed.', 'error');
+            }
+          } catch (err: any) {
+            onShowToast('Verification error: ' + err.message, 'error');
+          } finally {
+            setIsProcessing(false);
+          }
+        },
+        onDismiss: () => {
+          setIsProcessing(false);
+        }
+      });
+
+      const rzpInstance = new (window as any).Razorpay(options);
+      rzpInstance.on('payment.failed', (resp: any) => {
+        setIsProcessing(false);
+        onShowToast(resp?.error?.description || 'Subscription mandate authorization failed.', 'error');
+      });
+      rzpInstance.open();
     } catch (err: any) {
-      onShowToast(err.message || 'Razorpay payment could not be initiated.', 'error');
-    } finally {
       setIsProcessing(false);
+      onShowToast(err.message || 'Razorpay payment could not be initiated.', 'error');
     }
   };
 
@@ -732,7 +761,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
               <div className="flex items-center gap-2">
                 <span className="text-base font-bold text-gray-900">Growth Plan</span>
                 <span className="text-xs text-blue-900 font-bold bg-blue-50 px-2 py-0.5 rounded">
-                  $149/month
+                  $79/month
                 </span>
               </div>
               <p className="text-xs text-gray-600 mt-1">
@@ -890,7 +919,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
             </p>
           </div>
           <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-2.5 py-1 rounded-lg">
-            {transactions.length + 1} {transactions.length === 0 ? 'record' : 'records'} found
+            {transactions.length} {transactions.length === 1 ? 'record' : 'records'} found
           </span>
         </div>
 
@@ -947,32 +976,13 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
                 </tr>
               ))}
 
-              {/* Baseline initial account entry */}
-              <tr className="hover:bg-gray-50/80 transition-colors bg-gray-50/30">
-                <td className="py-3 px-4 font-mono text-[11px] text-gray-500">
-                  {formattedTrialStart}
-                </td>
-                <td className="py-3 px-4 font-mono font-medium text-gray-700">
-                  pay_verification_001
-                </td>
-                <td className="py-3 px-4 font-mono text-[11px] text-gray-500">
-                  sub_starter_trial
-                </td>
-                <td className="py-3 px-4 font-bold text-gray-900">
-                  $0.00 USD
-                </td>
-                <td className="py-3 px-4 text-gray-500">
-                  ₹0.00 (Trial Verification)
-                </td>
-                <td className="py-3 px-4 text-[11px] text-gray-500">
-                  $0.00
-                </td>
-                <td className="py-3 px-4">
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">
-                    Trial Active
-                  </span>
-                </td>
-              </tr>
+              {transactions.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="py-6 px-4 text-center text-xs text-gray-500">
+                    No payment transactions recorded yet. Completed Razorpay payments and settlements will appear here automatically.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

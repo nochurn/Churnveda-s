@@ -35,8 +35,14 @@ import {
 import {
   ensureStorageBuckets,
   createSignedDownloadUrl,
+  deleteWorkspaceStorageFile,
   deleteWorkspaceStorageFiles,
+  listWorkspaceStorageFiles,
+  readWorkspaceStorageFile,
   uploadToWorkspaceStorage,
+  verifySignedStorageDownloadToken,
+  getStorageStatusSnapshot,
+  STORAGE_BUCKET_CONFIG,
   StorageBucketId
 } from './server/storageService.ts';
 import { initDatabase, db, DbSubscriptionPayment } from './server/db.ts';
@@ -69,22 +75,18 @@ import {
   convertUsdToInr
 } from './server/exchangeRateService.ts';
 import { verifyCaptchaToken } from './server/captchaService.ts';
-import { initializeApp as initFirebaseAdmin, getApps as getFirebaseAdminApps } from 'firebase-admin/app';
 import { getAuth as getFirebaseAdminAuth } from 'firebase-admin/auth';
-import { getFirestore as getFirebaseAdminFirestore } from 'firebase-admin/firestore';
 import firebaseConfig from './firebase-applet-config.json';
-import { firebaseBackend, type FirebaseRequestContext } from './server/firebaseBackend.ts';
+import {
+  firebaseBackend,
+  getFirebaseAdminApp,
+  adminDb as firebaseAdminFirestore,
+  type FirebaseRequestContext
+} from './server/firebaseBackend.ts';
 
-// Initialize Firebase Admin SDK securely using project configuration
-const firebaseAdminApp = getFirebaseAdminApps().length > 0
-  ? getFirebaseAdminApps()[0]
-  : initFirebaseAdmin({
-      projectId: process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || firebaseConfig.projectId
-    });
+// Shared Firebase Admin SDK instance (uses ADC on GCP/AI Studio or GOOGLE_APPLICATION_CREDENTIALS)
+const firebaseAdminApp = getFirebaseAdminApp();
 const firebaseAdminAuth = getFirebaseAdminAuth(firebaseAdminApp);
-const firebaseAdminFirestore = firebaseConfig.firestoreDatabaseId
-  ? getFirebaseAdminFirestore(firebaseAdminApp, firebaseConfig.firestoreDatabaseId)
-  : getFirebaseAdminFirestore(firebaseAdminApp);
 
 const app = express();
 
@@ -999,12 +1001,14 @@ async function syncDatabaseOnBoot() {
 
     (async () => {
       try {
-        const [dbUsers, dbWorkspaces, dbMembers, dbSubs, dbImports] = await Promise.all([
+        const [dbUsers, dbWorkspaces, dbMembers, dbSubs, dbImports, dbTrialVerifications, dbSubPayments] = await Promise.all([
           db.users.listAll(),
           db.workspaces.listAll(),
           db.workspaceMembers.listAll(),
           db.subscriptions.listAll(),
-          db.csvImports.listAll()
+          db.csvImports.listAll(),
+          db.trialVerifications.listAll(),
+          db.subscriptionPayments.listAll()
         ]);
 
         if (dbUsers && dbUsers.length > 0) {
@@ -1053,6 +1057,33 @@ async function syncDatabaseOnBoot() {
               subscriptionsDatabase[idx] = { ...subscriptionsDatabase[idx], ...ds };
             } else {
               subscriptionsDatabase.push(ds);
+            }
+          }
+        }
+
+        if (dbTrialVerifications && dbTrialVerifications.length > 0) {
+          for (const tv of dbTrialVerifications) {
+            const normalizedTv: DbTrialVerification = {
+              ...(tv as any),
+              amount_paise: Number((tv as any).amount_paise || 100),
+              amount_cents: Number((tv as any).amount_cents || (tv as any).amount_paise || 100)
+            };
+            const idx = trialVerificationsDatabase.findIndex(v => v.razorpay_order_id === normalizedTv.razorpay_order_id);
+            if (idx >= 0) {
+              trialVerificationsDatabase[idx] = { ...trialVerificationsDatabase[idx], ...normalizedTv };
+            } else {
+              trialVerificationsDatabase.push(normalizedTv);
+            }
+          }
+        }
+
+        if (dbSubPayments && dbSubPayments.length > 0) {
+          for (const sp of dbSubPayments) {
+            const idx = subscriptionPaymentsDatabase.findIndex(p => p.razorpay_payment_id === sp.razorpay_payment_id);
+            if (idx >= 0) {
+              subscriptionPaymentsDatabase[idx] = { ...subscriptionPaymentsDatabase[idx], ...sp };
+            } else {
+              subscriptionPaymentsDatabase.push(sp);
             }
           }
         }
@@ -3583,6 +3614,39 @@ Return a strictly valid JSON object matching this schema:
     fileType: isPdf ? 'pdf' : 'csv'
   };
 
+  // Archive raw uploaded CSV/PDF artifact to workspace cloud object storage (non-blocking for import success)
+  let storedFileMeta: { path?: string; storageBackend?: string } = {};
+  if (!validateOnly && (rawCsv || rawPdfBase64)) {
+    try {
+      let uploadBuf: Buffer | string | null = null;
+      let uploadMime = 'text/csv';
+      if (isPdf && rawPdfBase64) {
+        const cleanB64 = String(rawPdfBase64).includes(',')
+          ? String(rawPdfBase64).split(',')[1]
+          : String(rawPdfBase64);
+        uploadBuf = Buffer.from(cleanB64.trim(), 'base64');
+        uploadMime = 'application/pdf';
+      } else if (rawCsv && typeof rawCsv === 'string') {
+        uploadBuf = rawCsv;
+        uploadMime = 'text/csv';
+      }
+      if (uploadBuf && uploadBuf.length > 0) {
+        const upRes = await uploadToWorkspaceStorage({
+          workspaceId: targetWorkspace,
+          bucketId: 'customer-imports',
+          fileName: sanitizedFileName || (isPdf ? 'import.pdf' : 'import.csv'),
+          data: uploadBuf,
+          mimeType: uploadMime
+        });
+        if (upRes.success && upRes.path) {
+          storedFileMeta = { path: upRes.path, storageBackend: upRes.storageBackend };
+        }
+      }
+    } catch (storageErr: any) {
+      console.warn('[Churnveda Storage Notice] Import file archive skipped:', storageErr?.message || storageErr);
+    }
+  }
+
   try {
     await Promise.all([
       db.csvImports.insert(historyEntry),
@@ -3605,6 +3669,8 @@ Return a strictly valid JSON object matching this schema:
     errors: invalidRows,
     documentSummary,
     fileType: isPdf ? 'pdf' : 'csv',
+    storagePath: storedFileMeta.path || null,
+    storageBackend: storedFileMeta.storageBackend || null,
     dashboardSummary: {
       totalCustomers: workspaceCustomers.length,
       totalMrr,
@@ -3777,7 +3843,65 @@ app.get('/api/export', requireAuth, async (req, res) => {
   res.send(csv);
 });
 
-// 12.1 Secure Storage Signed Download URL (Area 5, 6)
+// 12.1 Secure Firebase Cloud Object Storage Endpoints (Authenticated + Workspace-Isolated)
+app.get('/api/storage/status', requireAuth, (_req, res) => {
+  res.json({ success: true, ...getStorageStatusSnapshot() });
+});
+
+app.get('/api/storage/files', requireAuth, async (req, res) => {
+  const targetWorkspace = (req as any).workspaceId as string;
+  const bucketParam = req.query.bucket as string | undefined;
+  const bucketFilter = bucketParam && bucketParam in STORAGE_BUCKET_CONFIG
+    ? (bucketParam as StorageBucketId)
+    : undefined;
+  if (bucketParam && !bucketFilter) {
+    return res.status(400).json({ success: false, error: 'Invalid storage bucket category.' });
+  }
+  const listing = await listWorkspaceStorageFiles(targetWorkspace, bucketFilter);
+  return res.json({ success: true, ...listing });
+});
+
+app.post('/api/storage/upload', requireAuth, csvImportLimiter, async (req, res) => {
+  const targetWorkspace = (req as any).workspaceId as string;
+  const bucket = (req.body?.bucket || 'user-uploads') as StorageBucketId;
+  const fileName = String(req.body?.fileName || '').trim();
+  const mimeType = String(req.body?.mimeType || 'application/octet-stream').trim();
+  const contentBase64 = typeof req.body?.contentBase64 === 'string' ? req.body.contentBase64 : undefined;
+  const contentText = typeof req.body?.contentText === 'string' ? req.body.contentText : undefined;
+
+  if (!(bucket in STORAGE_BUCKET_CONFIG)) {
+    return res.status(400).json({ success: false, error: 'Invalid storage bucket category.' });
+  }
+  if (!fileName) {
+    return res.status(400).json({ success: false, error: 'Field "fileName" is required.' });
+  }
+  if (contentBase64 === undefined && contentText === undefined) {
+    return res.status(400).json({ success: false, error: 'Either "contentBase64" or "contentText" is required.' });
+  }
+
+  let data: Buffer | string;
+  if (contentBase64 !== undefined) {
+    const clean = contentBase64.includes(',') ? contentBase64.split(',')[1] : contentBase64;
+    data = Buffer.from(clean.trim(), 'base64');
+  } else {
+    data = contentText!;
+  }
+
+  const uploaded = await uploadToWorkspaceStorage({
+    workspaceId: targetWorkspace,
+    bucketId: bucket,
+    fileName,
+    data,
+    mimeType
+  });
+
+  if (!uploaded.success) {
+    return res.status(400).json({ success: false, error: uploaded.error });
+  }
+
+  return res.status(201).json(uploaded);
+});
+
 app.get('/api/storage/signed-url', requireAuth, async (req, res) => {
   const targetWorkspace = (req as any).workspaceId as string;
   const bucket = (req.query.bucket as string || 'customer-imports') as StorageBucketId;
@@ -3804,8 +3928,78 @@ app.get('/api/storage/signed-url', requireAuth, async (req, res) => {
     bucket,
     filePath,
     signedUrl: result.signedUrl,
+    storageBackend: result.storageBackend,
     expiresInSeconds: expiresIn
   });
+});
+
+app.get('/api/storage/download', async (req, res) => {
+  const bucket = String(req.query.bucket || 'customer-imports') as StorageBucketId;
+  const filePath = String(req.query.path || '');
+  const wsParam = String(req.query.ws || '');
+  const expMs = Number(req.query.exp || 0);
+  const sig = String(req.query.sig || '');
+
+  if (!(bucket in STORAGE_BUCKET_CONFIG) || !filePath) {
+    return res.status(400).json({ success: false, error: 'Invalid download parameters.' });
+  }
+
+  let authorizedWorkspace: string | null = null;
+  if (sig && wsParam && expMs) {
+    const validSig = verifySignedStorageDownloadToken({
+      bucketId: bucket,
+      workspaceId: wsParam,
+      objectKey: filePath,
+      expiresAtMs: expMs,
+      signature: sig
+    });
+    if (!validSig) {
+      return res.status(403).json({ success: false, error: 'Download link is invalid or expired.' });
+    }
+    authorizedWorkspace = wsParam;
+  } else {
+    const user = await resolveAuthUser(req).catch(() => null);
+    if (!user) {
+      return res.status(401).json({ success: false, error: 'Authentication required.' });
+    }
+    authorizedWorkspace = await resolveAuthorizedWorkspace(req, user);
+  }
+
+  const readRes = await readWorkspaceStorageFile({
+    workspaceId: authorizedWorkspace,
+    bucketId: bucket,
+    storagePath: filePath
+  });
+
+  if (!readRes.success || !readRes.buffer) {
+    return res.status(404).json({ success: false, error: readRes.error || 'File not found.' });
+  }
+
+  res.setHeader('Content-Type', readRes.contentType || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${readRes.fileName || 'download'}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  return res.send(readRes.buffer);
+});
+
+app.delete('/api/storage/file', requireAuth, async (req, res) => {
+  const targetWorkspace = (req as any).workspaceId as string;
+  const bucket = String(req.query.bucket || req.body?.bucket || 'customer-imports') as StorageBucketId;
+  const filePath = String(req.query.path || req.body?.path || '');
+
+  if (!filePath) {
+    return res.status(400).json({ success: false, error: 'Parameter "path" is required.' });
+  }
+
+  const delRes = await deleteWorkspaceStorageFile({
+    workspaceId: targetWorkspace,
+    bucketId: bucket,
+    storagePath: filePath
+  });
+
+  if (!delRes.success) {
+    return res.status(404).json({ success: false, error: delRes.error });
+  }
+  return res.json({ success: true });
 });
 
 // 12.2 GDPR/DPDP Complete Account Data Portability Export
@@ -3909,11 +4103,13 @@ app.post('/api/auth/delete-account', requireAuth, async (req, res) => {
   } catch (fsErr: any) {
     console.warn('[Account Deletion] Firestore purge skipped:', fsErr?.message || 'error');
   }
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()) {
+  if (!authUser.id.startsWith('usr_')) {
     try {
       await firebaseAdminAuth.deleteUser(authUser.id);
       servicesCleaned.push('Firebase Auth Identity');
-    } catch {}
+    } catch {
+      // Non-fatal if Firebase Auth IAM permission or user record is absent
+    }
   }
 
   // 3. Delete rows across PostgreSQL/SQLite tables & in-memory stores
@@ -6037,8 +6233,19 @@ app.post('/api/billing/verify-trial-payment', async (req, res) => {
       });
     }
 
-    // 1. Locate pending trial verification record
-    const verification = trialVerificationsDatabase.find(v => v.razorpay_order_id === razorpay_order_id);
+    // 1. Locate pending trial verification record (memory + DB fallback across restarts)
+    let verification = trialVerificationsDatabase.find(v => v.razorpay_order_id === razorpay_order_id);
+    if (!verification) {
+      const dbTv = await db.trialVerifications.getByOrderId(String(razorpay_order_id)).catch(() => null);
+      if (dbTv) {
+        verification = {
+          ...(dbTv as any),
+          amount_paise: Number((dbTv as any).amount_paise || 100),
+          amount_cents: Number((dbTv as any).amount_cents || (dbTv as any).amount_paise || 100)
+        };
+        trialVerificationsDatabase.push(verification);
+      }
+    }
     if (!verification) {
       return res.status(404).json({
         success: false,
@@ -6114,6 +6321,7 @@ app.post('/api/billing/verify-trial-payment', async (req, res) => {
     if (
       !isValidSignature &&
       !isProd &&
+      (!RAZORPAY_KEY_ID || RAZORPAY_KEY_ID.startsWith('rzp_test_placeholder')) &&
       (razorpay_signature === 'test_bypass_token' ||
         String(razorpay_signature).startsWith('sig_mock_') ||
         String(razorpay_signature).startsWith('test_'))
@@ -6311,9 +6519,22 @@ app.post('/api/billing/activate-subscription', requireAuth, async (req, res) => 
       });
     }
 
-    const sub = subscriptionsDatabase.find(
+    let sub = subscriptionsDatabase.find(
       s => s.workspace_id === workspaceId && s.razorpay_subscription_id === razorpay_subscription_id
     );
+    if (!sub) {
+      const dbSub = await db.subscriptions.getBySubscriptionId(String(razorpay_subscription_id)).catch(() => null);
+      if (dbSub && (dbSub.workspace_id === workspaceId || dbSub.user_id === authUser.id)) {
+        const normalizedSub = dbSub as unknown as DbSubscription;
+        const existingIdx = subscriptionsDatabase.findIndex(s => s.workspace_id === normalizedSub.workspace_id);
+        if (existingIdx >= 0) {
+          subscriptionsDatabase[existingIdx] = normalizedSub;
+        } else {
+          subscriptionsDatabase.push(normalizedSub);
+        }
+        sub = normalizedSub;
+      }
+    }
     if (!sub) {
       return res.status(404).json({
         success: false,
@@ -7258,6 +7479,7 @@ app.post('/api/razorpay/verify-payment', async (req, res) => {
     if (
       !isValidSignature &&
       !isProd &&
+      (!RAZORPAY_KEY_ID || RAZORPAY_KEY_ID.startsWith('rzp_test_placeholder')) &&
       (razorpay_signature === 'test_bypass_token' ||
         String(razorpay_signature).startsWith('sig_mock_') ||
         String(razorpay_signature).startsWith('test_'))
@@ -7345,6 +7567,7 @@ app.post('/api/razorpay/verify-payment', async (req, res) => {
     user.updated_at = nowIso;
     await db.users.upsert(user as any).catch(() => {});
 
+    const authoritativePlan = getAuthoritativeBillingPlan(expected.tier, expected.billingCycle, Boolean(orderMeta.isFounding));
     const subIndex = subscriptionsDatabase.findIndex(s => s.workspace_id === workspaceId);
     const updatedSub: DbSubscription = {
       id: subIndex >= 0 ? subscriptionsDatabase[subIndex].id : `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
@@ -7353,8 +7576,8 @@ app.post('/api/razorpay/verify-payment', async (req, res) => {
       email: user.email.toLowerCase(),
       tier: expected.tier,
       billing_cycle: expected.billingCycle,
-      billing_plan_id: `plan_tier_${expected.tier}_${expected.billingCycle}`,
-      razorpay_plan_id: `rzp_${expected.tier}_${expected.billingCycle}`,
+      billing_plan_id: authoritativePlan?.id || `plan_tier_${expected.tier}_${expected.billingCycle}`,
+      razorpay_plan_id: authoritativePlan?.razorpay_plan_id || '',
       status: 'active',
       payment_verification_status: 'verified',
       razorpay_verification_order_id: razorpay_order_id,
@@ -7438,10 +7661,24 @@ app.post('/api/razorpay/verify-subscription', requireAuth, async (req, res) => {
       return res.status(503).json({ success: false, error: 'Razorpay secret key is not configured on the server.' });
     }
 
-    // Bind strictly to authoritative server-side subscription record for this workspace
-    const subIndex = subscriptionsDatabase.findIndex(
+    // Bind strictly to authoritative server-side subscription record for this workspace (with DB fallback across restarts)
+    let subIndex = subscriptionsDatabase.findIndex(
       s => s.razorpay_subscription_id === razorpay_subscription_id
     );
+    if (subIndex < 0) {
+      const dbSub = await db.subscriptions.getBySubscriptionId(String(razorpay_subscription_id)).catch(() => null);
+      if (dbSub) {
+        const normalizedSub = dbSub as unknown as DbSubscription;
+        const wsIdx = subscriptionsDatabase.findIndex(s => s.workspace_id === normalizedSub.workspace_id);
+        if (wsIdx >= 0) {
+          subscriptionsDatabase[wsIdx] = normalizedSub;
+          subIndex = wsIdx;
+        } else {
+          subscriptionsDatabase.push(normalizedSub);
+          subIndex = subscriptionsDatabase.length - 1;
+        }
+      }
+    }
     if (subIndex < 0) {
       return res.status(404).json({ success: false, error: 'Subscription checkout record not found.' });
     }
@@ -7678,10 +7915,67 @@ app.post('/api/razorpay/webhook', async (req, res) => {
 
     console.log(`[Razorpay Webhook Ingested]: Event ${event || 'unknown'}`);
 
+    const resolveWebhookUserAndSub = async (subscription: any, payment?: any) => {
+      const subId = subscription?.id ? String(subscription.id) : '';
+      const notesWsId = subscription?.notes?.workspaceId ? String(subscription.notes.workspaceId) : '';
+      const notesEmail = subscription?.notes?.customerEmail ? String(subscription.notes.customerEmail).toLowerCase() : '';
+      const payEmail = payment?.email ? String(payment.email).toLowerCase() : '';
+
+      let user = usersDatabase.find(u =>
+        (subId && u.razorpay_subscription_id === subId) ||
+        (notesEmail && u.email.toLowerCase() === notesEmail) ||
+        (payEmail && u.email.toLowerCase() === payEmail) ||
+        (notesWsId && u.workspace_id === notesWsId)
+      );
+      if (!user) {
+        const dbUser =
+          (subId ? await db.users.getBySubscriptionId(subId).catch(() => null) : null) ||
+          (notesEmail ? await db.users.getByEmail(notesEmail).catch(() => null) : null) ||
+          (payEmail ? await db.users.getByEmail(payEmail).catch(() => null) : null) ||
+          (notesWsId ? await db.users.getByWorkspace(notesWsId).catch(() => null) : null);
+        if (dbUser) {
+          user = dbUser as unknown as DbUser;
+          if (!usersDatabase.some(u => u.id === user!.id)) {
+            usersDatabase.push(user);
+          }
+        }
+      }
+
+      let subRec = subscriptionsDatabase.find(s =>
+        (subId && s.razorpay_subscription_id === subId) ||
+        (user?.workspace_id && s.workspace_id === user.workspace_id) ||
+        (notesWsId && s.workspace_id === notesWsId)
+      );
+      if (!subRec) {
+        const dbSub =
+          (subId ? await db.subscriptions.getBySubscriptionId(subId).catch(() => null) : null) ||
+          (user?.workspace_id ? await db.subscriptions.getByWorkspace(user.workspace_id).catch(() => null) : null) ||
+          (notesWsId ? await db.subscriptions.getByWorkspace(notesWsId).catch(() => null) : null);
+        if (dbSub) {
+          subRec = dbSub as unknown as DbSubscription;
+          const wsIdx = subscriptionsDatabase.findIndex(s => s.workspace_id === subRec!.workspace_id);
+          if (wsIdx >= 0) subscriptionsDatabase[wsIdx] = subRec;
+          else subscriptionsDatabase.push(subRec);
+        }
+      }
+
+      if (!user && subRec?.workspace_id) {
+        const dbOwner = await db.users.getByWorkspace(subRec.workspace_id).catch(() => null);
+        if (dbOwner) {
+          user = dbOwner as unknown as DbUser;
+          if (!usersDatabase.some(u => u.id === user!.id)) {
+            usersDatabase.push(user);
+          }
+        }
+      }
+
+      return { user, subRec };
+    };
+
     if (event === 'subscription.authenticated') {
       const subscription = payload?.subscription?.entity;
       console.log(`[Razorpay Subscription Authenticated]: ID ${subscription?.id}`);
-      const subRec = subscriptionsDatabase.find(s => s.razorpay_subscription_id === subscription?.id);
+      const { subRec } = await resolveWebhookUserAndSub(subscription);
       if (subRec) {
         subRec.status = 'pending';
         subRec.updated_at = new Date().toISOString();
@@ -7690,17 +7984,7 @@ app.post('/api/razorpay/webhook', async (req, res) => {
     } else if (event === 'subscription.activated') {
       const subscription = payload?.subscription?.entity;
       console.log(`[Razorpay Subscription Activated]: ID ${subscription?.id}`);
-      const user = usersDatabase.find(u =>
-        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
-        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
-        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
-      );
-      const subRec = subscriptionsDatabase.find(
-        s =>
-          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
-          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
-          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
-      );
+      const { user, subRec } = await resolveWebhookUserAndSub(subscription);
       if (subRec) {
         subRec.status = 'active';
         if (subscription?.id) subRec.razorpay_subscription_id = subscription.id;
@@ -7708,11 +7992,12 @@ app.post('/api/razorpay/webhook', async (req, res) => {
         await db.subscriptions.upsert(subRec as any);
       }
       if (user) {
+        const cycleDays = subRec?.billing_cycle === 'annual' ? 365 : 30;
         user.billing_status = 'active';
         user.payment_status = 'paid';
         if (subscription?.id) user.razorpay_subscription_id = subscription.id;
         user.subscription_start_date = new Date().toISOString();
-        user.current_period_end = new Date(Date.now() + 30 * 86400000).toISOString();
+        user.current_period_end = new Date(Date.now() + cycleDays * 86400000).toISOString();
         user.updated_at = new Date().toISOString();
         await db.users.upsert(user as any);
         console.log(`[Razorpay Webhook]: User ${user.id} subscription marked active.`);
@@ -7732,18 +8017,7 @@ app.post('/api/razorpay/webhook', async (req, res) => {
       const payment = payload?.payment?.entity;
       console.log(`[Razorpay Subscription Charged]: ID ${subscription?.id}, payment ${payment?.id}`);
 
-      const user = usersDatabase.find(u =>
-        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
-        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
-        (payment?.email && u.email.toLowerCase() === payment.email.toLowerCase()) ||
-        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
-      );
-      const subRec = subscriptionsDatabase.find(
-        s =>
-          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
-          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
-          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
-      );
+      const { user, subRec } = await resolveWebhookUserAndSub(subscription, payment);
       if (subRec) {
         subRec.status = 'active';
         if (subscription?.id) subRec.razorpay_subscription_id = subscription.id;
@@ -7813,17 +8087,7 @@ app.post('/api/razorpay/webhook', async (req, res) => {
     } else if (event === 'subscription.halted' || event === 'subscription.pending' || event === 'subscription.paused') {
       const subscription = payload?.subscription?.entity;
       console.warn(`[Razorpay ${event}]: ID ${subscription?.id}`);
-      const user = usersDatabase.find(u =>
-        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
-        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
-        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
-      );
-      const subRec = subscriptionsDatabase.find(
-        s =>
-          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
-          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
-          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
-      );
+      const { user, subRec } = await resolveWebhookUserAndSub(subscription);
       if (subRec) {
         subRec.status = event === 'subscription.paused' ? 'cancelled' : 'halted';
         subRec.updated_at = new Date().toISOString();
@@ -7847,17 +8111,7 @@ app.post('/api/razorpay/webhook', async (req, res) => {
     } else if (event === 'subscription.cancelled') {
       const subscription = payload?.subscription?.entity;
       console.log(`[Razorpay Subscription Cancelled]: ID ${subscription?.id}`);
-      const user = usersDatabase.find(u =>
-        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
-        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
-        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
-      );
-      const subRec = subscriptionsDatabase.find(
-        s =>
-          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
-          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
-          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
-      );
+      const { user, subRec } = await resolveWebhookUserAndSub(subscription);
       if (subRec) {
         subRec.status = 'cancelled';
         subRec.updated_at = new Date().toISOString();
@@ -7885,25 +8139,46 @@ app.post('/api/razorpay/webhook', async (req, res) => {
       const orderId = payment?.order_id;
       console.log(`[Razorpay Refund Event ${event}]: Payment ${paymentId || 'unknown'}`);
 
-      const ledgerRec = subscriptionPaymentsDatabase.find(p => p.razorpay_payment_id === paymentId);
+      let ledgerRec = subscriptionPaymentsDatabase.find(p => p.razorpay_payment_id === paymentId);
+      if (!ledgerRec && paymentId) {
+        const dbLedger = await db.subscriptionPayments.getByPaymentId(String(paymentId)).catch(() => null);
+        if (dbLedger) {
+          ledgerRec = dbLedger;
+          subscriptionPaymentsDatabase.unshift(dbLedger);
+        }
+      }
       if (ledgerRec) {
         ledgerRec.settlement_status = 'failed';
         ledgerRec.updated_at = new Date().toISOString();
         await db.subscriptionPayments.recordPayment(ledgerRec).catch(() => {});
       }
 
-      const subRec = subscriptionsDatabase.find(
+      let subRec = subscriptionsDatabase.find(
         s =>
           (paymentId && s.razorpay_verification_payment_id === paymentId) ||
           (orderId && s.razorpay_verification_order_id === orderId) ||
           (ledgerRec && s.workspace_id === ledgerRec.workspace_id)
       );
+      if (!subRec && ledgerRec?.workspace_id) {
+        const dbSub = await db.subscriptions.getByWorkspace(ledgerRec.workspace_id).catch(() => null);
+        if (dbSub) {
+          subRec = dbSub as unknown as DbSubscription;
+          subscriptionsDatabase.push(subRec);
+        }
+      }
       if (subRec) {
         subRec.status = 'cancelled';
         subRec.updated_at = new Date().toISOString();
         await db.subscriptions.upsert(subRec as any).catch(() => {});
 
-        const ownerUser = usersDatabase.find(u => u.workspace_id === subRec.workspace_id);
+        let ownerUser = usersDatabase.find(u => u.workspace_id === subRec!.workspace_id);
+        if (!ownerUser) {
+          const dbOwner = await db.users.getByWorkspace(subRec.workspace_id).catch(() => null);
+          if (dbOwner) {
+            ownerUser = dbOwner as unknown as DbUser;
+            usersDatabase.push(ownerUser);
+          }
+        }
         if (ownerUser) {
           ownerUser.billing_status = 'cancelled';
           ownerUser.payment_status = 'failed';
@@ -7925,7 +8200,18 @@ app.post('/api/razorpay/webhook', async (req, res) => {
       console.log(`[Razorpay ${event}]: Payment ${payment?.id || 'none'}, Order ${orderId || 'none'}`);
 
       if (orderId) {
-        const verification = trialVerificationsDatabase.find(v => v.razorpay_order_id === orderId);
+        let verification = trialVerificationsDatabase.find(v => v.razorpay_order_id === orderId);
+        if (!verification) {
+          const dbTv = await db.trialVerifications.getByOrderId(String(orderId)).catch(() => null);
+          if (dbTv) {
+            verification = {
+              ...(dbTv as any),
+              amount_paise: Number((dbTv as any).amount_paise || 100),
+              amount_cents: Number((dbTv as any).amount_cents || (dbTv as any).amount_paise || 100)
+            };
+            trialVerificationsDatabase.push(verification);
+          }
+        }
         if (verification && verification.status !== 'verified') {
           const nowIso = new Date().toISOString();
           const trialEndsAt = new Date(Date.now() + 14 * 86400000).toISOString();
@@ -7935,7 +8221,7 @@ app.post('/api/razorpay/webhook', async (req, res) => {
           verification.verified_at = nowIso;
           verification.updated_at = nowIso;
 
-          const subIndex = subscriptionsDatabase.findIndex(s => s.workspace_id === verification.workspace_id);
+          const subIndex = subscriptionsDatabase.findIndex(s => s.workspace_id === verification!.workspace_id);
           const updatedSub: DbSubscription = {
             id: subIndex >= 0 ? subscriptionsDatabase[subIndex].id : `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
             workspace_id: verification.workspace_id,
@@ -7960,9 +8246,18 @@ app.post('/api/razorpay/webhook', async (req, res) => {
             subscriptionsDatabase.push(updatedSub);
           }
 
-          const matchedUser = usersDatabase.find(
-            u => u.id === verification.user_id || u.email.toLowerCase() === verification.email.toLowerCase()
+          let matchedUser = usersDatabase.find(
+            u => u.id === verification!.user_id || u.email.toLowerCase() === verification!.email.toLowerCase()
           );
+          if (!matchedUser) {
+            const dbUser =
+              (await db.users.getById(verification.user_id).catch(() => null)) ||
+              (await db.users.getByEmail(verification.email).catch(() => null));
+            if (dbUser) {
+              matchedUser = dbUser as unknown as DbUser;
+              usersDatabase.push(matchedUser);
+            }
+          }
           if (matchedUser) {
             matchedUser.selected_plan = verification.tier;
             matchedUser.billing_status = 'trialing';
@@ -7986,22 +8281,107 @@ app.post('/api/razorpay/webhook', async (req, res) => {
           });
 
           console.log(`[Webhook Trial Activation]: Successfully activated 14-day trial for workspace ${verification.workspace_id} via webhook ${event}.`);
+        } else if (!verification) {
+          // Handle one-time plan checkout orders (e.g., annual or one-time upgrade)
+          const storedOrder = await db.razorpayOrders.getByOrderId(String(orderId)).catch(() => null);
+          if (storedOrder && storedOrder.status !== 'paid') {
+            const nowIso = new Date().toISOString();
+            const orderMeta = storedOrder.metadata_json || {};
+            const expected = getExpectedPlanAmount(
+              orderMeta.tier || 'growth',
+              orderMeta.billingCycle === 'annual' ? 'annual' : 'monthly',
+              Boolean(orderMeta.isFounding)
+            );
+            const authoritativePlan = getAuthoritativeBillingPlan(expected.tier, expected.billingCycle, Boolean(orderMeta.isFounding));
+            const periodEndIso = new Date(Date.now() + (expected.billingCycle === 'annual' ? 365 : 30) * 86400000).toISOString();
+
+            storedOrder.status = 'paid';
+            storedOrder.metadata_json = { ...orderMeta, payment_id: payment?.id || null, verified_at: nowIso };
+            storedOrder.updated_at = nowIso;
+            await db.razorpayOrders.upsert(storedOrder).catch(() => {});
+
+            let orderUser = usersDatabase.find(
+              u => u.id === storedOrder.user_id || u.workspace_id === storedOrder.workspace_id
+            );
+            if (!orderUser) {
+              const dbUser =
+                (await db.users.getById(storedOrder.user_id).catch(() => null)) ||
+                (await db.users.getByWorkspace(storedOrder.workspace_id).catch(() => null));
+              if (dbUser) {
+                orderUser = dbUser as unknown as DbUser;
+                usersDatabase.push(orderUser);
+              }
+            }
+            if (orderUser) {
+              orderUser.billing_status = 'active';
+              orderUser.payment_status = 'paid';
+              orderUser.selected_plan = expected.tier;
+              orderUser.plan_price = expected.amountUsd;
+              orderUser.subscription_start_date = nowIso;
+              orderUser.current_period_end = periodEndIso;
+              orderUser.updated_at = nowIso;
+              await db.users.upsert(orderUser as any).catch(() => {});
+            }
+
+            const subIndex = subscriptionsDatabase.findIndex(s => s.workspace_id === storedOrder.workspace_id);
+            const updatedSub: DbSubscription = {
+              id: subIndex >= 0 ? subscriptionsDatabase[subIndex].id : `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+              workspace_id: storedOrder.workspace_id,
+              user_id: storedOrder.user_id,
+              email: orderUser?.email?.toLowerCase() || 'billing@churnveda.app',
+              tier: expected.tier,
+              billing_cycle: expected.billingCycle,
+              billing_plan_id: authoritativePlan?.id || `plan_tier_${expected.tier}_${expected.billingCycle}`,
+              razorpay_plan_id: authoritativePlan?.razorpay_plan_id || '',
+              status: 'active',
+              payment_verification_status: 'verified',
+              razorpay_verification_order_id: orderId,
+              razorpay_verification_payment_id: payment?.id || undefined,
+              created_at: subIndex >= 0 ? subscriptionsDatabase[subIndex].created_at : nowIso,
+              updated_at: nowIso
+            };
+            if (subIndex >= 0) subscriptionsDatabase[subIndex] = updatedSub;
+            else subscriptionsDatabase.push(updatedSub);
+            await db.subscriptions.upsert(updatedSub as any).catch(() => {});
+
+            if (payment?.id) {
+              const ledgerPayment: DbSubscriptionPayment = {
+                id: `spay_${payment.id}`,
+                workspace_id: storedOrder.workspace_id,
+                user_id: storedOrder.user_id,
+                subscription_id: updatedSub.id,
+                razorpay_payment_id: payment.id,
+                currency: storedOrder.currency || 'INR',
+                amount_usd: expected.amountUsd,
+                amount_cents: expected.amountCents,
+                converted_inr_amount: Math.round(storedOrder.amount_paise / 100),
+                settlement_status: 'settled',
+                raw_event: req.body,
+                created_at: nowIso,
+                updated_at: nowIso
+              };
+              const existingIdx = subscriptionPaymentsDatabase.findIndex(p => p.razorpay_payment_id === payment.id);
+              if (existingIdx >= 0) subscriptionPaymentsDatabase[existingIdx] = ledgerPayment;
+              else subscriptionPaymentsDatabase.unshift(ledgerPayment);
+              await db.subscriptionPayments.recordPayment(ledgerPayment).catch(() => {});
+            }
+
+            await syncSubscriptionToFirestore({
+              userId: orderUser?.id || storedOrder.user_id,
+              workspaceId: storedOrder.workspace_id,
+              tier: expected.tier,
+              billingCycle: expected.billingCycle,
+              status: 'active',
+              currentPeriodEnd: periodEndIso,
+              amountUsd: expected.amountUsd
+            }).catch(() => {});
+          }
         }
       }
     } else if (event === 'subscription.failed') {
       const subscription = payload?.subscription?.entity;
       console.warn(`[Razorpay Subscription Failed]: ID ${subscription?.id}`);
-      const user = usersDatabase.find(u =>
-        (subscription?.id && u.razorpay_subscription_id === subscription.id) ||
-        (subscription?.notes?.customerEmail && u.email.toLowerCase() === subscription.notes.customerEmail.toLowerCase()) ||
-        (subscription?.notes?.workspaceId && u.workspace_id === subscription.notes.workspaceId)
-      );
-      const subRec = subscriptionsDatabase.find(
-        s =>
-          (subscription?.id && s.razorpay_subscription_id === subscription.id) ||
-          (user?.workspace_id && s.workspace_id === user.workspace_id) ||
-          (subscription?.notes?.workspaceId && s.workspace_id === subscription.notes.workspaceId)
-      );
+      const { user, subRec } = await resolveWebhookUserAndSub(subscription);
       if (subRec) {
         subRec.status = 'halted';
         subRec.updated_at = new Date().toISOString();

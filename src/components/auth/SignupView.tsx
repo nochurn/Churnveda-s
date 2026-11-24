@@ -18,10 +18,13 @@ import {
   X
 } from 'lucide-react';
 import { authService, validatePasswordRequirements } from '../../services/authService';
-import { apiService } from '../../services/api';
+import { apiService, setStoredAuthToken } from '../../services/api';
 import {
-  AUTHORITATIVE_PLANS
+  AUTHORITATIVE_PLANS,
+  buildRazorpayOneTimeOptions,
+  buildRazorpaySubscriptionOptions
 } from '../../services/razorpayConfig';
+import { ensureRazorpaySdk } from '../../services/razorpaySdk';
 import { CENTRAL_PRICING } from '../../config/pricing';
 
 interface SignupViewProps {
@@ -268,7 +271,7 @@ export const SignupView: React.FC<SignupViewProps> = ({
   // Flow A legacy alias
   const handleFlowAFreeTrial = handlePayVerificationAndStartTrial;
 
-  // Flow B: Paid checkout required before activation (creates pending record, triggers Razorpay Subscription)
+  // Flow B: Paid checkout required before activation (creates pending record, opens Razorpay Checkout, verifies payment)
   const handleFlowBPaidCheckout = async () => {
     setTouched({ name: true, company: true, email: true, password: true, confirmPassword: true, terms: true });
     setErrorMessage(null);
@@ -286,8 +289,8 @@ export const SignupView: React.FC<SignupViewProps> = ({
     setIsLoading(true);
 
     try {
-      // 1. Create pending user record
-      await apiService.signupUser({
+      // 1. Create pending user record and persist session token so checkout APIs are authenticated
+      const signupRes = await apiService.signupUser({
         fullName: name.trim(),
         companyName: company.trim(),
         email: email.trim(),
@@ -300,22 +303,156 @@ export const SignupView: React.FC<SignupViewProps> = ({
         isFreeTrial: false
       });
 
-      // 2. Create Razorpay Subscription (server-side authoritative)
+      if (signupRes?.token) {
+        setStoredAuthToken(signupRes.token);
+      }
+      if (signupRes?.user) {
+        authService.setCurrentUser(signupRes.user);
+      }
+
+      const sdkReady = await ensureRazorpaySdk();
+      if (!sdkReady || typeof (window as any).Razorpay === 'undefined') {
+        setIsLoading(false);
+        setErrorMessage('Razorpay Checkout SDK could not load. Please check your connection and try again.');
+        return;
+      }
+
+      const normalizedTier = (selectedPlan === 'starter' || selectedPlan === 'pro' ? selectedPlan : 'growth') as 'starter' | 'growth' | 'pro';
+      const customerName = name.trim();
+      const customerEmail = email.trim();
+
+      if (billingCycle === 'annual') {
+        // 2A. Create server-side one-time order for Annual billing
+        const orderRes = await apiService.createRazorpayOrder({
+          plan: normalizedTier,
+          billingCycle: 'annual',
+          customerName,
+          customerEmail
+        });
+
+        if (!orderRes.success || !orderRes.orderId) {
+          throw new Error(orderRes.error || 'Failed to initialize annual Razorpay order.');
+        }
+
+        const orderCurrency = orderRes.currency || 'INR';
+        const options = buildRazorpayOneTimeOptions({
+          keyId: orderRes.keyId,
+          orderId: orderRes.orderId,
+          amountCents: orderRes.amount,
+          amount: orderRes.amount,
+          currency: orderCurrency,
+          description: `${(AUTHORITATIVE_PLANS[normalizedTier]?.name || normalizedTier).toUpperCase()} Plan (Annual)`,
+          customerName,
+          customerEmail,
+          customerPhone: phone.trim() || undefined,
+          handler: async (response: any) => {
+            try {
+              const verifyRes = await apiService.verifyRazorpayPayment({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                plan: normalizedTier,
+                billingCycle: 'annual',
+                amount: orderRes.amount,
+                currency: orderCurrency,
+                email: customerEmail
+              });
+
+              if (verifyRes.success) {
+                authService.updateSubscriptionState('active', normalizedTier);
+                authService.clearPendingPlan();
+                onShowToast('Payment verified! Your annual Churnveda subscription is now active.', 'success');
+                onAuthenticated();
+                onNavigate('payment-success', {
+                  payment_id: response.razorpay_payment_id,
+                  plan: normalizedTier,
+                  billing: 'annual',
+                  amount: String((verifyRes as any).amountUsd || currentPrice)
+                });
+              } else {
+                setErrorMessage(verifyRes.error || 'Payment verification failed.');
+              }
+            } catch (verErr: any) {
+              setErrorMessage(verErr?.message || 'Payment verification failed.');
+            } finally {
+              setIsLoading(false);
+            }
+          },
+          onDismiss: () => {
+            setIsLoading(false);
+            onShowToast('Checkout closed before payment completion. Your account is saved as pending payment.', 'info');
+          }
+        });
+
+        const rzp = new (window as any).Razorpay(options);
+        rzp.on('payment.failed', (resp: any) => {
+          setIsLoading(false);
+          setErrorMessage(resp?.error?.description || 'Razorpay payment failed or was declined.');
+        });
+        rzp.open();
+        return;
+      }
+
+      // 2B. Create server-side recurring Razorpay Subscription for Monthly billing
       const sub = await apiService.createRazorpaySubscription({
-        tier: selectedPlan as 'starter' | 'growth' | 'pro',
-        billing_cycle: billingCycle as 'monthly' | 'annual'
+        tier: normalizedTier,
+        billing_cycle: 'monthly'
       });
 
-      setIsLoading(false);
-
-      if (onNavigate) {
-        onNavigate('payment-success', {
-          subscription_id: sub.subscriptionId,
-          plan: selectedPlan,
-          billing: billingCycle,
-          amount: String(sub.amountInr)
-        });
+      if (!sub.success || !sub.subscriptionId) {
+        throw new Error(sub.error || 'Failed to initialize Razorpay subscription.');
       }
+
+      const options = buildRazorpaySubscriptionOptions({
+        keyId: sub.keyId,
+        subscriptionId: sub.subscriptionId,
+        planName: (AUTHORITATIVE_PLANS[normalizedTier]?.name || normalizedTier).toUpperCase(),
+        customerName,
+        customerEmail,
+        customerPhone: phone.trim() || undefined,
+        handler: async (response: any) => {
+          try {
+            const verifyRes = await apiService.verifyRazorpaySubscription({
+              razorpay_subscription_id: response.razorpay_subscription_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              tier: normalizedTier,
+              billing_cycle: 'monthly',
+              email: customerEmail
+            });
+
+            if (verifyRes.success) {
+              authService.updateSubscriptionState('active', normalizedTier);
+              authService.clearPendingPlan();
+              onShowToast('Subscription verified! Your Churnveda workspace is now active.', 'success');
+              onAuthenticated();
+              onNavigate('payment-success', {
+                subscription_id: response.razorpay_subscription_id,
+                plan: normalizedTier,
+                billing: 'monthly',
+                amount: String((verifyRes as any).amountUsd || sub.amountUsd || currentPrice)
+              });
+            } else {
+              setErrorMessage(verifyRes.error || 'Subscription verification failed.');
+            }
+          } catch (verErr: any) {
+            setErrorMessage(verErr?.message || 'Subscription verification failed.');
+          } finally {
+            setIsLoading(false);
+          }
+        },
+        onDismiss: () => {
+          setIsLoading(false);
+          onShowToast('Checkout closed before mandate completion. Your account is saved as pending payment.', 'info');
+        }
+      });
+
+      const rzp = new (window as any).Razorpay(options);
+      rzp.on('payment.failed', (resp: any) => {
+        setIsLoading(false);
+        setErrorMessage(resp?.error?.description || 'Subscription authorization failed.');
+      });
+      rzp.open();
     } catch (err: any) {
       setIsLoading(false);
       if (err.message?.toLowerCase().includes('already exists')) {

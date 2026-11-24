@@ -132,25 +132,8 @@ export const BillingVerifyView: React.FC<BillingVerifyViewProps> = ({
         });
         rzp.open();
       } else {
-        // Fallback for sandboxed preview if Razorpay script is blocked
-        onShowToast('Razorpay script offline. Completing sandbox verification...', 'info');
-        const verifyRes = await apiService.verifyTrialPayment({
-          razorpay_order_id: orderRes.orderId,
-          razorpay_payment_id: `pay_mock_${Date.now()}`,
-          razorpay_signature: 'sig_mock_verified'
-        });
-
-        if (verifyRes.success) {
-          authService.updateSubscriptionState('trialing', tier);
-          authService.clearPendingPlan();
-          onShowToast(
-            `Verification complete! 14-day ${authoritativePlan.name} trial activated.`,
-            'success'
-          );
-          onNavigate('dashboard');
-        } else {
-          setErrorMessage(verifyRes.error || 'Verification failed');
-        }
+        setErrorMessage('Razorpay Checkout SDK could not load. Please check your internet connection or disable content blockers and try again.');
+        onShowToast('Razorpay Checkout SDK is unavailable. Please retry.', 'error');
         setIsLoading(false);
       }
     } catch (err: any) {

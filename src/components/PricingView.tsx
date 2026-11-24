@@ -272,95 +272,60 @@ export const PricingView: React.FC<PricingViewProps> = ({
 
   // Instant checkout via Razorpay (UPI, Netbanking, Cards, Wallets)
   const handleRazorpayCheckout = async (planId: string) => {
+    const selectedCycle: 'monthly' | 'annual' = isAnnual ? 'annual' : 'monthly';
+    const isFoundingEligible = offerMode === 'founding' && !isAnnual && (planId === 'starter' || planId === 'growth');
+
+    if (!authService.isAuthenticated() && !authService.getCurrentUser()) {
+      setSelectedPlan(planId);
+      authService.setPendingPlan({ tier: planId, billingCycle: selectedCycle });
+      if (onShowToast) {
+        onShowToast('Please create an account or sign in to complete your Razorpay checkout.', 'info');
+      }
+      handleRedirectToSignup();
+      return;
+    }
+
+    const currentUser = authService.getCurrentUser();
+    const customerName = name.trim() || currentUser?.name || 'SaaS Founder';
+    const customerEmail = email.trim() || currentUser?.email || 'founder@example.com';
+
     setIsSubmitting(true);
     try {
       if (onShowToast) onShowToast('Connecting to Razorpay payment gateway...', 'info');
 
-      const selectedCycle: 'monthly' | 'annual' = isAnnual ? 'annual' : 'monthly';
-      const isFoundingEligible = offerMode === 'founding' && !isAnnual && (planId === 'starter' || planId === 'growth');
+      if (selectedCycle === 'annual') {
+        // Annual billing uses the One-Time Order Checkout Flow (UPI, Cards, Netbanking, Wallets)
+        const orderRes = await apiService.createRazorpayOrder({
+          plan: planId,
+          billingCycle: 'annual',
+          customerName,
+          customerEmail,
+          isFoundingOffer: false
+        });
 
-      // Subscription Mandate Flow: Monthly or Annual
-      const subRes = await apiService.createRazorpaySubscription({
-        tier: planId as 'starter' | 'growth' | 'pro',
-        billing_cycle: selectedCycle,
-        isFoundingOffer: isFoundingEligible
-      });
-
-      if (!subRes.success) {
-        if (selectedCycle === 'annual') {
-          throw new Error('Annual billing is not configured yet.');
+        if (!orderRes.success) {
+          throw new Error(orderRes.error || 'Failed to initialize Razorpay order');
         }
-        throw new Error(subRes.error || 'Failed to initialize subscription');
-      }
 
-      if (subRes.success && subRes.subscriptionId) {
         const sdkReady = await ensureRazorpaySdk();
-        if (sdkReady && typeof (window as any).Razorpay !== 'undefined') {
-          const options = buildRazorpaySubscriptionOptions({
-            keyId: subRes.keyId,
-            subscriptionId: subRes.subscriptionId,
-            planName: `${(AUTHORITATIVE_PLANS[planId]?.name || planId).toUpperCase()}${isFoundingEligible ? ' (FOUNDING OFFER)' : ''}`,
-            customerName: name || 'SaaS Founder',
-            customerEmail: email || 'founder@example.com',
-            handler: async (response: any) => {
-              try {
-                const verifyRes = await apiService.verifyRazorpaySubscription({
-                  razorpay_subscription_id: response.razorpay_subscription_id,
-                  razorpay_payment_id: response.razorpay_payment_id,
-                  razorpay_signature: response.razorpay_signature,
-                  tier: planId,
-                  billing_cycle: selectedCycle,
-                  isFoundingOffer: isFoundingEligible,
-                  email: email || 'founder@example.com'
-                });
-
-                if (verifyRes.success) {
-                  if (onShowToast) {
-                    onShowToast(`🎉 ${selectedCycle === 'annual' ? 'Annual' : 'Monthly'} recurring subscription activated for ${planId.toUpperCase()} Plan${isFoundingEligible ? ' at Founding Rate' : ''}!`, 'success');
-                  }
-                  if (onNavigate) onNavigate('dashboard');
-                } else {
-                  if (onShowToast) onShowToast(verifyRes.error || 'Subscription verification failed.', 'error');
-                }
-              } catch (verErr: any) {
-                if (onShowToast) onShowToast('Verification error: ' + verErr.message, 'error');
-              }
-            }
-          });
-
-          const rzp = new (window as any).Razorpay(options);
-          rzp.open();
-          return;
-        } else {
-          if (onShowToast) onShowToast('Razorpay Checkout SDK is still loading. Please check your internet connection and try again.', 'error');
+        if (!sdkReady || typeof (window as any).Razorpay === 'undefined') {
+          if (onShowToast) {
+            onShowToast('Razorpay Checkout SDK could not load. Please check your internet connection and try again.', 'error');
+          }
+          setIsSubmitting(false);
           return;
         }
-      }
 
-      // One-time Annual or fallback Order Flow
-      const orderRes = await apiService.createRazorpayOrder({
-        plan: planId,
-        billingCycle: isAnnual ? 'annual' : 'monthly',
-        customerName: name || 'SaaS Founder',
-        customerEmail: email || 'founder@example.com',
-        isFoundingOffer: isFoundingEligible
-      });
-
-      if (!orderRes.success) {
-        throw new Error(orderRes.error || 'Failed to initialize Razorpay checkout');
-      }
-
-      const sdkReady = await ensureRazorpaySdk();
-      if (sdkReady && typeof (window as any).Razorpay !== 'undefined') {
+        const orderCurrency = orderRes.currency || 'INR';
         const options = buildRazorpayOneTimeOptions({
           keyId: orderRes.keyId,
           orderId: orderRes.orderId,
           amountCents: orderRes.amount,
           amount: orderRes.amount,
-          currency: orderRes.currency || 'USD',
-          description: `${(AUTHORITATIVE_PLANS[planId]?.name || planId).toUpperCase()} Plan${isFoundingEligible ? ' (Founding Customer Offer)' : ''} (${isAnnual ? 'Annual' : 'Monthly'})`,
-          customerName: name || 'SaaS Founder',
-          customerEmail: email || 'founder@example.com',
+          currency: orderCurrency,
+          description: `${(AUTHORITATIVE_PLANS[planId]?.name || planId).toUpperCase()} Plan (Annual)`,
+          customerName,
+          customerEmail,
           handler: async (response: any) => {
             try {
               const verifyRes = await apiService.verifyRazorpayPayment({
@@ -368,16 +333,18 @@ export const PricingView: React.FC<PricingViewProps> = ({
                 razorpay_payment_id: response.razorpay_payment_id,
                 razorpay_signature: response.razorpay_signature,
                 plan: planId,
-                billingCycle: isAnnual ? 'annual' : 'monthly',
+                billingCycle: 'annual',
                 amount: orderRes.amount,
-                currency: 'USD',
-                isFoundingOffer: isFoundingEligible,
-                email: email || 'founder@example.com'
+                currency: orderCurrency,
+                isFoundingOffer: false,
+                email: customerEmail
               });
 
               if (verifyRes.success) {
+                authService.updateSubscriptionState('active', planId as 'starter' | 'growth' | 'pro');
+                authService.clearPendingPlan();
                 if (onShowToast) {
-                  onShowToast(`🎉 Razorpay payment successful! Upgraded to ${planId.toUpperCase()} Plan${isFoundingEligible ? ' (Founding Customer Offer)' : ''}.`, 'success');
+                  onShowToast(`🎉 Annual Razorpay payment verified! Upgraded to ${planId.toUpperCase()} Plan.`, 'success');
                 }
                 if (onNavigate) onNavigate('dashboard');
               } else {
@@ -385,19 +352,96 @@ export const PricingView: React.FC<PricingViewProps> = ({
               }
             } catch (verErr: any) {
               if (onShowToast) onShowToast('Verification error: ' + verErr.message, 'error');
+            } finally {
+              setIsSubmitting(false);
             }
+          },
+          onDismiss: () => {
+            setIsSubmitting(false);
           }
         });
 
         const rzp = new (window as any).Razorpay(options);
+        rzp.on('payment.failed', (resp: any) => {
+          setIsSubmitting(false);
+          if (onShowToast) {
+            onShowToast(resp?.error?.description || 'Razorpay payment failed or was declined.', 'error');
+          }
+        });
         rzp.open();
-      } else {
-        if (onShowToast) onShowToast('Razorpay Checkout SDK is still loading. Please check your internet connection and try again.', 'error');
+        return;
       }
+
+      // Monthly billing uses Recurring Subscription Mandate Flow (UPI AutoPay / Cards)
+      const subRes = await apiService.createRazorpaySubscription({
+        tier: planId as 'starter' | 'growth' | 'pro',
+        billing_cycle: 'monthly',
+        isFoundingOffer: isFoundingEligible
+      });
+
+      if (!subRes.success || !subRes.subscriptionId) {
+        throw new Error(subRes.error || 'Failed to initialize recurring subscription');
+      }
+
+      const sdkReady = await ensureRazorpaySdk();
+      if (!sdkReady || typeof (window as any).Razorpay === 'undefined') {
+        if (onShowToast) {
+          onShowToast('Razorpay Checkout SDK could not load. Please check your internet connection and try again.', 'error');
+        }
+        setIsSubmitting(false);
+        return;
+      }
+
+      const options = buildRazorpaySubscriptionOptions({
+        keyId: subRes.keyId,
+        subscriptionId: subRes.subscriptionId,
+        planName: `${(AUTHORITATIVE_PLANS[planId]?.name || planId).toUpperCase()}${isFoundingEligible ? ' (FOUNDING OFFER)' : ''}`,
+        customerName,
+        customerEmail,
+        handler: async (response: any) => {
+          try {
+            const verifyRes = await apiService.verifyRazorpaySubscription({
+              razorpay_subscription_id: response.razorpay_subscription_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              tier: planId,
+              billing_cycle: 'monthly',
+              isFoundingOffer: isFoundingEligible,
+              email: customerEmail
+            });
+
+            if (verifyRes.success) {
+              authService.updateSubscriptionState('active', planId as 'starter' | 'growth' | 'pro');
+              authService.clearPendingPlan();
+              if (onShowToast) {
+                onShowToast(`🎉 Monthly recurring subscription activated for ${planId.toUpperCase()} Plan${isFoundingEligible ? ' at Founding Rate' : ''}!`, 'success');
+              }
+              if (onNavigate) onNavigate('dashboard');
+            } else {
+              if (onShowToast) onShowToast(verifyRes.error || 'Subscription verification failed.', 'error');
+            }
+          } catch (verErr: any) {
+            if (onShowToast) onShowToast('Verification error: ' + verErr.message, 'error');
+          } finally {
+            setIsSubmitting(false);
+          }
+        },
+        onDismiss: () => {
+          setIsSubmitting(false);
+        }
+      });
+
+      const rzp = new (window as any).Razorpay(options);
+      rzp.on('payment.failed', (resp: any) => {
+        setIsSubmitting(false);
+        if (onShowToast) {
+          onShowToast(resp?.error?.description || 'Subscription mandate authorization failed.', 'error');
+        }
+      });
+      rzp.open();
     } catch (err: any) {
-      if (onShowToast) onShowToast(err.message || 'Razorpay checkout failed.', 'error');
-    } finally {
       setIsSubmitting(false);
+      if (onShowToast) onShowToast(err.message || 'Razorpay checkout failed.', 'error');
     }
   };
 

@@ -1042,7 +1042,7 @@ export default function App() {
 
           {(activeView === 'success' || activeView === 'payment-success') && (
             <SuccessView
-              sessionId={routeParams.session_id}
+              sessionId={routeParams.session_id || routeParams.subscription_id || routeParams.payment_id}
               plan={routeParams.plan || 'growth'}
               billing={routeParams.billing === 'annual' ? 'annual' : 'monthly'}
               amount={routeParams.amount}

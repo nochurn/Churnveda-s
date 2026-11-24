@@ -1,4 +1,4 @@
-import { initializeApp as initFirebaseAdmin, getApps as getFirebaseAdminApps } from 'firebase-admin/app';
+import { initializeApp as initFirebaseAdmin, getApps as getFirebaseAdminApps, getApp as getFirebaseAdminAppInstance, type App as FirebaseAdminApp } from 'firebase-admin/app';
 import { getFirestore as getFirebaseAdminFirestore, FieldValue } from 'firebase-admin/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import type { Customer, DailyAlert, ImportHistoryRecord, IntegrationStatus } from '../src/types';
@@ -18,14 +18,22 @@ export interface FirebaseRequestContext {
 
 const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || firebaseConfig.projectId;
 const DATABASE_ID = firebaseConfig.firestoreDatabaseId || '(default)';
+export const STORAGE_BUCKET = (process.env.FIREBASE_STORAGE_BUCKET || firebaseConfig.storageBucket || `${PROJECT_ID}.firebasestorage.app`).trim();
 const DOC_RESOURCE_PREFIX = `projects/${PROJECT_ID}/databases/${DATABASE_ID}/documents`;
 const REST_BASE_URL = `https://firestore.googleapis.com/v1/${DOC_RESOURCE_PREFIX}`;
 
-const firebaseAdminApp = getFirebaseAdminApps().length > 0
-  ? getFirebaseAdminApps()[0]
-  : initFirebaseAdmin({ projectId: PROJECT_ID });
+export function getFirebaseAdminApp(): FirebaseAdminApp {
+  return getFirebaseAdminApps().length > 0
+    ? getFirebaseAdminAppInstance()
+    : initFirebaseAdmin({
+        projectId: PROJECT_ID,
+        storageBucket: STORAGE_BUCKET
+      });
+}
 
-const adminDb = DATABASE_ID !== '(default)'
+const firebaseAdminApp = getFirebaseAdminApp();
+
+export const adminDb = DATABASE_ID && DATABASE_ID !== '(default)'
   ? getFirebaseAdminFirestore(firebaseAdminApp, DATABASE_ID)
   : getFirebaseAdminFirestore(firebaseAdminApp);
 
@@ -37,10 +45,10 @@ export function hasFirebaseAdminCredentials(): boolean {
   return cachedAdcIamAuthorized === true;
 }
 
-async function checkAdcAdminIamAccess(): Promise<boolean> {
+export async function checkAdcAdminIamAccess(forceRefresh = false): Promise<boolean> {
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()) return true;
   const now = Date.now();
-  if (cachedAdcIamAuthorized !== null && now - cachedAdcProbeTimestamp < 60_000) {
+  if (!forceRefresh && cachedAdcIamAuthorized !== null && now - cachedAdcProbeTimestamp < 60_000) {
     return cachedAdcIamAuthorized;
   }
   try {

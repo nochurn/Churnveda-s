@@ -1634,6 +1634,24 @@ export const db = {
         return res.rows;
       }
       return sqliteDb!.prepare('SELECT * FROM users').all() as unknown as DbUser[];
+    },
+
+    async getByWorkspace(workspaceId: string): Promise<DbUser | null> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM users WHERE workspace_id = $1 LIMIT 1', [workspaceId]);
+        return res.rows[0] || null;
+      }
+      return (sqliteDb!.prepare('SELECT * FROM users WHERE workspace_id = ? LIMIT 1').get(workspaceId) as unknown as DbUser) || null;
+    },
+
+    async getBySubscriptionId(subId: string): Promise<DbUser | null> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM users WHERE razorpay_subscription_id = $1 LIMIT 1', [subId]);
+        return res.rows[0] || null;
+      }
+      return (sqliteDb!.prepare('SELECT * FROM users WHERE razorpay_subscription_id = ? LIMIT 1').get(subId) as unknown as DbUser) || null;
     }
   },
 
@@ -2207,6 +2225,15 @@ export const db = {
         tv.status, tv.payment_id || null, tv.verified_at || null, tv.created_at, tv.updated_at
       );
       return tv;
+    },
+
+    async listAll(): Promise<DbTrialVerification[]> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM trial_verifications ORDER BY created_at DESC');
+        return res.rows;
+      }
+      return sqliteDb!.prepare('SELECT * FROM trial_verifications ORDER BY created_at DESC').all() as unknown as DbTrialVerification[];
     }
   },
 
@@ -2593,6 +2620,15 @@ export const db = {
           updated_at = ?
         WHERE razorpay_payment_id = ?
       `).run(updates.settlement_status || null, updates.converted_inr_amount || null, updates.fee || null, updates.tax || null, now, paymentId);
+    },
+
+    async listAll(): Promise<DbSubscriptionPayment[]> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM subscription_payments ORDER BY created_at DESC');
+        return res.rows;
+      }
+      return sqliteDb!.prepare('SELECT * FROM subscription_payments ORDER BY created_at DESC').all() as unknown as DbSubscriptionPayment[];
     }
   },
 

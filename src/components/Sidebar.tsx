@@ -10,7 +10,8 @@ import {
   TrendingUp,
   Gift,
   Clock,
-  AlertCircle
+  AlertCircle,
+  ShieldCheck
 } from 'lucide-react';
 import { authService } from '../services/authService';
 
@@ -86,7 +87,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Settings',
       icon: Settings,
       badge: null
-    }
+    },
+    ...((!user || user.role === 'Admin')
+      ? [
+          {
+            id: 'admin',
+            label: 'Admin Panel',
+            icon: ShieldCheck,
+            badge: null
+          }
+        ]
+      : [])
   ];
 
   return (

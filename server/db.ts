@@ -224,6 +224,18 @@ let isPostgresActive = false;
 let databaseInitialized = false;
 let initDatabasePromise: Promise<{ isPostgres: boolean; target: string }> | null = null;
 
+export function getDatabaseStatusInfo(): {
+  engine: 'postgresql' | 'sqlite';
+  initialized: boolean;
+  target: string;
+} {
+  return {
+    engine: isPostgresActive ? 'postgresql' : 'sqlite',
+    initialized: databaseInitialized,
+    target: isPostgresActive ? 'PostgreSQL' : 'SQLite WAL'
+  };
+}
+
 // Ensure persistent data directory exists
 const dataDir = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(dataDir)) {
@@ -1652,6 +1664,62 @@ export const db = {
         return res.rows[0] || null;
       }
       return (sqliteDb!.prepare('SELECT * FROM users WHERE razorpay_subscription_id = ? LIMIT 1').get(subId) as unknown as DbUser) || null;
+    },
+
+    async updateAdminFields(
+      userId: string,
+      updates: {
+        role?: 'Admin' | 'Analyst' | 'Viewer';
+        selected_plan?: string;
+        billing_status?: string;
+        billing_plan_id?: string | null;
+        razorpay_plan_id?: string | null;
+      }
+    ): Promise<DbUser | null> {
+      if (!databaseInitialized) await initDatabase();
+      const now = new Date().toISOString();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          `UPDATE users SET
+            role = COALESCE($1, role),
+            selected_plan = COALESCE($2, selected_plan),
+            billing_status = COALESCE($3, billing_status),
+            billing_plan_id = COALESCE($4, billing_plan_id),
+            razorpay_plan_id = COALESCE($5, razorpay_plan_id),
+            updated_at = $6
+          WHERE id = $7
+          RETURNING *`,
+          [
+            updates.role ?? null,
+            updates.selected_plan ?? null,
+            updates.billing_status ?? null,
+            updates.billing_plan_id ?? null,
+            updates.razorpay_plan_id ?? null,
+            now,
+            userId
+          ]
+        );
+        return res.rows[0] || null;
+      }
+      sqliteDb!.prepare(
+        `UPDATE users SET
+          role = COALESCE(?, role),
+          selected_plan = COALESCE(?, selected_plan),
+          billing_status = COALESCE(?, billing_status),
+          billing_plan_id = COALESCE(?, billing_plan_id),
+          razorpay_plan_id = COALESCE(?, razorpay_plan_id),
+          updated_at = ?
+        WHERE id = ?`
+      ).run(
+        updates.role ?? null,
+        updates.selected_plan ?? null,
+        updates.billing_status ?? null,
+        updates.billing_plan_id ?? null,
+        updates.razorpay_plan_id ?? null,
+        now,
+        userId
+      );
+      return await this.getById(userId);
     }
   },
 
@@ -2373,6 +2441,28 @@ export const db = {
       } catch (err) {
         return false;
       }
+    },
+
+    async listRecent(limit = 50): Promise<Array<{
+      event_id: string;
+      event_type: string;
+      workspace_id?: string | null;
+      idempotency_key: string;
+      processed_at: string;
+      status: string;
+    }>> {
+      if (!databaseInitialized) await initDatabase();
+      const safeLimit = Math.min(Math.max(1, limit), 200);
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          'SELECT event_id, event_type, workspace_id, idempotency_key, processed_at, status FROM webhook_events ORDER BY processed_at DESC LIMIT $1',
+          [safeLimit]
+        );
+        return res.rows;
+      }
+      return sqliteDb!.prepare(
+        'SELECT event_id, event_type, workspace_id, idempotency_key, processed_at, status FROM webhook_events ORDER BY processed_at DESC LIMIT ?'
+      ).all(safeLimit) as any[];
     }
   },
 
@@ -2461,6 +2551,36 @@ export const db = {
         return res.rows;
       }
       return sqliteDb!.prepare('SELECT * FROM workspace_members').all() as unknown as DbWorkspaceMember[];
+    },
+
+    async updateRole(workspaceId: string, userId: string, role: 'admin' | 'member'): Promise<boolean> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          'UPDATE workspace_members SET role = $1 WHERE workspace_id = $2 AND user_id = $3',
+          [role, workspaceId, userId]
+        );
+        return (res.rowCount || 0) > 0;
+      }
+      const info = sqliteDb!.prepare(
+        'UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?'
+      ).run(role, workspaceId, userId);
+      return Number(info.changes) > 0;
+    },
+
+    async removeMember(workspaceId: string, userId: string): Promise<boolean> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          'DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2',
+          [workspaceId, userId]
+        );
+        return (res.rowCount || 0) > 0;
+      }
+      const info = sqliteDb!.prepare(
+        'DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?'
+      ).run(workspaceId, userId);
+      return Number(info.changes) > 0;
     }
   },
 
@@ -2927,6 +3047,48 @@ export const db = {
         amount_paise: Number(row.amount_paise),
         metadata_json: typeof row.metadata_json === 'string' ? JSON.parse(row.metadata_json) : row.metadata_json
       };
+    },
+
+    async listByWorkspace(workspaceId: string, limit = 100): Promise<DbRazorpayOrder[]> {
+      if (!databaseInitialized) await initDatabase();
+      const safeLimit = Math.min(Math.max(1, limit), 250);
+      const mapRow = (r: any): DbRazorpayOrder => ({
+        ...r,
+        amount_paise: Number(r.amount_paise),
+        metadata_json: typeof r.metadata_json === 'string' ? safeParseJsonValue(r.metadata_json) : r.metadata_json
+      });
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          'SELECT * FROM razorpay_orders WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2',
+          [workspaceId, safeLimit]
+        );
+        return res.rows.map(mapRow);
+      }
+      const rows = sqliteDb!.prepare(
+        'SELECT * FROM razorpay_orders WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?'
+      ).all(workspaceId, safeLimit) as any[];
+      return rows.map(mapRow);
+    },
+
+    async listAll(limit = 150): Promise<DbRazorpayOrder[]> {
+      if (!databaseInitialized) await initDatabase();
+      const safeLimit = Math.min(Math.max(1, limit), 300);
+      const mapRow = (r: any): DbRazorpayOrder => ({
+        ...r,
+        amount_paise: Number(r.amount_paise),
+        metadata_json: typeof r.metadata_json === 'string' ? safeParseJsonValue(r.metadata_json) : r.metadata_json
+      });
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          'SELECT * FROM razorpay_orders ORDER BY created_at DESC LIMIT $1',
+          [safeLimit]
+        );
+        return res.rows.map(mapRow);
+      }
+      const rows = sqliteDb!.prepare(
+        'SELECT * FROM razorpay_orders ORDER BY created_at DESC LIMIT ?'
+      ).all(safeLimit) as any[];
+      return rows.map(mapRow);
     }
   },
 

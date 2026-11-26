@@ -38,6 +38,18 @@ interface TrialVerificationModalProps {
   onShowToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
+function detectIndiaRegion(): boolean {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    if (tz === 'Asia/Kolkata' || tz === 'Asia/Calcutta') return true;
+    const langs = navigator.languages?.length ? navigator.languages : [navigator.language];
+    if (langs.some((l) => typeof l === 'string' && /-IN\b/i.test(l))) return true;
+  } catch {
+    // ignore detection errors
+  }
+  return false;
+}
+
 export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
   isOpen,
   onClose,
@@ -54,6 +66,9 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [exchangeRate, setExchangeRate] = useState<number>(86.85);
   const [displayRate, setDisplayRate] = useState<string>('1 USD = ₹86.85');
+  const [paymentCurrency, setPaymentCurrency] = useState<'INR' | 'USD'>(() =>
+    detectIndiaRegion() ? 'INR' : 'USD'
+  );
 
   React.useEffect(() => {
     apiService.fetchExchangeRate().then(res => {
@@ -88,12 +103,18 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
     year: 'numeric'
   });
 
+  const verificationInr = Math.round(1.0 * exchangeRate);
+  const isInrSelected = paymentCurrency === 'INR';
+  const activeDisclosure = isInrSelected
+    ? 'Pay securely in INR via UPI, debit/credit card, netbanking, or wallet.'
+    : ONE_TIME_PAYMENT_DISCLOSURE;
+
   const ctaLabel =
     billingCycle === 'annual'
-      ? 'Pay $1 & Start Annual Trial'
+      ? `Pay ${isInrSelected ? `₹${verificationInr}` : '$1'} & Start Annual Trial`
       : isFoundingApplicable
-      ? 'Pay $1 & Lock Founding Rate'
-      : 'Pay $1 & Start Free Trial';
+      ? `Pay ${isInrSelected ? `₹${verificationInr}` : '$1'} & Lock Founding Rate`
+      : `Pay ${isInrSelected ? `₹${verificationInr}` : '$1'} & Start Free Trial`;
 
   const handleStartVerification = async () => {
     setIsLoading(true);
@@ -101,14 +122,20 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
 
     try {
       if (onShowToast) {
-        onShowToast('Initializing secure $1 verification order with Razorpay...', 'info');
+        onShowToast(
+          isInrSelected
+            ? `Initializing secure ₹${verificationInr} ($1 USD eq.) verification order with Razorpay...`
+            : 'Initializing secure $1 verification order with Razorpay...',
+          'info'
+        );
       }
 
-      // 1. Create server-side order for exactly $1.00 verification
+      // 1. Create server-side order for $1.00 USD (or live INR equivalent for India)
       const orderRes = await apiService.createTrialVerificationOrder({
         tier,
         billing_cycle: billingCycle,
-        isFoundingOffer: isFoundingApplicable
+        isFoundingOffer: isFoundingApplicable,
+        currency: paymentCurrency
       });
 
       if (!orderRes.success) {
@@ -119,14 +146,19 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
       const sdkReady = await ensureRazorpaySdk();
       if (sdkReady && typeof (window as any).Razorpay !== 'undefined' && orderRes.keyId) {
         const chargeAmount = orderRes.amount || orderRes.amountCents || 100;
+        const orderCurr = (orderRes.currency || paymentCurrency || 'USD').toUpperCase();
+        const orderDesc =
+          orderCurr === 'INR'
+            ? `₹${Math.round(chargeAmount / 100)} ($1 USD eq.) Verification - ${authoritativePlan.name} 14-Day Trial (${billingCycle === 'annual' ? 'Annual' : 'Monthly'})`
+            : `$1 Verification - ${authoritativePlan.name} 14-Day Trial (${billingCycle === 'annual' ? 'Annual' : 'Monthly'})`;
         const options = buildRazorpayOneTimeOptions({
           keyId: orderRes.keyId,
           orderId: orderRes.orderId,
           amountCents: chargeAmount,
           amount: chargeAmount,
-          currency: orderRes.currency || 'USD',
+          currency: orderCurr,
           name: 'Churnveda',
-          description: `$1 Verification - ${authoritativePlan.name} 14-Day Trial (${billingCycle === 'annual' ? 'Annual' : 'Monthly'})`,
+          description: orderDesc,
           customerName: name || 'Founder',
           customerEmail: email || 'founder@churnveda.com',
           notes: {
@@ -272,19 +304,56 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
               </div>
               <div>
                 <span className="text-gray-500 block text-[11px]">Verification Hold:</span>
-                <strong className="text-emerald-700 font-bold text-sm">
-                  $1.00 USD (Refundable)
-                </strong>
+                {isInrSelected ? (
+                  <div>
+                    <strong className="text-emerald-700 font-bold text-sm">
+                      ₹{verificationInr} INR (Refundable)
+                    </strong>
+                    <span className="block text-[10px] text-gray-500">
+                      Equivalent to $1.00 USD
+                    </span>
+                  </div>
+                ) : (
+                  <strong className="text-emerald-700 font-bold text-sm">
+                    $1.00 USD (Refundable)
+                  </strong>
+                )}
               </div>
             </div>
 
-            <div className="pt-2 border-t border-blue-200/70 text-[11px] text-gray-700 space-y-1">
-              <div className="flex items-center justify-between font-medium">
-                <span className="text-gray-600">Currency:</span>
-                <span className="font-mono font-bold text-gray-900">USD ($)</span>
+            {/* Region / Currency Selector */}
+            <div className="pt-2 border-t border-blue-200/70 space-y-2">
+              <div className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="text-gray-600 font-medium">Payment Currency:</span>
+                <div className="inline-flex rounded-lg bg-white border border-blue-200 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setPaymentCurrency('INR')}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                      isInrSelected
+                        ? 'bg-[#1E3A8A] text-white'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    India (₹ INR)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentCurrency('USD')}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                      !isInrSelected
+                        ? 'bg-[#1E3A8A] text-white'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    Global ($ USD)
+                  </button>
+                </div>
               </div>
               <p className="text-[10px] text-blue-900 font-medium">
-                Transparent billing in USD. Card authorization will hold and automatically reverse $1 USD.
+                {isInrSelected
+                  ? `Billed in INR via UPI, domestic cards, netbanking, or wallets (${displayRate}). ₹${verificationInr} verification hold is refundable.`
+                  : 'Transparent billing in USD. Card authorization will hold and automatically reverse $1 USD.'}
               </p>
             </div>
           </div>
@@ -321,7 +390,7 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
             </div>
 
             <p className="text-[11px] text-gray-600 font-medium">
-              {ONE_TIME_PAYMENT_DISCLOSURE}
+              {activeDisclosure}
             </p>
           </div>
 
@@ -336,7 +405,14 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
             </div>
             <div className="flex items-center justify-between">
               <span>Plan charge after day 14:</span>
-              <span className="font-semibold text-gray-800">{authoritativePrice}</span>
+              <span className="font-semibold text-gray-800 text-right">
+                {authoritativePrice}
+                {isInrSelected && (
+                  <span className="block text-[10px] font-normal text-gray-500">
+                    ≈ ₹{estimatedInr.toLocaleString('en-IN')}/{billingCycle === 'annual' ? 'yr' : 'mo'}
+                  </span>
+                )}
+              </span>
             </div>
           </div>
 
@@ -401,14 +477,14 @@ export const TrialVerificationModal: React.FC<TrialVerificationModalProps> = ({
               ) : (
                 <>
                   <CreditCard className="w-4 h-4" />
-                  <span>Continue to Razorpay</span>
+                  <span>{ctaLabel}</span>
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
             </button>
 
             <div className="text-[10px] text-center text-gray-500">
-              {ONE_TIME_PAYMENT_DISCLOSURE}
+              {activeDisclosure}
             </div>
           </div>
         </div>

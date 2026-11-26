@@ -45,7 +45,7 @@ import {
   STORAGE_BUCKET_CONFIG,
   StorageBucketId
 } from './server/storageService.ts';
-import { initDatabase, db, DbSubscriptionPayment } from './server/db.ts';
+import { initDatabase, db, DbSubscriptionPayment, getDatabaseStatusInfo } from './server/db.ts';
 import {
   enqueueApprovedMessage,
   processOutboundQueue,
@@ -81,6 +81,7 @@ import {
   firebaseBackend,
   getFirebaseAdminApp,
   adminDb as firebaseAdminFirestore,
+  checkAdcAdminIamAccess,
   type FirebaseRequestContext
 } from './server/firebaseBackend.ts';
 
@@ -6025,10 +6026,20 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
       });
     }
 
-    const { tier, billing_cycle, plan, billingCycle, isFoundingOffer, is_founding_offer, offer } = req.body;
+    const { tier, billing_cycle, plan, billingCycle, isFoundingOffer, is_founding_offer, offer, currency } = req.body;
     const selectedTier = String(tier || plan || '').toLowerCase() as 'starter' | 'growth' | 'pro';
     const selectedCycle = String(billing_cycle || billingCycle || '').toLowerCase() as 'monthly' | 'annual';
     const isFounding = Boolean(isFoundingOffer || is_founding_offer || offer === 'founding');
+    const requestedCurrencyRaw = typeof currency === 'string' ? currency.trim().toUpperCase() : '';
+    const defaultDomesticInr = process.env.ENABLE_DOMESTIC_INR_PRICING === 'true';
+    const preferredCurrency: 'USD' | 'INR' =
+      requestedCurrencyRaw === 'INR'
+        ? 'INR'
+        : requestedCurrencyRaw === 'USD'
+        ? 'USD'
+        : defaultDomesticInr
+        ? 'INR'
+        : 'USD';
 
     if (!['starter', 'growth', 'pro'].includes(selectedTier)) {
       return res.status(400).json({
@@ -6087,15 +6098,37 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
       });
     }
 
-    let orderAmount = 100; // Exactly 100 cents = $1.00 USD
-    let orderCurrency: 'USD' | 'INR' = 'USD';
+    let orderAmount = 100; // Default 100 cents = $1.00 USD
+    let orderCurrency: 'USD' | 'INR' = preferredCurrency;
+    let exchangeRateUsed: number | undefined;
+
+    if (preferredCurrency === 'INR') {
+      try {
+        const conv = await convertUsdToInr(1.0);
+        orderAmount = conv.amountPaise;
+        orderCurrency = 'INR';
+        exchangeRateUsed = conv.rate;
+      } catch (rateErr: any) {
+        console.error('[Trial Verification INR Rate Error]:', rateErr?.message || rateErr);
+        if (isProd) {
+          return res.status(503).json({
+            success: false,
+            error: 'Unable to retrieve current USD to INR exchange rate. Please try again shortly.'
+          });
+        }
+        orderAmount = 8700; // Local dev fallback ₹87.00
+        orderCurrency = 'INR';
+        exchangeRateUsed = 87;
+      }
+    }
+
     const receiptId = `rcpt_trial_${Date.now().toString().slice(-8)}_${crypto.randomBytes(3).toString('hex')}`;
     let razorpayOrderId = `order_trial_${crypto.randomBytes(8).toString('hex')}`;
 
-    // Call official Razorpay Orders API (USD first; auto-fallback to INR equivalent if account doesn't have USD international enabled)
+    // Call official Razorpay Orders API (INR directly for Indian customers, or USD with INR fallback)
     if (hasRazorpayKeys) {
       const authHeader = 'Basic ' + Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-      const createRzpOrder = async (amount: number, currency: 'USD' | 'INR') => {
+      const createRzpOrder = async (amount: number, curr: 'USD' | 'INR') => {
         return fetch('https://api.razorpay.com/v1/orders', {
           method: 'POST',
           headers: {
@@ -6104,7 +6137,7 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
           },
           body: JSON.stringify({
             amount,
-            currency,
+            currency: curr,
             receipt: receiptId,
             notes: {
               workspace_id: workspaceId,
@@ -6113,7 +6146,7 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
               billing_cycle: selectedCycle,
               billing_plan_id: billingPlan.id,
               purpose: 'trial_verification',
-              currency,
+              currency: curr,
               customer_email: userEmail
             }
           })
@@ -6121,7 +6154,7 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
       };
 
       try {
-        let rzpRes = await createRzpOrder(100, 'USD');
+        const rzpRes = await createRzpOrder(orderAmount, orderCurrency);
         if (rzpRes.ok) {
           const rzpData = await rzpRes.json();
           if (rzpData?.id) {
@@ -6130,7 +6163,7 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
         } else {
           const errJson: any = await rzpRes.json().catch(() => ({}));
           const errDesc = String(errJson?.error?.description || errJson?.message || '');
-          const isCurrencyUnsupported = /currency|international/i.test(errDesc);
+          const isCurrencyUnsupported = orderCurrency === 'USD' && /currency|international/i.test(errDesc);
           if (isCurrencyUnsupported) {
             const conv = await convertUsdToInr(1.0);
             const inrRes = await createRzpOrder(conv.amountPaise, 'INR');
@@ -6140,6 +6173,7 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
                 razorpayOrderId = inrData.id;
                 orderAmount = conv.amountPaise;
                 orderCurrency = 'INR';
+                exchangeRateUsed = conv.rate;
               }
             } else {
               const inrErr: any = await inrRes.json().catch(() => ({}));
@@ -6206,10 +6240,11 @@ app.post('/api/billing/trial-verification-order', async (req, res) => {
       amountCents: 100,
       amountUsd: 1,
       currency: orderCurrency,
+      exchange_rate: exchangeRateUsed,
       tier: selectedTier,
       billing_cycle: selectedCycle,
       plan_name: billingPlan.name,
-      formatted_amount: orderCurrency === 'INR' ? `₹${(orderAmount / 100).toFixed(2)}` : '$1.00',
+      formatted_amount: orderCurrency === 'INR' ? `₹${(orderAmount / 100).toFixed(0)}` : '$1.00',
       future_plan_price: billingPlan.amount_usd,
       trial_days: 14
     });
@@ -8549,6 +8584,665 @@ function escapeHtml(str: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 }
+
+// 17E. Workspace & Platform Admin Console Endpoints (Strictly RBAC + Tenant Isolated)
+const PLATFORM_ADMIN_EMAIL = 'nageshsharat@gmail.com';
+
+function isPlatformAdminUser(user?: DbUser | null): boolean {
+  if (!user) return false;
+  return (
+    user.id === 'usr-admin-001' ||
+    String(user.email || '').trim().toLowerCase() === PLATFORM_ADMIN_EMAIL
+  );
+}
+
+async function requirePlatformAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  await requireAuth(req, res, async () => {
+    const authUser = (req as any).user as DbUser | undefined;
+    if (!isPlatformAdminUser(authUser)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied: Platform administrator privileges required.',
+        code: 'PLATFORM_FORBIDDEN'
+      });
+    }
+    next();
+  });
+}
+
+function sanitizeAdminUser(u: any) {
+  if (!u) return null;
+  return {
+    id: u.id,
+    fullName: u.full_name || '',
+    companyName: u.company_name || '',
+    email: u.email || '',
+    role: (u.role || 'Admin') as 'Admin' | 'Analyst' | 'Viewer',
+    workspaceId: u.workspace_id || 'ws-default',
+    selectedPlan: u.selected_plan || 'growth',
+    billingStatus: u.billing_status || 'trialing',
+    emailVerified: Boolean(u.email_verified),
+    twoFactorEnabled: Boolean(u.two_factor_enabled),
+    createdAt: u.created_at,
+    updatedAt: u.updated_at
+  };
+}
+
+app.get('/api/admin/overview', requireAdmin, async (req, res) => {
+  try {
+    const authUser = (req as any).user as DbUser;
+    const workspaceId = (req as any).workspaceId as string;
+
+    const [
+      workspaceRecord,
+      dbCustomers,
+      subscription,
+      rawMembers,
+      payments,
+      orders,
+      trialVerifications,
+      imports,
+      storageListing,
+      firebaseIamReady
+    ] = await Promise.all([
+      db.workspaces.getById(workspaceId),
+      db.customers.listByWorkspace(workspaceId),
+      db.subscriptions.getByWorkspace(workspaceId),
+      db.workspaceMembers.listMembers(workspaceId),
+      db.subscriptionPayments.getByWorkspace(workspaceId),
+      db.razorpayOrders.listByWorkspace(workspaceId, 100),
+      db.trialVerifications.getByWorkspace(workspaceId),
+      db.csvImports.listByWorkspace(workspaceId),
+      listWorkspaceStorageFiles(workspaceId),
+      checkAdcAdminIamAccess(false).catch(() => false)
+    ]);
+
+    const customers =
+      dbCustomers.length > 0
+        ? dbCustomers
+        : customersDatabase.filter(c => (c.workspaceId || 'ws-default') === workspaceId);
+
+    const atRiskCustomers = customers.filter(c => c.riskScore >= 61 && c.status !== 'saved');
+    const savedCustomers = customers.filter(c => c.status === 'saved');
+    const totalMrr = customers.reduce((sum, c) => sum + Number(c.mrr || 0), 0);
+    const atRiskMrr = atRiskCustomers.reduce((sum, c) => sum + Number(c.mrr || 0), 0);
+    const savedMrr = savedCustomers.reduce((sum, c) => sum + Number(c.mrr || 0), 0);
+
+    const ownerId = workspaceRecord?.owner_id || authUser.id;
+    const memberIds = new Set<string>([ownerId, ...rawMembers.map(m => m.user_id)]);
+    const allUsers = await db.users.listAll().catch(() => usersDatabase as any[]);
+    const userById = new Map<string, any>();
+    for (const u of allUsers) {
+      if (u?.id) userById.set(u.id, u);
+    }
+    for (const u of usersDatabase) {
+      if (u?.id && !userById.has(u.id)) userById.set(u.id, u);
+    }
+
+    const members = Array.from(memberIds).map(uid => {
+      const mRow = rawMembers.find(m => m.user_id === uid);
+      const u = userById.get(uid);
+      const workspaceRole: 'owner' | 'admin' | 'member' =
+        uid === ownerId ? 'owner' : (mRow?.role || 'member');
+      return {
+        userId: uid,
+        email: u?.email || 'unknown@churnveda.app',
+        fullName: u?.full_name || 'Workspace User',
+        systemRole: u?.role || 'Member',
+        workspaceRole,
+        joinedAt: mRow?.created_at || u?.created_at || workspaceRecord?.created_at || new Date().toISOString(),
+        twoFactorEnabled: Boolean(u?.two_factor_enabled)
+      };
+    });
+
+    const dbStatus = getDatabaseStatusInfo();
+    const storageSnapshot = getStorageStatusSnapshot();
+    const schedulerStatus = getSchedulerStatus(workspaceId);
+    const razorpayConfigured = Boolean(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
+    const whatsappConfigured = Boolean(
+      WHATSAPP_ACCESS_TOKEN && WHATSAPP_PHONE_NUMBER_ID && WHATSAPP_BUSINESS_ACCOUNT_ID
+    );
+    const emailConfigured = Boolean(RESEND_API_KEY);
+    const geminiConfigured = Boolean(process.env.GEMINI_API_KEY);
+
+    return res.json({
+      success: true,
+      isPlatformAdmin: isPlatformAdminUser(authUser),
+      workspace: {
+        id: workspaceId,
+        name: workspaceRecord?.name || authUser.company_name || 'Workspace',
+        ownerId,
+        createdAt: workspaceRecord?.created_at || authUser.created_at
+      },
+      metrics: {
+        totalCustomers: customers.length,
+        atRiskCount: atRiskCustomers.length,
+        savedCount: savedCustomers.length,
+        totalMrr,
+        atRiskMrr,
+        savedMrr,
+        importCount: imports.length,
+        memberCount: members.length,
+        storageFileCount: storageListing.files.length
+      },
+      subscription: subscription || {
+        workspace_id: workspaceId,
+        tier: authUser.selected_plan || 'growth',
+        billing_cycle: 'monthly',
+        status: authUser.billing_status || 'trialing',
+        payment_verification_status: 'pending',
+        trial_ends_at: authUser.trial_end_date || null
+      },
+      members,
+      payments,
+      orders,
+      trialVerifications,
+      storage: {
+        status: storageSnapshot,
+        backend: storageListing.storageBackend,
+        files: storageListing.files
+      },
+      scheduler: schedulerStatus,
+      health: {
+        database: {
+          engine: dbStatus.engine,
+          target: dbStatus.target,
+          connected: dbStatus.initialized
+        },
+        razorpay: {
+          configured: razorpayConfigured,
+          mode: razorpayConfigured
+            ? RAZORPAY_KEY_ID.startsWith('rzp_test_')
+              ? 'test'
+              : 'live'
+            : 'unconfigured',
+          internationalEnabled: process.env.RAZORPAY_INTERNATIONAL_ENABLED === 'true'
+        },
+        firebaseAdmin: {
+          configured: firebaseIamReady,
+          status: firebaseIamReady ? 'connected' : 'awaiting_iam'
+        },
+        cloudStorage: {
+          bucket: storageSnapshot.bucket,
+          cloudConnected: storageSnapshot.cloudConnected,
+          status: storageSnapshot.cloudConnected ? 'connected' : 'local_fallback'
+        },
+        whatsapp: {
+          configured: whatsappConfigured,
+          status: whatsappConfigured ? 'connected' : 'not_configured'
+        },
+        email: {
+          configured: emailConfigured,
+          status: emailConfigured ? 'connected' : 'not_configured',
+          fromEmail: emailConfigured ? RESEND_FROM_EMAIL : null
+        },
+        aiEngine: {
+          configured: geminiConfigured,
+          model: geminiConfigured ? 'gemini-3.1-flash-lite' : 'rule-based-fallback'
+        }
+      }
+    });
+  } catch (err: any) {
+    console.error('[Admin Overview Error]:', err?.message || err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to load workspace administration overview.'
+    });
+  }
+});
+
+app.post('/api/admin/members', requireAdmin, async (req, res) => {
+  try {
+    const authUser = (req as any).user as DbUser;
+    const workspaceId = (req as any).workspaceId as string;
+    const rawEmail = String(req.body?.email || '').trim().toLowerCase();
+    const rawRole = String(req.body?.role || 'member').trim().toLowerCase();
+
+    if (!rawEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter a valid member email address.'
+      });
+    }
+    if (rawRole !== 'admin' && rawRole !== 'member') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid workspace role. Allowed values: "admin" or "member".'
+      });
+    }
+
+    const existingUser =
+      (await db.users.getByEmail(rawEmail)) ||
+      (usersDatabase.find(u => u.email.toLowerCase() === rawEmail) as any);
+
+    if (!existingUser) {
+      return res.status(404).json({
+        success: false,
+        error: 'No registered Churnveda account exists for that email address yet. Ask them to sign up first, then add them to this workspace.'
+      });
+    }
+
+    const ws = await db.workspaces.getById(workspaceId);
+    if (ws?.owner_id === existingUser.id) {
+      return res.status(400).json({
+        success: false,
+        error: 'This user is already the workspace owner.'
+      });
+    }
+
+    await db.workspaceMembers.addMember(workspaceId, existingUser.id, rawRole);
+    await db.auditLogs.record({
+      workspaceId,
+      actorId: authUser.id,
+      actorEmail: authUser.email,
+      action: 'admin.member_added',
+      targetType: 'workspace_member',
+      targetId: existingUser.id,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || undefined,
+      metadata: { memberEmail: rawEmail, role: rawRole }
+    });
+
+    return res.status(201).json({
+      success: true,
+      member: {
+        userId: existingUser.id,
+        email: existingUser.email,
+        fullName: existingUser.full_name,
+        systemRole: existingUser.role || 'Member',
+        workspaceRole: rawRole,
+        joinedAt: new Date().toISOString(),
+        twoFactorEnabled: Boolean(existingUser.two_factor_enabled)
+      }
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to add member to workspace.'
+    });
+  }
+});
+
+app.patch('/api/admin/members/:userId', requireAdmin, async (req, res) => {
+  try {
+    const authUser = (req as any).user as DbUser;
+    const workspaceId = (req as any).workspaceId as string;
+    const targetUserId = String(req.params.userId || '').trim();
+    const rawRole = String(req.body?.role || '').trim().toLowerCase();
+
+    if (!targetUserId) {
+      return res.status(400).json({ success: false, error: 'Member userId is required.' });
+    }
+    if (rawRole !== 'admin' && rawRole !== 'member') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid workspace role. Allowed values: "admin" or "member".'
+      });
+    }
+
+    const ws = await db.workspaces.getById(workspaceId);
+    if (ws?.owner_id === targetUserId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Workspace owner role cannot be modified.'
+      });
+    }
+
+    const updated = await db.workspaceMembers.updateRole(workspaceId, targetUserId, rawRole);
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        error: 'Workspace member not found.'
+      });
+    }
+
+    await db.auditLogs.record({
+      workspaceId,
+      actorId: authUser.id,
+      actorEmail: authUser.email,
+      action: 'admin.member_role_updated',
+      targetType: 'workspace_member',
+      targetId: targetUserId,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || undefined,
+      metadata: { role: rawRole }
+    });
+
+    return res.json({ success: true, userId: targetUserId, role: rawRole });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to update workspace member role.'
+    });
+  }
+});
+
+app.delete('/api/admin/members/:userId', requireAdmin, async (req, res) => {
+  try {
+    const authUser = (req as any).user as DbUser;
+    const workspaceId = (req as any).workspaceId as string;
+    const targetUserId = String(req.params.userId || '').trim();
+
+    if (!targetUserId) {
+      return res.status(400).json({ success: false, error: 'Member userId is required.' });
+    }
+    const ws = await db.workspaces.getById(workspaceId);
+    if (ws?.owner_id === targetUserId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Workspace owner cannot be removed.'
+      });
+    }
+    if (targetUserId === authUser.id) {
+      return res.status(400).json({
+        success: false,
+        error: 'You cannot remove your own active session from the workspace.'
+      });
+    }
+
+    const removed = await db.workspaceMembers.removeMember(workspaceId, targetUserId);
+    if (!removed) {
+      return res.status(404).json({
+        success: false,
+        error: 'Workspace member not found.'
+      });
+    }
+
+    await db.auditLogs.record({
+      workspaceId,
+      actorId: authUser.id,
+      actorEmail: authUser.email,
+      action: 'admin.member_removed',
+      targetType: 'workspace_member',
+      targetId: targetUserId,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || undefined
+    });
+
+    return res.json({ success: true, userId: targetUserId });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to remove workspace member.'
+    });
+  }
+});
+
+app.delete('/api/admin/storage/file', requireAdmin, async (req, res) => {
+  try {
+    const authUser = (req as any).user as DbUser;
+    const workspaceId = (req as any).workspaceId as string;
+    const bucket = String(req.query.bucket || req.body?.bucket || 'customer-imports') as StorageBucketId;
+    const filePath = String(req.query.path || req.body?.path || '').trim();
+
+    if (!(bucket in STORAGE_BUCKET_CONFIG)) {
+      return res.status(400).json({ success: false, error: 'Invalid storage bucket category.' });
+    }
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: 'Parameter "path" is required.' });
+    }
+
+    const delRes = await deleteWorkspaceStorageFile({
+      workspaceId,
+      bucketId: bucket,
+      storagePath: filePath
+    });
+
+    if (!delRes.success) {
+      return res.status(404).json({ success: false, error: delRes.error || 'File not found.' });
+    }
+
+    await db.auditLogs.record({
+      workspaceId,
+      actorId: authUser.id,
+      actorEmail: authUser.email,
+      action: 'admin.storage_file_deleted',
+      targetType: 'storage_object',
+      targetId: filePath,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || undefined,
+      metadata: { bucket }
+    });
+
+    return res.json({ success: true, bucket, path: filePath });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to delete storage file.'
+    });
+  }
+});
+
+app.get('/api/admin/platform/overview', requirePlatformAdmin, async (_req, res) => {
+  try {
+    const [
+      workspaces,
+      rawUsers,
+      subscriptions,
+      payments,
+      orders,
+      trialVerifications,
+      webhookEvents
+    ] = await Promise.all([
+      db.workspaces.listAll(),
+      db.users.listAll(),
+      db.subscriptions.listAll(),
+      db.subscriptionPayments.listAll(),
+      db.razorpayOrders.listAll(100),
+      db.trialVerifications.listAll(),
+      db.webhookEvents.listRecent(50)
+    ]);
+
+    const users = rawUsers.map(sanitizeAdminUser);
+    const activeSubscriptions = subscriptions.filter(s => s.status === 'active').length;
+    const trialingSubscriptions = subscriptions.filter(s => s.status === 'trialing').length;
+    const totalCapturedUsd = payments.reduce((sum, p) => sum + Number(p.amount_usd || 0), 0);
+
+    return res.json({
+      success: true,
+      summary: {
+        totalWorkspaces: workspaces.length,
+        totalUsers: users.length,
+        activeSubscriptions,
+        trialingSubscriptions,
+        totalOrders: orders.length,
+        totalPayments: payments.length,
+        totalCapturedUsd
+      },
+      workspaces,
+      users,
+      subscriptions,
+      orders,
+      payments,
+      trialVerifications,
+      webhookEvents
+    });
+  } catch (err: any) {
+    console.error('[Platform Admin Overview Error]:', err?.message || err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to load platform administration directory.'
+    });
+  }
+});
+
+app.patch('/api/admin/platform/workspaces/:workspaceId/subscription', requirePlatformAdmin, async (req, res) => {
+  try {
+    const authUser = (req as any).user as DbUser;
+    const targetWorkspaceId = String(req.params.workspaceId || '').trim();
+    const rawTier = String(req.body?.tier || '').trim().toLowerCase();
+    const rawCycle = String(req.body?.billingCycle || 'monthly').trim().toLowerCase();
+    const rawStatus = String(req.body?.status || '').trim().toLowerCase();
+
+    const allowedTiers = ['starter', 'growth', 'pro'] as const;
+    const allowedCycles = ['monthly', 'annual'] as const;
+    const allowedStatuses = ['active', 'trialing', 'pending', 'cancelled', 'halted', 'past_due', 'trial_expired'] as const;
+
+    if (!targetWorkspaceId) {
+      return res.status(400).json({ success: false, error: 'workspaceId is required.' });
+    }
+    if (!allowedTiers.includes(rawTier as any)) {
+      return res.status(400).json({ success: false, error: 'Invalid tier. Allowed: starter, growth, pro.' });
+    }
+    if (!allowedCycles.includes(rawCycle as any)) {
+      return res.status(400).json({ success: false, error: 'Invalid billingCycle. Allowed: monthly, annual.' });
+    }
+    if (!allowedStatuses.includes(rawStatus as any)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid status. Allowed: active, trialing, pending, cancelled, halted, past_due, trial_expired.'
+      });
+    }
+
+    const ws = await db.workspaces.getById(targetWorkspaceId);
+    if (!ws) {
+      return res.status(404).json({ success: false, error: 'Workspace not found.' });
+    }
+
+    const existingSub = await db.subscriptions.getByWorkspace(targetWorkspaceId);
+    const ownerUser = (await db.users.getById(ws.owner_id)) || (await db.users.getByWorkspace(targetWorkspaceId));
+    const plan = getAuthoritativeBillingPlan(rawTier, rawCycle);
+    const nowIso = new Date().toISOString();
+
+    const updatedSub = await db.subscriptions.upsert({
+      id: existingSub?.id || `sub_${targetWorkspaceId}`,
+      workspace_id: targetWorkspaceId,
+      user_id: existingSub?.user_id || ownerUser?.id || ws.owner_id,
+      email: existingSub?.email || ownerUser?.email || authUser.email,
+      tier: rawTier as 'starter' | 'growth' | 'pro',
+      billing_cycle: rawCycle as 'monthly' | 'annual',
+      billing_plan_id: plan.id,
+      razorpay_plan_id: plan.razorpay_plan_id,
+      razorpay_subscription_id: existingSub?.razorpay_subscription_id,
+      status: rawStatus as any,
+      trial_started_at: existingSub?.trial_started_at || nowIso,
+      trial_ends_at: existingSub?.trial_ends_at || new Date(Date.now() + 14 * 86400000).toISOString(),
+      payment_verification_status:
+        rawStatus === 'active'
+          ? 'verified'
+          : (existingSub?.payment_verification_status || 'pending'),
+      razorpay_verification_order_id: existingSub?.razorpay_verification_order_id,
+      razorpay_verification_payment_id: existingSub?.razorpay_verification_payment_id,
+      created_at: existingSub?.created_at || nowIso,
+      updated_at: nowIso
+    });
+
+    const subIdx = subscriptionsDatabase.findIndex(s => s.workspace_id === targetWorkspaceId);
+    if (subIdx >= 0) {
+      subscriptionsDatabase[subIdx] = updatedSub as any;
+    } else {
+      subscriptionsDatabase.push(updatedSub as any);
+    }
+
+    const mappedUserBillingStatus =
+      rawStatus === 'pending' ? 'pending_payment' : rawStatus;
+
+    if (ownerUser) {
+      await db.users.updateAdminFields(ownerUser.id, {
+        selected_plan: rawTier,
+        billing_status: mappedUserBillingStatus,
+        billing_plan_id: plan.id,
+        razorpay_plan_id: plan.razorpay_plan_id
+      });
+      const memUser = usersDatabase.find(u => u.id === ownerUser.id);
+      if (memUser) {
+        memUser.selected_plan = rawTier;
+        memUser.billing_status = mappedUserBillingStatus as any;
+        memUser.billing_plan_id = plan.id;
+        memUser.razorpay_plan_id = plan.razorpay_plan_id;
+        memUser.updated_at = nowIso;
+      }
+    }
+
+    await db.auditLogs.record({
+      workspaceId: targetWorkspaceId,
+      actorId: authUser.id,
+      actorEmail: authUser.email,
+      action: 'platform.subscription_updated',
+      targetType: 'subscription',
+      targetId: updatedSub.id,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || undefined,
+      metadata: { tier: rawTier, billingCycle: rawCycle, status: rawStatus }
+    });
+
+    return res.json({ success: true, subscription: updatedSub });
+  } catch (err: any) {
+    console.error('[Platform Subscription Update Error]:', err?.message || err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to update workspace subscription.'
+    });
+  }
+});
+
+app.patch('/api/admin/platform/users/:userId/role', requirePlatformAdmin, async (req, res) => {
+  try {
+    const authUser = (req as any).user as DbUser;
+    const targetUserId = String(req.params.userId || '').trim();
+    const rawRole = String(req.body?.role || '').trim();
+    const allowedRoles = ['Admin', 'Analyst', 'Viewer'] as const;
+
+    if (!targetUserId) {
+      return res.status(400).json({ success: false, error: 'userId is required.' });
+    }
+    if (!allowedRoles.includes(rawRole as any)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid role. Allowed values: "Admin", "Analyst", or "Viewer".'
+      });
+    }
+
+    const targetUser = await db.users.getById(targetUserId);
+    if (!targetUser) {
+      return res.status(404).json({ success: false, error: 'User not found.' });
+    }
+    if (isPlatformAdminUser(targetUser as any) && rawRole !== 'Admin') {
+      return res.status(400).json({
+        success: false,
+        error: 'Primary platform administrator cannot be demoted.'
+      });
+    }
+    if (targetUser.id === authUser.id && rawRole !== 'Admin') {
+      return res.status(400).json({
+        success: false,
+        error: 'You cannot demote your own administrator role.'
+      });
+    }
+
+    const updated = await db.users.updateAdminFields(targetUserId, {
+      role: rawRole as 'Admin' | 'Analyst' | 'Viewer'
+    });
+    const memUser = usersDatabase.find(u => u.id === targetUserId);
+    if (memUser) {
+      memUser.role = rawRole as 'Admin' | 'Analyst' | 'Viewer';
+      memUser.updated_at = new Date().toISOString();
+    }
+
+    await db.auditLogs.record({
+      workspaceId: targetUser.workspace_id || 'ws-default',
+      actorId: authUser.id,
+      actorEmail: authUser.email,
+      action: 'platform.user_role_updated',
+      targetType: 'user',
+      targetId: targetUserId,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') || undefined,
+      metadata: { role: rawRole, targetEmail: targetUser.email }
+    });
+
+    return res.json({
+      success: true,
+      user: sanitizeAdminUser(updated || { ...targetUser, role: rawRole })
+    });
+  } catch (err: any) {
+    console.error('[Platform User Role Error]:', err?.message || err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to update user role.'
+    });
+  }
+});
 
 // 18A. Get Outbound Integrations Status (Sanitized — no env var names or masked identifiers)
 app.get('/api/integrations/outbound-status', requireAuth, async (_req, res) => {

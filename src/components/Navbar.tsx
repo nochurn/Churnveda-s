@@ -423,6 +423,19 @@ export const Navbar: React.FC<NavbarProps> = ({
                     Active Sessions Management
                   </button>
 
+                  {currentUser.role === 'Admin' && (
+                    <button
+                      onClick={() => {
+                        setShowUserMenu(false);
+                        onNavigate('admin');
+                      }}
+                      className="w-full text-left px-4 py-2 hover:bg-gray-50 flex items-center gap-2 text-blue-900 font-semibold"
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5 text-blue-900" />
+                      Admin Panel
+                    </button>
+                  )}
+
                   <button
                     onClick={() => {
                       setShowUserMenu(false);
@@ -550,7 +563,10 @@ export const Navbar: React.FC<NavbarProps> = ({
                   { id: 'playbooks', label: 'Retention Playbooks', icon: ShieldCheck },
                   { id: 'roi', label: 'ROI Calculator', icon: DollarSign },
                   { id: 'billing', label: 'Plans & Billing', icon: CreditCard },
-                  { id: 'settings', label: 'Settings', icon: Settings }
+                  { id: 'settings', label: 'Settings', icon: Settings },
+                  ...(currentUser?.role === 'Admin'
+                    ? [{ id: 'admin', label: 'Admin Panel', icon: ShieldCheck }]
+                    : [])
                 ].map((item) => {
                   const Icon = item.icon;
                   const isCurrent = activeView === item.id || (item.id === 'home' && (activeView === 'dashboard' || activeView === 'action-queue'));

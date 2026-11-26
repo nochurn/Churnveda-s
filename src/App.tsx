@@ -17,6 +17,7 @@ import { RoiCalculatorView } from './components/RoiCalculatorView';
 import { DailyAlertsView } from './components/DailyAlertsView';
 import { PricingView } from './components/PricingView';
 import { SecurityView } from './components/SecurityView';
+import { AdminPanelView } from './components/AdminPanelView';
 import { BillingSettingsView } from './components/BillingSettingsView';
 import { CustomerDetailModal } from './components/CustomerDetailModal';
 import { SuccessView } from './components/SuccessView';
@@ -135,6 +136,12 @@ function getRouteMetadata(view: string): { title: string; description: string; i
       return {
         title: 'Settings & Security | Churnveda',
         description: 'Manage 2FA, team sessions, workspace governance, and preferences.',
+        isPrivate: true
+      };
+    case 'admin':
+      return {
+        title: 'Admin Panel | Churnveda',
+        description: 'Workspace administration, team access, billing ledger, storage, and audit logs.',
         isPrivate: true
       };
     case 'login':
@@ -924,7 +931,8 @@ export default function App() {
     'settings/sessions',
     'settings/governance',
     'security-settings',
-    'integrations'
+    'integrations',
+    'admin'
   ].includes(activeView);
 
   // Loading state guard: prevent brief flash of protected data while checking session
@@ -1135,7 +1143,8 @@ export default function App() {
                 { id: 'messages', label: `Messages (${retentionMessages.filter(m => m.status === 'ready').length})` },
                 { id: 'reports', label: 'Reports' },
                 { id: 'billing', label: 'Billing' },
-                { id: 'settings', label: 'Settings' }
+                { id: 'settings', label: 'Settings' },
+                ...((!currentUser || currentUser.role === 'Admin') ? [{ id: 'admin', label: 'Admin' }] : [])
               ].map((tab) => (
                 <button
                   key={tab.id}
@@ -1379,6 +1388,15 @@ export default function App() {
                 onNavigate={handleNavigate}
                 onShowToast={showToast}
                 onLoggedOut={handleLogout}
+              />
+            )}
+
+            {/* 8. Admin Panel */}
+            {activeView === 'admin' && (
+              <AdminPanelView
+                currentUser={currentUser}
+                onNavigate={handleNavigate}
+                onShowToast={showToast}
               />
             )}
 

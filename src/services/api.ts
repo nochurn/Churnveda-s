@@ -193,13 +193,14 @@ export async function parseJsonResponse<T = any>(
   const rawText = await res.text();
   const trimmed = rawText.trim();
 
+  if (res.status === 405) {
+    throw new Error(
+      `${fallbackError} (HTTP 405: This host only serves static files and cannot run backend /api routes. Deploy full-stack with npm start/Dockerfile, or rebuild the frontend with VITE_API_URL pointing to your Node backend.)`
+    );
+  }
+
   if (!trimmed) {
     if (!res.ok) {
-      if (res.status === 405) {
-        throw new Error(
-          `${fallbackError} (HTTP 405: This host only serves static files and cannot run backend /api routes. Deploy full-stack via npm start/Dockerfile, or rebuild with VITE_API_URL pointing to your Node backend.)`
-        );
-      }
       throw new Error(`${fallbackError} (HTTP ${res.status})`);
     }
     return {} as T;
@@ -211,11 +212,6 @@ export async function parseJsonResponse<T = any>(
     /^<html[\s>]/i.test(trimmed);
 
   if (looksLikeHtml) {
-    if (res.status === 405) {
-      throw new Error(
-        `${fallbackError} (HTTP 405: This host only serves static files and cannot run backend /api routes. Deploy full-stack via npm start/Dockerfile, or rebuild with VITE_API_URL pointing to your Node backend.)`
-      );
-    }
     throw new Error(
       `Server returned an HTML page instead of JSON (HTTP ${res.status}). Please refresh or try again in a moment.`
     );
@@ -1207,6 +1203,7 @@ export async function createTrialVerificationOrder(payload: {
   tier: 'starter' | 'growth' | 'pro';
   billing_cycle: 'monthly' | 'annual';
   isFoundingOffer?: boolean;
+  currency?: 'USD' | 'INR';
 }): Promise<{
   success: boolean;
   keyId: string;
@@ -1215,6 +1212,7 @@ export async function createTrialVerificationOrder(payload: {
   amountCents?: number;
   amountUsd?: number;
   currency: string;
+  exchange_rate?: number;
   tier: string;
   billing_cycle: string;
   plan_name: string;
@@ -1479,7 +1477,271 @@ export async function fetchAdminAuditLogs(limit: number = 100): Promise<{
   const res = await apiFetch(`/api/admin/audit-logs?limit=${limit}`, {
     headers: getAuthHeaders()
   });
-  return res.json();
+  return parseJsonResponse(res, 'Failed to retrieve audit log records');
+}
+
+export interface AdminMemberRecord {
+  userId: string;
+  email: string;
+  fullName: string;
+  systemRole: string;
+  workspaceRole: 'owner' | 'admin' | 'member';
+  joinedAt: string;
+  twoFactorEnabled: boolean;
+}
+
+export interface AdminStorageFile {
+  bucketId: 'customer-imports' | 'customer-exports' | 'generated-reports' | 'user-uploads';
+  path: string;
+  name: string;
+  sizeBytes: number;
+  contentType?: string;
+  updatedAt: string;
+  storageBackend: 'firebase' | 'local-fallback';
+}
+
+export interface AdminOverviewResponse {
+  success: boolean;
+  isPlatformAdmin: boolean;
+  workspace: {
+    id: string;
+    name: string;
+    ownerId: string;
+    createdAt?: string;
+  };
+  metrics: {
+    totalCustomers: number;
+    atRiskCount: number;
+    savedCount: number;
+    totalMrr: number;
+    atRiskMrr: number;
+    savedMrr: number;
+    importCount: number;
+    memberCount: number;
+    storageFileCount: number;
+  };
+  subscription: {
+    id?: string;
+    workspace_id: string;
+    tier: string;
+    billing_cycle: string;
+    status: string;
+    payment_verification_status: string;
+    razorpay_subscription_id?: string | null;
+    trial_ends_at?: string | null;
+    updated_at?: string;
+  };
+  members: AdminMemberRecord[];
+  payments: any[];
+  orders: any[];
+  trialVerifications: any[];
+  storage: {
+    status: {
+      provider: string;
+      bucket: string;
+      cloudConnected: boolean;
+      lastCheckedAt: string | null;
+    };
+    backend: 'firebase' | 'local-fallback';
+    files: AdminStorageFile[];
+  };
+  scheduler: {
+    enabled: boolean;
+    scanTime: string;
+    timezone: string;
+    ownerNotificationEmail?: string | null;
+    lastRunAt?: string | null;
+    nextRunAt?: string | null;
+  };
+  health: {
+    database: { engine: 'postgresql' | 'sqlite'; target: string; connected: boolean };
+    razorpay: { configured: boolean; mode: 'live' | 'test' | 'unconfigured'; internationalEnabled: boolean };
+    firebaseAdmin: { configured: boolean; status: 'connected' | 'awaiting_iam' };
+    cloudStorage: { bucket: string; cloudConnected: boolean; status: 'connected' | 'local_fallback' };
+    whatsapp: { configured: boolean; status: 'connected' | 'not_configured' };
+    email: { configured: boolean; status: 'connected' | 'not_configured'; fromEmail: string | null };
+    aiEngine: { configured: boolean; model: string };
+  };
+}
+
+export interface PlatformAdminUser {
+  id: string;
+  fullName: string;
+  companyName: string;
+  email: string;
+  role: 'Admin' | 'Analyst' | 'Viewer';
+  workspaceId: string;
+  selectedPlan: string;
+  billingStatus: string;
+  emailVerified: boolean;
+  twoFactorEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlatformAdminOverviewResponse {
+  success: boolean;
+  summary: {
+    totalWorkspaces: number;
+    totalUsers: number;
+    activeSubscriptions: number;
+    trialingSubscriptions: number;
+    totalOrders: number;
+    totalPayments: number;
+    totalCapturedUsd: number;
+  };
+  workspaces: Array<{
+    id: string;
+    name: string;
+    owner_id: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+  users: PlatformAdminUser[];
+  subscriptions: any[];
+  orders: any[];
+  payments: any[];
+  trialVerifications: any[];
+  webhookEvents: Array<{
+    event_id: string;
+    event_type: string;
+    workspace_id?: string | null;
+    idempotency_key: string;
+    processed_at: string;
+    status: string;
+  }>;
+}
+
+export async function fetchAdminOverview(): Promise<AdminOverviewResponse> {
+  const res = await apiFetch('/api/admin/overview', {
+    headers: getAuthHeaders()
+  });
+  return parseJsonResponse(res, 'Failed to load admin overview');
+}
+
+export async function addAdminWorkspaceMember(
+  email: string,
+  role: 'admin' | 'member'
+): Promise<{ success: boolean; member: AdminMemberRecord }> {
+  const res = await apiFetch('/api/admin/members', {
+    method: 'POST',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ email, role })
+  });
+  return parseJsonResponse(res, 'Failed to add workspace member');
+}
+
+export async function updateAdminMemberRole(
+  userId: string,
+  role: 'admin' | 'member'
+): Promise<{ success: boolean; userId: string; role: 'admin' | 'member' }> {
+  const res = await apiFetch(`/api/admin/members/${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ role })
+  });
+  return parseJsonResponse(res, 'Failed to update workspace member role');
+}
+
+export async function removeAdminWorkspaceMember(
+  userId: string
+): Promise<{ success: boolean; userId: string }> {
+  const res = await apiFetch(`/api/admin/members/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders()
+  });
+  return parseJsonResponse(res, 'Failed to remove workspace member');
+}
+
+export async function fetchWorkspaceStorageFiles(bucket?: AdminStorageFile['bucketId']): Promise<{
+  success: boolean;
+  storageBackend: 'firebase' | 'local-fallback';
+  files: AdminStorageFile[];
+}> {
+  const qs = bucket ? `?bucket=${encodeURIComponent(bucket)}` : '';
+  const res = await apiFetch(`/api/storage/files${qs}`, {
+    headers: getAuthHeaders()
+  });
+  return parseJsonResponse(res, 'Failed to load workspace storage files');
+}
+
+export async function uploadWorkspaceStorageFile(payload: {
+  bucket: AdminStorageFile['bucketId'];
+  fileName: string;
+  mimeType: string;
+  contentBase64?: string;
+  contentText?: string;
+}): Promise<{
+  success: boolean;
+  storageBackend: string;
+  bucket: string;
+  path: string;
+  sizeBytes: number;
+}> {
+  const res = await apiFetch('/api/storage/upload', {
+    method: 'POST',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload)
+  });
+  return parseJsonResponse(res, 'Failed to upload file to workspace storage');
+}
+
+export async function getWorkspaceStorageSignedUrl(
+  bucket: AdminStorageFile['bucketId'],
+  filePath: string
+): Promise<{ success: boolean; signedUrl: string; storageBackend: string; expiresInSeconds: number }> {
+  const res = await apiFetch(
+    `/api/storage/signed-url?bucket=${encodeURIComponent(bucket)}&path=${encodeURIComponent(filePath)}`,
+    { headers: getAuthHeaders() }
+  );
+  return parseJsonResponse(res, 'Failed to create signed download link');
+}
+
+export async function deleteAdminStorageFile(
+  bucket: AdminStorageFile['bucketId'],
+  filePath: string
+): Promise<{ success: boolean; bucket: string; path: string }> {
+  const res = await apiFetch('/api/admin/storage/file', {
+    method: 'DELETE',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ bucket, path: filePath })
+  });
+  return parseJsonResponse(res, 'Failed to delete storage file');
+}
+
+export async function fetchPlatformAdminOverview(): Promise<PlatformAdminOverviewResponse> {
+  const res = await apiFetch('/api/admin/platform/overview', {
+    headers: getAuthHeaders()
+  });
+  return parseJsonResponse(res, 'Failed to load platform directory');
+}
+
+export async function updatePlatformWorkspaceSubscription(
+  workspaceId: string,
+  payload: {
+    tier: 'starter' | 'growth' | 'pro';
+    billingCycle: 'monthly' | 'annual';
+    status: 'active' | 'trialing' | 'pending' | 'cancelled' | 'halted' | 'past_due' | 'trial_expired';
+  }
+): Promise<{ success: boolean; subscription: any }> {
+  const res = await apiFetch(`/api/admin/platform/workspaces/${encodeURIComponent(workspaceId)}/subscription`, {
+    method: 'PATCH',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload)
+  });
+  return parseJsonResponse(res, 'Failed to update workspace subscription');
+}
+
+export async function updatePlatformUserRole(
+  userId: string,
+  role: 'Admin' | 'Analyst' | 'Viewer'
+): Promise<{ success: boolean; user: PlatformAdminUser }> {
+  const res = await apiFetch(`/api/admin/platform/users/${encodeURIComponent(userId)}/role`, {
+    method: 'PATCH',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ role })
+  });
+  return parseJsonResponse(res, 'Failed to update user role');
 }
 
 // Data Portability & GDPR Export (Area 2, 5, 9)
@@ -1631,6 +1893,17 @@ export const apiService = {
   triggerDailyCronScan,
   fetchRetentionBriefs,
   fetchAdminAuditLogs,
+  fetchAdminOverview,
+  addAdminWorkspaceMember,
+  updateAdminMemberRole,
+  removeAdminWorkspaceMember,
+  fetchWorkspaceStorageFiles,
+  uploadWorkspaceStorageFile,
+  getWorkspaceStorageSignedUrl,
+  deleteAdminStorageFile,
+  fetchPlatformAdminOverview,
+  updatePlatformWorkspaceSubscription,
+  updatePlatformUserRole,
   exportCustomers,
   exportAccountData,
   fetchInternationalBillingStatus,

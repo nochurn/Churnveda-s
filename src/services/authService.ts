@@ -13,9 +13,13 @@ import {
   loginUser,
   getStoredAuthToken,
   setStoredAuthToken,
-  isFirebaseJwtExpired
+  isFirebaseJwtExpired,
+  fetchActiveSessions,
+  revokeServerSession,
+  revokeOtherServerSessions
 } from './api';
 import { clearFirestoreSyncCache, syncUserAndWorkspaceToFirestore } from './firestoreService';
+import { aiEmployeeService } from './aiEmployeeService';
 
 const CURRENT_USER_STORAGE_KEY = 'churnshield_auth_current_user';
 const SESSIONS_STORAGE_KEY = 'churnshield_auth_sessions';
@@ -43,16 +47,23 @@ export interface LoginAttemptRecord {
   lockedUntil: number | null;
 }
 
-// Generate 10 secure backup codes in format XXXX-XXXX
+// Generate 10 cryptographically secure backup codes in format XXXX-XXXX
 export function generateBackupCodes(): string[] {
   const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
   const codes: string[] = [];
+  const randomWords = new Uint32Array(80);
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(randomWords);
+  } else {
+    throw new Error('Secure random number generator is unavailable in this environment.');
+  }
+  let offset = 0;
   for (let i = 0; i < 10; i++) {
     let part1 = '';
     let part2 = '';
     for (let j = 0; j < 4; j++) {
-      part1 += chars.charAt(Math.floor(Math.random() * chars.length));
-      part2 += chars.charAt(Math.floor(Math.random() * chars.length));
+      part1 += chars.charAt(randomWords[offset++] % chars.length);
+      part2 += chars.charAt(randomWords[offset++] % chars.length);
     }
     codes.push(`${part1}-${part2}`);
   }
@@ -159,13 +170,11 @@ class AuthService {
         }
       }
 
-      // Load sessions
-      const storedSessions = hasStorage ? localStorage.getItem(SESSIONS_STORAGE_KEY) : null;
-      if (storedSessions) {
-        this.sessions = JSON.parse(storedSessions);
-      } else {
-        this.sessions = [];
+      // Remove any stale fabricated localStorage session list; authoritative sessions come from /api/auth/sessions
+      if (hasStorage) {
+        localStorage.removeItem(SESSIONS_STORAGE_KEY);
       }
+      this.sessions = [];
 
       if (typeof (fbAuth as { authStateReady?: () => Promise<void> }).authStateReady === 'function') {
         try {
@@ -358,9 +367,9 @@ class AuthService {
 
   private persistSessions() {
     try {
-      localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(this.sessions));
-    } catch (e) {
-      console.warn('LocalStorage error persisting sessions:', e);
+      localStorage.removeItem(SESSIONS_STORAGE_KEY);
+    } catch {
+      // ignore
     }
   }
 
@@ -392,6 +401,7 @@ class AuthService {
     trialEndDate?: string;
     paymentStatus?: 'pending' | 'paid' | 'not_added' | 'failed';
     workspaceId?: string;
+    planEdition?: 'founding' | 'standard';
   }): Promise<{
     success: boolean;
     message: string;
@@ -430,6 +440,7 @@ class AuthService {
         phone: data.phone,
         agreedToTerms: true,
         selectedPlan: rawPlan,
+        planEdition: data.planEdition,
         billingCycle,
         isFreeTrial: true
       });
@@ -571,7 +582,6 @@ class AuthService {
         this.currentUser = res.user;
         this.persistCurrentUser();
         this.notifyListeners();
-        this.registerSession(rememberMe);
         return {
           success: true,
           user: this.currentUser,
@@ -676,7 +686,6 @@ class AuthService {
 
         this.persistCurrentUser();
         this.notifyListeners();
-        this.registerSession(true);
 
         return {
           success: true,
@@ -721,57 +730,16 @@ class AuthService {
 
   // --- 2FA VERIFICATION ON LOGIN ---
   public verifyTwoFactorLogin(
-    email: string,
-    codeOrBackup: string
+    _email: string,
+    _codeOrBackup: string
   ): {
     success: boolean;
     message: string;
     user?: UserProfile;
   } {
-    const emailNorm = email.trim().toLowerCase();
-    const user = (this.currentUser && this.currentUser.email.toLowerCase() === emailNorm)
-      ? this.currentUser
-      : this.users.get(emailNorm);
-
-    if (!user) {
-      return { success: false, message: 'User account not found.' };
-    }
-
-    const cleanCode = codeOrBackup.trim().replace(/\s+/g, '').toUpperCase();
-
-    // 1. Check if backup code match
-    const backupIndex = user.backupCodes.findIndex((b) => b.replace('-', '').toUpperCase() === cleanCode.replace('-', ''));
-    if (backupIndex !== -1) {
-      // Consume single-use backup code
-      user.backupCodes.splice(backupIndex, 1);
-
-      user.lastLoginAt = new Date().toISOString();
-      this.currentUser = user;
-      this.persistCurrentUser();
-      this.registerSession(true);
-
-      return {
-        success: true,
-        message: 'Backup code accepted. (Note: 1 backup code consumed)',
-        user
-      };
-    }
-
-    // 2. Check 6-digit TOTP / SMS code format
-    const isSixDigit = /^\d{6}$/.test(cleanCode);
-    if (!isSixDigit) {
-      return { success: false, message: 'Invalid verification code.' };
-    }
-
-    user.lastLoginAt = new Date().toISOString();
-    this.currentUser = user;
-    this.persistCurrentUser();
-    this.registerSession(true);
-
     return {
-      success: true,
-      message: 'Two-factor authentication verified successfully.',
-      user
+      success: false,
+      message: 'Server-side Two-Factor Authentication is currently unavailable.'
     };
   }
 
@@ -839,132 +807,117 @@ class AuthService {
     }
   }
 
-  // --- 2FA SETUP & MANAGEMENT (/settings/security) ---
-  public enableSmsTwoFactor(phone: string): {
+  // --- 2FA SETUP & MANAGEMENT (SERVER-SIDE ENROLLMENT UNAVAILABLE WITHOUT SCHEMA MIGRATION) ---
+  public enableSmsTwoFactor(_phone: string): {
     success: boolean;
     verificationCode: string;
     message: string;
   } {
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
     return {
-      success: true,
-      verificationCode: code,
-      message: `SMS sent with 6-digit code to ${phone}`
+      success: false,
+      verificationCode: '',
+      message: 'SMS Two-Factor Authentication is unavailable until server-side 2FA enrollment is enabled.'
     };
   }
 
   public verifyAndActivateTwoFactor(
-    method: 'sms' | 'authenticator',
-    code: string,
-    phone?: string
+    _method: 'sms' | 'authenticator',
+    _code: string,
+    _phone?: string
   ): {
     success: boolean;
     message: string;
     backupCodes: string[];
   } {
-    if (!this.currentUser) {
-      return { success: false, message: 'User not authenticated.', backupCodes: [] };
-    }
-
-    // Validate 6 digits
-    if (!/^\d{6}$/.test(code.trim())) {
-      return { success: false, message: 'Please enter a valid 6-digit verification code.', backupCodes: [] };
-    }
-
-    const newBackupCodes = generateBackupCodes();
-    this.currentUser.twoFactorEnabled = true;
-    this.currentUser.twoFactorMethod = method;
-    if (phone) this.currentUser.phone = phone;
-    this.currentUser.backupCodes = newBackupCodes;
-
-    this.persistCurrentUser();
-
     return {
-      success: true,
-      message: `Two-Factor Authentication (${method === 'sms' ? 'SMS' : 'Authenticator App'}) successfully activated!`,
-      backupCodes: newBackupCodes
+      success: false,
+      message: 'Two-Factor Authentication cannot be enabled locally; server-side enrollment is unavailable.',
+      backupCodes: []
     };
   }
 
   public disableTwoFactor(): { success: boolean; message: string } {
-    if (!this.currentUser) {
-      return { success: false, message: 'User not authenticated.' };
+    if (this.currentUser) {
+      this.currentUser.twoFactorEnabled = false;
+      this.currentUser.twoFactorMethod = undefined;
+      this.currentUser.backupCodes = [];
+      this.persistCurrentUser();
     }
-
-    this.currentUser.twoFactorEnabled = false;
-    this.currentUser.twoFactorMethod = undefined;
-    this.persistCurrentUser();
-
     return {
       success: true,
-      message: 'Two-Factor Authentication has been disabled.'
+      message: 'Two-Factor Authentication is inactive.'
     };
   }
 
   public regenerateBackupCodes(): { success: boolean; backupCodes: string[] } {
-    if (!this.currentUser) return { success: false, backupCodes: [] };
-    const newCodes = generateBackupCodes();
-    this.currentUser.backupCodes = newCodes;
-    this.persistCurrentUser();
-    return { success: true, backupCodes: newCodes };
+    return { success: false, backupCodes: [] };
   }
 
-  // --- SESSION MANAGEMENT (/settings/sessions) ---
+  // --- SESSION MANAGEMENT (/settings/sessions — SERVER-VERIFIED, NO FABRICATION) ---
   public getSessions(): UserSession[] {
     return [...this.sessions];
   }
 
-  public registerSession(rememberMe: boolean = false) {
-    const isMac = navigator.userAgent.includes('Mac');
-    const isWindows = navigator.userAgent.includes('Win');
-    const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
-
-    let osName = 'macOS Sonoma';
-    if (isWindows) osName = 'Windows 11';
-    if (isMobile) osName = 'iOS 18 Mobile';
-
-    const currentSession: UserSession = {
-      id: `sess-${Date.now()}`,
-      device: `Chrome 128 on ${osName}`,
-      location: 'San Francisco, US from IP geolocation',
-      ip: '192.168.1.*** (67.188.192.***)',
-      lastActive: 'Active now',
-      isCurrent: true,
-      createdAt: new Date().toISOString(),
-      browser: 'Chrome 128',
-      os: osName
-    };
-
-    // Mark previous sessions as not current
-    this.sessions = this.sessions.map((s) => ({ ...s, isCurrent: false }));
-    this.sessions.unshift(currentSession);
-    this.persistSessions();
-  }
-
-  public revokeSession(sessionId: string): { success: boolean; message: string } {
-    const target = this.sessions.find((s) => s.id === sessionId);
-    if (!target) return { success: false, message: 'Session not found.' };
-
-    if (target.isCurrent) {
-      this.logout();
-      return { success: true, message: 'Current session revoked. You have been logged out.' };
+  public async fetchServerSessions(): Promise<UserSession[]> {
+    try {
+      const res = await fetchActiveSessions();
+      if (res?.success && Array.isArray(res.sessions)) {
+        const mapped: UserSession[] = res.sessions.map((s) => ({
+          id: s.id,
+          device: s.authProvider === 'firebase' ? 'Authenticated Browser Session (Firebase Auth)' : 'Authenticated Server Session',
+          location: 'Not tracked by session schema',
+          ip: 'Not recorded',
+          lastActive: s.isCurrent ? 'Current session' : `Expires ${new Date(s.expiresAt).toLocaleDateString()}`,
+          isCurrent: Boolean(s.isCurrent),
+          createdAt: s.createdAt,
+          browser: s.authProvider === 'firebase' ? 'Firebase Auth' : 'Session Token',
+          os: 'Verified Server Record'
+        }));
+        this.sessions = mapped;
+        return mapped;
+      }
+    } catch {
+      // fall through cleanly without fabricating rows
     }
-
-    this.sessions = this.sessions.filter((s) => s.id !== sessionId);
-    this.persistSessions();
-    return { success: true, message: `Session on ${target.device} has been revoked.` };
+    this.sessions = [];
+    return [];
   }
 
-  public revokeAllOtherSessions(): { success: boolean; revokedCount: number; message: string } {
-    const current = this.sessions.find((s) => s.isCurrent) || this.sessions[0];
-    const revokedCount = this.sessions.length - 1;
-    this.sessions = current ? [{ ...current, isCurrent: true }] : [];
-    this.persistSessions();
-    return {
-      success: true,
-      revokedCount,
-      message: `Revoked ${revokedCount} other active sessions across all devices.`
-    };
+  public registerSession(_rememberMe: boolean = false) {
+    // No client-side session fabrication; sessions are tracked server-side on login.
+  }
+
+  public async revokeSession(sessionId: string): Promise<{ success: boolean; message: string }> {
+    const target = this.sessions.find((s) => s.id === sessionId);
+    try {
+      const res = await revokeServerSession(sessionId);
+      if (res.loggedOutCurrent || target?.isCurrent) {
+        await this.logout();
+        return { success: true, message: res.message || 'Current session revoked. You have been logged out.' };
+      }
+      this.sessions = this.sessions.filter((s) => s.id !== sessionId);
+      return { success: true, message: res.message || 'Session revoked.' };
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'Failed to revoke session.' };
+    }
+  }
+
+  public async revokeAllOtherSessions(): Promise<{ success: boolean; revokedCount: number; message: string }> {
+    try {
+      const res = await revokeOtherServerSessions();
+      await this.fetchServerSessions();
+      return {
+        success: true,
+        revokedCount: res.revokedCount || 0,
+        message: res.message
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        revokedCount: 0,
+        message: err?.message || 'Failed to revoke other sessions.'
+      };
+    }
   }
 
   public async invalidateAllSessions(): Promise<void> {
@@ -985,13 +938,14 @@ class AuthService {
 
     setStoredAuthToken(null);
     clearFirestoreSyncCache();
+    aiEmployeeService.clearWorkspaceState();
     this.currentUser = null;
     this.persistCurrentUser();
     this.notifyListeners();
   }
 
   // --- PENDING PLAN & TRIAL SUBSCRIPTION MANAGEMENT ---
-  public getPendingPlan(): { tier: string; billingCycle: string } | null {
+  public getPendingPlan(): { tier: string; billingCycle: string; planEdition?: 'founding' | 'standard' } | null {
     try {
       const stored = localStorage.getItem(PENDING_PLAN_KEY);
       if (stored) {
@@ -1002,13 +956,14 @@ class AuthService {
     if (this.currentUser?.selectedPlan) {
       return {
         tier: this.currentUser.selectedPlan.toLowerCase(),
-        billingCycle: (this.currentUser as any).billingCycle || 'monthly'
+        billingCycle: (this.currentUser as any).billingCycle || 'monthly',
+        planEdition: this.currentUser.planEdition
       };
     }
     return null;
   }
 
-  public setPendingPlan(plan: { tier: string; billingCycle: string }): void {
+  public setPendingPlan(plan: { tier: string; billingCycle: string; planEdition?: 'founding' | 'standard' }): void {
     try {
       localStorage.setItem(PENDING_PLAN_KEY, JSON.stringify(plan));
     } catch (e) {}
@@ -1017,14 +972,15 @@ class AuthService {
       this.currentUser = {
         ...this.currentUser,
         selectedPlan: plan.tier,
-        billingCycle: plan.billingCycle as any
+        billingCycle: plan.billingCycle as any,
+        ...(plan.planEdition ? { planEdition: plan.planEdition } : {})
       };
       this.persistCurrentUser();
       this.notifyListeners();
     }
 
     try {
-      setPendingPlan({ tier: plan.tier, billing_cycle: plan.billingCycle });
+      setPendingPlan({ tier: plan.tier, billing_cycle: plan.billingCycle, planEdition: plan.planEdition });
     } catch (e) {}
   }
 
@@ -1058,7 +1014,12 @@ class AuthService {
 
   public updateSubscriptionState(
     status: 'trialing' | 'pending_payment' | 'active' | 'cancelled',
-    plan?: 'starter' | 'growth' | 'pro'
+    plan?: 'starter' | 'growth' | 'pro',
+    options?: {
+      planEdition?: 'founding' | 'standard';
+      autopayStatus?: UserProfile['autopayStatus'];
+      trialEndDate?: string;
+    }
   ): void {
     if (!this.currentUser) return;
     const planFormatted = plan ? ((plan.charAt(0).toUpperCase() + plan.slice(1)) as any) : this.currentUser.plan;
@@ -1067,8 +1028,10 @@ class AuthService {
       billingStatus: status,
       paymentStatus: status === 'trialing' || status === 'active' ? 'paid' : 'pending',
       plan: planFormatted,
-      trialStartDate: status === 'trialing' ? new Date().toISOString() : this.currentUser.trialStartDate,
-      trialEndDate: status === 'trialing' ? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() : this.currentUser.trialEndDate
+      ...(options?.planEdition ? { planEdition: options.planEdition } : {}),
+      ...(options?.autopayStatus ? { autopayStatus: options.autopayStatus } : {}),
+      trialStartDate: status === 'trialing' ? (this.currentUser.trialStartDate || new Date().toISOString()) : this.currentUser.trialStartDate,
+      trialEndDate: options?.trialEndDate || (status === 'trialing' ? (this.currentUser.trialEndDate || new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()) : this.currentUser.trialEndDate)
     };
     this.persistCurrentUser();
     this.notifyListeners();

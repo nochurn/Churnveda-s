@@ -328,6 +328,7 @@ export function enqueueApprovedMessage(payload: {
       };
     }
     if (existingQueued.status === 'SENDING') {
+      duplicateSuppressedCount++;
       return {
         success: true,
         queueItem: existingQueued,
@@ -335,7 +336,16 @@ export function enqueueApprovedMessage(payload: {
         statusMessage: 'Message is currently being dispatched to external provider.'
       };
     }
-    // If previously failed and user re-approves, reset attempts and requeue
+    if (existingQueued.status === 'QUEUED') {
+      duplicateSuppressedCount++;
+      return {
+        success: true,
+        queueItem: existingQueued,
+        isDuplicate: true,
+        statusMessage: 'Message is already queued for delivery.'
+      };
+    }
+    // If previously FAILED and user re-approves, reset attempts and requeue
     existingQueued.status = 'QUEUED';
     existingQueued.attempts = 0;
     existingQueued.error = undefined;

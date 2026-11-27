@@ -397,12 +397,12 @@ export const DataIntegrationView: React.FC<DataIntegrationViewProps> = ({
     });
 
     setMissingHeaders(missing);
-    setTotalParsedRows(Math.max(1, lines.length - 1));
+    setTotalParsedRows(Math.max(0, lines.length - 1));
 
     // Build preview rows
     const previewList: Record<string, string>[] = [];
     const previewCount = Math.min(6, lines.length);
-    const startIdx = lines[0].includes('@') ? 0 : 1;
+    const startIdx = 1;
     for (let i = startIdx; i < previewCount; i++) {
       const vals = parseLine(lines[i], delimiter);
       const rowObj: Record<string, string> = {};

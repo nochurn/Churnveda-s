@@ -25,13 +25,22 @@ import { UserProfile, PaymentMethod } from '../types';
 import { authService } from '../services/authService';
 import { apiService } from '../services/api';
 import {
-  AUTHORITATIVE_PLANS,
   ONE_TIME_PAYMENT_DISCLOSURE,
   RECURRING_MANDATE_DISCLOSURE,
+  USD_RECURRING_CARD_DISCLOSURE,
   buildRazorpayOneTimeOptions,
-  buildRazorpaySubscriptionOptions
+  buildRazorpaySubscriptionOptions,
+  getAuthoritativePlan
 } from '../services/razorpayConfig';
-import { CENTRAL_PRICING, normalizePlanTier } from '../config/pricing';
+import {
+  getEditionLabel,
+  getEditionMarketing,
+  getPlanLimits,
+  getPlanPricing,
+  normalizePlanEdition,
+  normalizePlanTier,
+  PlanEdition
+} from '../config/pricing';
 import { ensureRazorpaySdk } from '../services/razorpaySdk';
 
 interface BillingSettingsViewProps {
@@ -53,30 +62,56 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
   const [isLoadingMethods, setIsLoadingMethods] = useState(false);
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [showAddCardModal, setShowAddCardModal] = useState(initialAction === 'add-card');
+  const [showRetryAutopayModal, setShowRetryAutopayModal] = useState(false);
+  const [retryConsentAccepted, setRetryConsentAccepted] = useState(false);
   const [savedMethods, setSavedMethods] = useState<PaymentMethod[]>(currentUser?.paymentMethods || []);
   const [cancelReason, setCancelReason] = useState('');
+  const [subscriptionDetails, setSubscriptionDetails] = useState<any>(null);
 
   // Fallback / Normalized values
   const userPlan = currentUser?.selectedPlan || currentUser?.plan?.toLowerCase() || 'starter';
   const normTier = normalizePlanTier(userPlan);
-  const currentPlanPricing = CENTRAL_PRICING[normTier];
-  const isFoundingCustomer = Boolean(
-    currentUser?.billingPlanId?.includes('founding') ||
-    (currentUser as any)?.isFoundingOffer ||
-    currentUser?.planPrice === 29 ||
-    currentUser?.planPrice === 79
+  const activeEdition: PlanEdition = normalizePlanEdition(
+    subscriptionDetails?.planEdition || currentUser?.planEdition || 'standard',
+    'standard'
   );
-  const currentPlanMonthlyPrice = isFoundingCustomer
-    ? (normTier === 'starter' ? 29 : normTier === 'growth' ? 79 : currentPlanPricing.monthly.amountUsd)
-    : (currentUser?.planPrice || currentPlanPricing.monthly.amountUsd);
+  const editionLabel = getEditionLabel(activeEdition);
+  const editionMarketing = getEditionMarketing(activeEdition);
+  const activeLimits = subscriptionDetails?.limits || getPlanLimits(normTier, activeEdition);
+  const currentPlanPricing = getPlanPricing(normTier, activeEdition);
+  const standardPlanPricing = getPlanPricing(normTier, 'standard');
+  const billingCycle = (subscriptionDetails?.subscription?.billing_cycle || currentUser?.billingCycle || 'monthly') as 'monthly' | 'annual';
+  const currentPlanMonthlyPrice =
+    subscriptionDetails?.agreedPriceUsd ??
+    currentUser?.planPrice ??
+    currentPlanPricing.monthly.amountUsd;
+  const displayPlanPrice =
+    billingCycle === 'annual' && !subscriptionDetails?.agreedPriceUsd
+      ? currentPlanPricing.annual.totalAmountUsd
+      : currentPlanMonthlyPrice;
+  const pricePeriodLabel = billingCycle === 'annual' ? '/yr' : '/mo';
+
   const isStarter = normTier === 'starter';
-  const isTrial = currentUser?.billingStatus === 'trialing' || (!currentUser?.billingStatus && isStarter);
-  const isCanceled = currentUser?.billingStatus === 'canceled' || currentUser?.billingStatus === 'cancelled';
+  const isTrial = currentUser?.billingStatus === 'trialing' || subscriptionDetails?.subscription?.status === 'trialing';
+  const isCanceled = currentUser?.billingStatus === 'canceled' || currentUser?.billingStatus === 'cancelled' || subscriptionDetails?.subscription?.status === 'cancelled';
+
+  const rawAutopayStatus =
+    subscriptionDetails?.autopay?.status ||
+    subscriptionDetails?.subscription?.autopay_status ||
+    currentUser?.autopayStatus ||
+    'not_established';
+  const autopayAuthorized = Boolean(
+    subscriptionDetails?.autopay?.authorized ||
+    rawAutopayStatus === 'authenticated' ||
+    rawAutopayStatus === 'active'
+  );
+
   const hasPaymentMethod =
     currentUser?.paymentStatus === 'paid' ||
     currentUser?.paymentStatus === 'active' ||
     Boolean(currentUser?.cardLast4) ||
-    savedMethods.length > 0;
+    savedMethods.length > 0 ||
+    autopayAuthorized;
 
   // Open modal if triggered via URL parameter
   useEffect(() => {
@@ -89,7 +124,18 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
   const [transactions, setTransactions] = useState<any[]>([]);
   const [isLoadingTransactions, setIsLoadingTransactions] = useState(false);
 
-  // Load existing payment methods, international status, and transactions ledger
+  const refreshSubscriptionDetails = async () => {
+    try {
+      const detailsRes = await apiService.fetchSubscriptionDetails();
+      if (detailsRes?.success) {
+        setSubscriptionDetails(detailsRes);
+      }
+    } catch {
+      // ignore non-fatal refresh error
+    }
+  };
+
+  // Load existing payment methods, international status, subscription details, and transactions ledger
   useEffect(() => {
     let isMounted = true;
     const loadBillingData = async () => {
@@ -97,10 +143,11 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         setIsLoadingMethods(true);
         setIsLoadingTransactions(true);
 
-        const [methodsRes, statusRes, txRes] = await Promise.allSettled([
+        const [methodsRes, statusRes, txRes, detailsRes] = await Promise.allSettled([
           apiService.fetchPaymentMethods(),
           apiService.fetchInternationalBillingStatus(),
-          apiService.fetchBillingTransactions()
+          apiService.fetchBillingTransactions(),
+          apiService.fetchSubscriptionDetails()
         ]);
 
         if (isMounted) {
@@ -112,6 +159,9 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
           }
           if (txRes.status === 'fulfilled' && txRes.value?.transactions) {
             setTransactions(txRes.value.transactions);
+          }
+          if (detailsRes.status === 'fulfilled' && detailsRes.value?.success) {
+            setSubscriptionDetails(detailsRes.value);
           }
         }
       } catch (err) {
@@ -222,16 +272,132 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
   const handleUpgradePlan = async (targetPlan: 'growth' | 'pro') => {
     setIsProcessing(true);
     try {
-      const res = await apiService.upgradePlan(targetPlan);
+      const res = await apiService.upgradePlan(targetPlan, undefined, activeEdition);
       if (res.user) {
         authService.setCurrentUser(res.user);
         if (onUpdateUser) onUpdateUser(res.user);
       }
-      onShowToast(`Upgraded to ${targetPlan === 'growth' ? 'Growth ($79/mo)' : 'Enterprise ($349/mo)'} plan.`, 'success');
+      await refreshSubscriptionDetails();
+      const targetPriceLabel = getPlanPricing(targetPlan, activeEdition).monthly.formatted;
+      onShowToast(
+        `Upgraded to ${targetPlan === 'growth' ? `Growth (${targetPriceLabel})` : 'Enterprise ($349/month)'} (${editionLabel}).`,
+        'success'
+      );
     } catch (err: any) {
       onNavigate('pricing', { plan: targetPlan });
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  // Handle Edition Upgrade (Founding Member Edition -> Standard on verified workspace)
+  const handleUpgradeEdition = async (targetEdition: PlanEdition) => {
+    setIsProcessing(true);
+    try {
+      const res = await apiService.upgradePlanEdition(targetEdition);
+      if (res?.success) {
+        if (currentUser) {
+          const updated = {
+            ...currentUser,
+            planEdition: targetEdition,
+            planEditionLabel: getEditionLabel(targetEdition),
+            ...(res.agreedPriceUsd ? { planPrice: res.agreedPriceUsd } : {})
+          };
+          authService.setCurrentUser(updated);
+          if (onUpdateUser) onUpdateUser(updated);
+        }
+        await refreshSubscriptionDetails();
+        onShowToast(res.message || `Switched to ${getEditionLabel(targetEdition)}. Higher limits unlocked!`, 'success');
+      } else {
+        onShowToast(res?.error || 'Could not switch plan edition.', 'error');
+      }
+    } catch (err: any) {
+      onShowToast(err.message || 'Please complete Razorpay checkout at Standard pricing to upgrade editions.', 'error');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Handle Retry / Setup Recurring Autopay Authorization without duplicating $1 charge
+  const handleRetryAutopaySubmit = async () => {
+    if (!retryConsentAccepted) {
+      onShowToast('Please accept the recurring Autopay authorization disclosure to proceed.', 'error');
+      return;
+    }
+    setIsProcessing(true);
+    try {
+      const retryRes = await apiService.retryMandateAuthorization({
+        tier: normTier,
+        billing_cycle: billingCycle,
+        planEdition: activeEdition,
+        consentAccepted: true
+      });
+      if (!retryRes.success || !retryRes.subscriptionId) {
+        throw new Error(retryRes.error || 'Failed to initialize recurring Autopay mandate.');
+      }
+
+      const sdkReady = await ensureRazorpaySdk();
+      if (!sdkReady || typeof (window as any).Razorpay === 'undefined') {
+        onShowToast('Razorpay Checkout SDK could not load. Please check your connection and try again.', 'error');
+        setIsProcessing(false);
+        return;
+      }
+
+      setShowRetryAutopayModal(false);
+      const options = buildRazorpaySubscriptionOptions({
+        keyId: retryRes.keyId,
+        subscriptionId: retryRes.subscriptionId,
+        planName: `${normTier.toUpperCase()} (${editionLabel})`,
+        description: retryRes.verification_fee_waived
+          ? `Authorize Recurring Card Autopay ($1 fee waived) — ${normTier.toUpperCase()}`
+          : `Authorize $1.00 USD Card & Recurring Autopay — ${normTier.toUpperCase()}`,
+        customerName: currentUser?.name || 'SaaS Founder',
+        customerEmail: currentUser?.email || 'founder@example.com',
+        cardOnly: true,
+        handler: async (response: any) => {
+          try {
+            const verifyRes = await apiService.verifyTrialPayment({
+              razorpay_subscription_id: response.razorpay_subscription_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature
+            });
+            if (verifyRes.success) {
+              authService.updateSubscriptionState('trialing', normTier, {
+                planEdition: (verifyRes.plan_edition as PlanEdition) || activeEdition,
+                autopayStatus: verifyRes.autopay_status || (verifyRes.autopay_authorized ? 'authenticated' : 'pending'),
+                trialEndDate: verifyRes.trial_ends_at
+              });
+              await refreshSubscriptionDetails();
+              if (verifyRes.autopay_authorized) {
+                onShowToast('Recurring card Autopay mandate authorized!', 'success');
+              } else {
+                onShowToast(verifyRes.message || 'Verification processed; Autopay still pending authorization.', 'info');
+              }
+            } else {
+              onShowToast(verifyRes.error || 'Autopay verification failed.', 'error');
+            }
+          } catch (verErr: any) {
+            onShowToast(verErr?.message || 'Error verifying Autopay mandate.', 'error');
+          } finally {
+            setIsProcessing(false);
+            setRetryConsentAccepted(false);
+          }
+        },
+        onDismiss: () => {
+          setIsProcessing(false);
+          onShowToast('Autopay authorization cancelled before completion.', 'info');
+        }
+      });
+
+      const rzp = new (window as any).Razorpay(options);
+      rzp.on('payment.failed', (resp: any) => {
+        setIsProcessing(false);
+        onShowToast(resp?.error?.description || 'Card Autopay authorization failed or was declined.', 'error');
+      });
+      rzp.open();
+    } catch (err: any) {
+      setIsProcessing(false);
+      onShowToast(err.message || 'Failed to retry Autopay authorization.', 'error');
     }
   };
 
@@ -298,7 +464,9 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
           plan: normalizedTier,
           billingCycle: 'annual',
           customerName,
-          customerEmail
+          customerEmail,
+          planEdition: activeEdition,
+          isFoundingOffer: activeEdition === 'founding'
         });
 
         if (!orderRes.success) {
@@ -313,13 +481,14 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         }
 
         const orderCurrency = orderRes.currency || 'INR';
+        const authPlan = getAuthoritativePlan(normalizedTier, activeEdition);
         const options = buildRazorpayOneTimeOptions({
           keyId: orderRes.keyId,
           orderId: orderRes.orderId,
           amountCents: orderRes.amount,
           amount: orderRes.amount,
           currency: orderCurrency,
-          description: `${(AUTHORITATIVE_PLANS[normalizedTier]?.name || normalizedTier).toUpperCase()} Plan (Annual)`,
+          description: `${authPlan.name.toUpperCase()} (${editionLabel}) - Annual`,
           customerName,
           customerEmail,
           handler: async (response: any) => {
@@ -332,12 +501,19 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
                 billingCycle: 'annual',
                 amount: orderRes.amount,
                 currency: orderCurrency,
+                planEdition: activeEdition,
+                isFoundingOffer: activeEdition === 'founding',
                 email: customerEmail
               });
 
               if (verifyRes.success) {
-                onShowToast(`🎉 Annual Razorpay payment verified! Plan upgraded to ${normalizedTier.toUpperCase()}.`, 'success');
+                authService.updateSubscriptionState('active', normalizedTier, {
+                  planEdition: verifyRes.planEdition || activeEdition,
+                  autopayStatus: 'not_established'
+                });
+                onShowToast(`Annual Razorpay payment verified! Plan upgraded to ${normalizedTier.toUpperCase()} (${editionLabel}).`, 'success');
                 await syncActivatedUser();
+                await refreshSubscriptionDetails();
               } else {
                 onShowToast(verifyRes.error || 'Razorpay signature verification failed.', 'error');
               }
@@ -361,10 +537,12 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         return;
       }
 
-      // Monthly billing uses Recurring Subscription Mandate Flow
+      // Monthly billing uses Recurring Subscription Card Mandate Flow
       const subRes = await apiService.createRazorpaySubscription({
         tier: normalizedTier,
-        billing_cycle: 'monthly'
+        billing_cycle: 'monthly',
+        planEdition: activeEdition,
+        consentAccepted: true
       });
 
       if (!subRes.success || !subRes.subscriptionId) {
@@ -381,9 +559,10 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
       const options = buildRazorpaySubscriptionOptions({
         keyId: subRes.keyId,
         subscriptionId: subRes.subscriptionId,
-        planName: (AUTHORITATIVE_PLANS[normalizedTier]?.name || normalizedTier).toUpperCase(),
+        planName: `${getAuthoritativePlan(normalizedTier, activeEdition).name.toUpperCase()} (${editionLabel})`,
         customerName,
         customerEmail,
+        cardOnly: true,
         handler: async (response: any) => {
           try {
             const verifyRes = await apiService.verifyRazorpaySubscription({
@@ -392,12 +571,14 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
               razorpay_signature: response.razorpay_signature,
               tier: normalizedTier,
               billing_cycle: 'monthly',
+              planEdition: activeEdition,
               email: customerEmail
             });
 
             if (verifyRes.success) {
-              onShowToast(`🎉 Monthly recurring subscription activated for ${normalizedTier.toUpperCase()} Plan!`, 'success');
+              onShowToast(`Monthly recurring card subscription verified for ${normalizedTier.toUpperCase()} (${editionLabel})!`, 'success');
               await syncActivatedUser();
+              await refreshSubscriptionDetails();
             } else {
               onShowToast(verifyRes.error || 'Recurring subscription verification failed.', 'error');
             }
@@ -485,9 +666,9 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         <div className="p-6 bg-gradient-to-r from-blue-50/70 via-indigo-50/40 to-white border-b border-gray-200">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div className="space-y-2">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs font-bold uppercase tracking-wider text-blue-900 bg-blue-100/90 px-2.5 py-0.5 rounded-md border border-blue-200">
-                  {isStarter ? 'Starter Plan' : userPlan.toUpperCase()}
+                  {normTier.toUpperCase()} · {editionLabel}
                 </span>
                 <span
                   className={`text-xs font-semibold px-2.5 py-0.5 rounded-md border ${
@@ -501,45 +682,62 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
                   {isCanceled
                     ? 'Trial Canceled'
                     : isTrial
-                    ? 'Trialing / Payment Pending'
+                    ? (hasPaymentMethod ? 'Trial Active ($1 Verified)' : 'Trialing / Verification Pending')
                     : 'Active Subscription'}
                 </span>
 
-                {hasPaymentMethod && (
-                  <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-800 bg-emerald-100/90 px-2 py-0.5 rounded-md border border-emerald-200">
-                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                    Card on File
-                  </span>
-                )}
+                <span
+                  className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-md border ${
+                    autopayAuthorized
+                      ? 'text-emerald-800 bg-emerald-100/90 border-emerald-200'
+                      : rawAutopayStatus === 'failed'
+                      ? 'text-red-800 bg-red-100 border-red-200'
+                      : 'text-amber-900 bg-amber-100 border-amber-200'
+                  }`}
+                >
+                  {autopayAuthorized ? (
+                    <>
+                      <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                      <span>Autopay {String(rawAutopayStatus).toUpperCase()}</span>
+                    </>
+                  ) : (
+                    <>
+                      <AlertTriangle className="w-3 h-3 text-amber-700" />
+                      <span>Autopay: {String(rawAutopayStatus).replace(/_/g, ' ').toUpperCase()}</span>
+                    </>
+                  )}
+                </span>
               </div>
 
               <h2 className="text-xl font-bold text-gray-900">
-                {isStarter ? 'Current Plan: Starter (Trial)' : `Current Plan: ${userPlan.toUpperCase()}`}
+                {currentPlanPricing.displayName} ({editionLabel})
               </h2>
 
               <p className="text-xs text-gray-600 max-w-xl">
                 {isCanceled
                   ? 'Your trial has been canceled. You can reactivate anytime to resume automated churn monitoring.'
                   : isTrial
-                  ? `Your 14-day free trial is active with full access to Churnveda retention intelligence. ${
-                      hasPaymentMethod
-                        ? `A valid payment method is attached. You will be billed $${currentPlanMonthlyPrice}/mo automatically on ${formattedTrialEnd}.`
-                        : `No payment method has been charged yet. Add a payment method before ${formattedTrialEnd} to continue service.`
-                    }`
-                  : 'Your subscription is active and billing on a regular schedule.'}
+                  ? autopayAuthorized
+                    ? `Your 14-day free trial and recurring USD card Autopay mandate are authorized. Automatic billing ($${displayPlanPrice}${pricePeriodLabel}) starts on ${formattedTrialEnd} unless cancelled.`
+                    : hasPaymentMethod
+                    ? `Your $1 verification payment was recorded, but recurring Autopay is currently ${String(rawAutopayStatus).replace(/_/g, ' ')}. Authorize recurring Autopay below so service continues uninterrupted after ${formattedTrialEnd}.`
+                    : `No verification or recurring mandate is attached yet. Complete $1.00 USD card verification & Autopay authorization before ${formattedTrialEnd}.`
+                  : autopayAuthorized
+                  ? 'Your subscription and recurring USD card Autopay mandate are active.'
+                  : 'Your subscription access is active. Recurring Autopay authorization can be configured below.'}
               </p>
             </div>
 
             {/* Price badge */}
             <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs md:text-right shrink-0">
-              <div className="text-xs text-gray-500 font-medium">Monthly Investment</div>
+              <div className="text-xs text-gray-500 font-medium">{editionMarketing.badge}</div>
               <div className="text-3xl font-black text-gray-900 mt-0.5">
-                ${currentPlanMonthlyPrice}
-                <span className="text-xs font-semibold text-gray-500">/mo</span>
+                ${displayPlanPrice}
+                <span className="text-xs font-semibold text-gray-500">{pricePeriodLabel}</span>
               </div>
               <div className="text-[11px] font-semibold text-emerald-700 mt-1 flex items-center gap-1 md:justify-end">
                 <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                <span>{isTrial ? 'Trial: $0 due today' : 'Billed monthly'}</span>
+                <span>{isTrial ? '14-day trial window' : 'Billed in USD'}</span>
               </div>
             </div>
           </div>
@@ -548,17 +746,29 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         {/* Detailed Metrics Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-gray-100 p-6 bg-white text-xs">
           <div className="pb-4 sm:pb-0 sm:pr-4">
-            <span className="text-gray-500 font-medium">Status</span>
+            <span className="text-gray-500 font-medium">Billing &amp; Autopay Status</span>
             <div className="mt-1 text-sm font-bold text-gray-900 flex items-center gap-2">
               <span
                 className={`w-2 h-2 rounded-full ${
-                  isCanceled ? 'bg-red-500' : isTrial ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'
+                  isCanceled ? 'bg-red-500' : autopayAuthorized ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'
                 }`}
               />
-              <span>{isCanceled ? 'Canceled' : isTrial ? 'Trialing / Payment Pending' : 'Paid & Active'}</span>
+              <span>
+                {isCanceled
+                  ? 'Canceled'
+                  : autopayAuthorized
+                  ? 'Autopay Authorized'
+                  : hasPaymentMethod
+                  ? '$1 Verified · Autopay Pending'
+                  : 'Verification Pending'}
+              </span>
             </div>
             <p className="text-[11px] text-gray-500 mt-1">
-              {hasPaymentMethod ? 'Card verified & ready for renewal' : 'Payment method pending'}
+              {autopayAuthorized
+                ? 'Recurring card mandate verified with Razorpay'
+                : subscriptionDetails?.autopay?.failureReason
+                ? `Reason: ${subscriptionDetails.autopay.failureReason}`
+                : 'Recurring card mandate not established yet'}
             </p>
           </div>
 
@@ -574,20 +784,90 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
           </div>
 
           <div className="pt-4 sm:pt-0 sm:pl-4">
-            <span className="text-gray-500 font-medium">Primary Payment Method</span>
+            <span className="text-gray-500 font-medium">Authorized Mandate / Method</span>
             <div className="mt-1 text-sm font-bold text-gray-900 flex items-center gap-2">
               <CreditCard className="w-4 h-4 text-gray-400" />
               <span>
-                {hasPaymentMethod
-                  ? `${(defaultMethod?.brand || currentUser?.cardBrand || 'Card').toUpperCase()} •••• ${
-                      defaultMethod?.last4 || currentUser?.cardLast4 || '4242'
-                    }`
-                  : 'Payment Pending (None on file)'}
+                {defaultMethod?.last4
+                  ? `${defaultMethod.brand.toUpperCase()} •••• ${defaultMethod.last4}`
+                  : currentUser?.cardLast4
+                  ? `${(currentUser.cardBrand || 'Card').toUpperCase()} •••• ${currentUser.cardLast4}`
+                  : autopayAuthorized
+                  ? `${(subscriptionDetails?.autopay?.paymentMethodType || 'Card').toUpperCase()} Mandate On File`
+                  : hasPaymentMethod
+                  ? '$1 Paid (No Recurring Token)'
+                  : 'None on file'}
               </span>
             </div>
             <p className="text-[11px] text-gray-500 mt-1">
-              {hasPaymentMethod ? 'Tokenized via 256-bit SSL encryption' : 'Add card to avoid service interruption'}
+              {autopayAuthorized
+                ? `Token: ${subscriptionDetails?.autopay?.tokenId || subscriptionDetails?.autopay?.mandateId || 'Verified'}`
+                : 'Authorize a card mandate via Razorpay Checkout'}
             </p>
+          </div>
+        </div>
+
+        {/* Recurring Autopay Mandate & Edition Entitlements Summary */}
+        <div className="px-6 py-4 bg-slate-50 border-t border-gray-200 grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-gray-900">Plan Edition &amp; Active Entitlements</span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-50 text-blue-900 border border-blue-200">
+                {editionLabel}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-600">
+              <div>Customers: <strong className="text-gray-900">{activeLimits.customers === Infinity ? 'Unlimited' : activeLimits.customers.toLocaleString()}</strong></div>
+              <div>Daily Scans: <strong className="text-gray-900">{activeLimits.aiScansPerDay === Infinity ? 'Unlimited' : `${activeLimits.aiScansPerDay}/day`}</strong></div>
+              <div>Top Priorities: <strong className="text-gray-900">Top {activeLimits.topAtRiskCustomers}</strong></div>
+              <div>Messages/mo: <strong className="text-gray-900">{activeLimits.aiRetentionMessagesPerMonth.toLocaleString()}</strong></div>
+              <div>Team Seats: <strong className="text-gray-900">{activeLimits.teamMembers}</strong></div>
+              <div>Auto Scheduler: <strong className="text-gray-900">{activeLimits.advancedAutomation ? 'Enabled' : 'Manual only'}</strong></div>
+            </div>
+            {activeEdition === 'founding' && normTier !== 'pro' && !isCanceled && (
+              <button
+                type="button"
+                id="upgrade-edition-standard-btn"
+                disabled={isProcessing}
+                onClick={() => handleUpgradeEdition('standard')}
+                className="w-full mt-1 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-[11px] font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>
+                  {currentPlanMonthlyPrice === standardPlanPricing.monthly.amountUsd
+                    ? `Upgrade Founding Member → Standard (Same $${standardPlanPricing.monthly.amountUsd}/mo Rate)`
+                    : `Upgrade Founding Member → Standard ($${standardPlanPricing.monthly.amountUsd}/mo Regular Pricing)`}
+                </span>
+              </button>
+            )}
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-gray-900">Razorpay Autopay Mandate Details</span>
+              <span className="text-[10px] font-mono text-gray-500">
+                {subscriptionDetails?.subscription?.razorpay_subscription_id || currentUser?.razorpaySubscriptionId || 'No sub ID'}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-600">
+              <div>Autopay: <strong className="text-gray-900 capitalize">{String(rawAutopayStatus).replace(/_/g, ' ')}</strong></div>
+              <div>Method: <strong className="text-gray-900 uppercase">{subscriptionDetails?.autopay?.paymentMethodType || 'Card Only (USD)'}</strong></div>
+              <div>Mandate / Token: <strong className="text-gray-900 font-mono">{subscriptionDetails?.autopay?.tokenId || subscriptionDetails?.autopay?.mandateId || 'Pending'}</strong></div>
+              <div>Frequency: <strong className="text-gray-900 capitalize">{billingCycle}</strong></div>
+              <div className="col-span-2">Next Scheduled Charge: <strong className="text-gray-900">{subscriptionDetails?.autopay?.nextBillingAt ? new Date(subscriptionDetails.autopay.nextBillingAt).toLocaleDateString() : formattedTrialEnd}</strong></div>
+            </div>
+            {!autopayAuthorized && !isCanceled && (
+              <button
+                type="button"
+                id="retry-autopay-btn"
+                disabled={isProcessing}
+                onClick={() => setShowRetryAutopayModal(true)}
+                className="w-full mt-1 py-2 px-3 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg text-[11px] font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>{hasPaymentMethod ? 'Retry Autopay Authorization ($1 Fee Waived)' : 'Authorize $1.00 USD Card & Autopay'}</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -601,7 +881,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
               className="px-4 py-2.5 bg-blue-900 hover:bg-blue-800 text-white rounded-xl text-xs font-bold shadow-xs transition-colors cursor-pointer flex items-center gap-2"
             >
               <Plus className="w-4 h-4" />
-              <span>{hasPaymentMethod ? 'Add Another Payment Method' : 'Add Payment Method'}</span>
+              <span>{hasPaymentMethod ? 'Update Card Mandate' : 'Add Card Mandate'}</span>
             </button>
 
             <button
@@ -611,18 +891,18 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
               className="px-4 py-2.5 bg-white border border-gray-300 hover:bg-gray-100 text-gray-800 rounded-xl text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-2"
             >
               <Zap className="w-4 h-4 text-amber-500" />
-              <span>Upgrade to Growth or Pro</span>
+              <span>Compare Plans &amp; Editions</span>
             </button>
 
             <button
               type="button"
               id="billing-razorpay-btn"
-              onClick={() => handlePayWithRazorpay('growth', 'monthly')}
+              onClick={() => handlePayWithRazorpay(normTier, 'monthly')}
               disabled={isProcessing}
               className="px-4 py-2.5 bg-gradient-to-r from-blue-700 to-indigo-800 hover:from-blue-800 hover:to-indigo-900 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer flex items-center gap-2 border border-blue-900"
             >
               <CreditCard className="w-4 h-4 text-cyan-300" />
-              <span>Pay via Razorpay (UPI, Netbanking, Cards)</span>
+              <span>Authorize USD Card Subscription</span>
             </button>
           </div>
 
@@ -639,8 +919,8 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
           )}
 
           <div className="w-full pt-2.5 flex flex-col sm:flex-row sm:items-center justify-between text-[11px] text-gray-500 gap-1 border-t border-gray-200/60">
-            <span>Pay securely via UPI, debit/credit card, netbanking, or wallet.</span>
-            <span className="text-gray-400 font-medium">Monthly billing requires UPI AutoPay or a card mandate.</span>
+            <span>{USD_RECURRING_CARD_DISCLOSURE}</span>
+            <span className="text-gray-400 font-medium">Cancel anytime online with 1 click.</span>
           </div>
         </div>
       </div>
@@ -758,34 +1038,34 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
             </div>
 
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-base font-bold text-gray-900">Growth Plan</span>
                 <span className="text-xs text-blue-900 font-bold bg-blue-50 px-2 py-0.5 rounded">
-                  $79/month
+                  {activeEdition === 'founding' ? '$59/mo Founding · $79/mo Standard' : '$79/month (Standard)'}
                 </span>
               </div>
               <p className="text-xs text-gray-600 mt-1">
-                For scaling SaaS teams monitoring up to 10,000 accounts with automated retention workflows.
+                For scaling SaaS teams monitoring up to 1,000 (Founding Member Edition) or 2,500 (Standard) accounts with automated retention workflows.
               </p>
 
               <ul className="mt-4 space-y-2 text-xs text-gray-700">
                 <li className="flex items-center gap-2">
                   <CheckCircle2 className="w-3.5 h-3.5 text-blue-900 shrink-0" />
-                  <span>Up to 10,000 customers monitored</span>
+                  <span>1,000 (Founding) or 2,500 (Standard) customers monitored</span>
                 </li>
                 <li className="flex items-center gap-2">
                   <CheckCircle2 className="w-3.5 h-3.5 text-blue-900 shrink-0" />
-                  <span>3 scans/day (10,000 analyzed per scan)</span>
+                  <span>3–5 scans/day with Top 10–15 daily priorities</span>
                 </li>
                 <li className="flex items-center gap-2">
                   <CheckCircle2 className="w-3.5 h-3.5 text-blue-900 shrink-0" />
-                  <span>500 AI retention messages / month</span>
+                  <span>500 (Founding) to 1,000 (Standard) messages / month</span>
                 </li>
               </ul>
             </div>
 
             <div className="mt-5 pt-4 border-t border-gray-100 flex items-center justify-between">
-              <span className="text-[11px] text-gray-500 font-medium">14-day money-back guarantee</span>
+              <span className="text-[11px] text-gray-500 font-medium">14-day trial available</span>
               <button
                 type="button"
                 onClick={() => handlePayWithRazorpay('growth', 'monthly')}
@@ -845,14 +1125,11 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         {/* Accepted Payment Methods and Disclosures */}
         <div className="mt-4 p-3 bg-gray-50 border border-gray-200 rounded-xl space-y-1.5 text-xs text-gray-600">
           <div className="flex items-center gap-3 text-gray-700 font-semibold text-xs">
-            <span className="text-gray-900 font-bold">Supported Razorpay Methods:</span>
-            <span className="flex items-center gap-1"><Smartphone className="w-3.5 h-3.5 text-emerald-600" /> UPI</span>
-            <span className="flex items-center gap-1"><CreditCard className="w-3.5 h-3.5 text-blue-600" /> Cards</span>
-            <span className="flex items-center gap-1"><Building2 className="w-3.5 h-3.5 text-indigo-600" /> Netbanking</span>
-            <span className="flex items-center gap-1"><Wallet className="w-3.5 h-3.5 text-amber-600" /> Wallets</span>
+            <span className="text-gray-900 font-bold">USD Recurring Autopay Method:</span>
+            <span className="flex items-center gap-1"><CreditCard className="w-3.5 h-3.5 text-blue-600" /> International &amp; Domestic Cards (Visa / Mastercard / Amex)</span>
           </div>
           <p className="text-[11px] text-gray-500">
-            {ONE_TIME_PAYMENT_DISCLOSURE} {RECURRING_MANDATE_DISCLOSURE}
+            {USD_RECURRING_CARD_DISCLOSURE}
           </p>
         </div>
       </div>
@@ -869,16 +1146,16 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
                 <h3 className="text-base font-bold text-white">International Recurring USD Billing</h3>
                 {internationalStatus?.status === 'active_verified' ? (
                   <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active & Verified
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active &amp; Verified
                   </span>
                 ) : (
                   <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-blue-500/20 text-blue-300 border border-blue-500/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400" /> Recurring Billing Ready
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400" /> Card Mandate Required for USD
                   </span>
                 )}
               </div>
               <p className="text-xs text-indigo-200/80 mt-0.5">
-                Transparent USD pricing with support for international cards, UPI AutoPay, netbanking, and wallets.
+                Transparent USD pricing via Razorpay Subscription Card Mandates (Visa, Mastercard, Amex).
               </p>
             </div>
           </div>
@@ -891,20 +1168,20 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 text-xs">
           <div className="bg-white/5 border border-white/10 rounded-xl p-3.5">
             <span className="text-indigo-200/70 block text-[11px] font-medium">Fixed USD Subscription Plans</span>
-            <span className="font-bold text-white text-sm mt-0.5 block">Starter $29 • Growth $79 • Enterprise $349</span>
+            <span className="font-bold text-white text-sm mt-0.5 block">Standard: $29 / $79 / $349 · Founding: $19 / $59</span>
             <span className="text-[11px] text-indigo-300/80 mt-1 block">Prices stay fixed in USD regardless of FX movements</span>
           </div>
 
           <div className="bg-white/5 border border-white/10 rounded-xl p-3.5">
-            <span className="text-indigo-200/70 block text-[11px] font-medium">Supported Methods</span>
-            <span className="font-bold text-white text-sm mt-0.5 block">Cards, UPI, Netbanking &amp; Wallets</span>
-            <span className="text-[11px] text-indigo-300/80 mt-1 block">Instant checkout confirmation and automated receipts</span>
+            <span className="text-indigo-200/70 block text-[11px] font-medium">USD Recurring Method</span>
+            <span className="font-bold text-white text-sm mt-0.5 block">International &amp; Domestic Cards Only</span>
+            <span className="text-[11px] text-indigo-300/80 mt-1 block">UPI AutoPay does not support USD recurring charges</span>
           </div>
 
           <div className="bg-white/5 border border-white/10 rounded-xl p-3.5">
             <span className="text-indigo-200/70 block text-[11px] font-medium">Payment Security</span>
             <span className="font-bold text-white text-sm mt-0.5 block">PCI-DSS Level 1 Checkout</span>
-            <span className="text-[11px] text-indigo-300/80 mt-1 block">All payments verified cryptographically before activation</span>
+            <span className="text-[11px] text-indigo-300/80 mt-1 block">All signatures &amp; webhooks verified cryptographically</span>
           </div>
         </div>
       </div>
@@ -1053,6 +1330,67 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
         </div>
       )}
 
+      {/* Retry / Authorize Recurring Autopay Modal */}
+      {showRetryAutopayModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-gray-200 p-6 space-y-4 text-xs">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-blue-900" />
+                <h4 className="text-sm font-bold text-gray-900">Authorize Recurring USD Card Autopay</h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRetryAutopayModal(false)}
+                className="text-gray-400 hover:text-gray-700 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-blue-950 space-y-1.5 leading-relaxed">
+              <div><strong>Plan:</strong> {currentPlanPricing.displayName} ({editionLabel})</div>
+              <div><strong>Recurring Rate:</strong> ${displayPlanPrice}{pricePeriodLabel} (USD)</div>
+              <div>
+                <strong>Today&apos;s Verification Fee:</strong>{' '}
+                {hasPaymentMethod ? '$0.00 USD ($1 verification waived — already paid)' : '$1.00 USD refundable verification'}
+              </div>
+              <div><strong>First Scheduled Renewal:</strong> {formattedTrialEnd}</div>
+            </div>
+
+            <label className="flex items-start gap-2 text-[11px] text-gray-800 bg-amber-50 border border-amber-200 rounded-xl p-3 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={retryConsentAccepted}
+                onChange={(e) => setRetryConsentAccepted(e.target.checked)}
+                className="mt-0.5 rounded border-gray-300 text-blue-900 cursor-pointer"
+              />
+              <span>
+                I explicitly authorize Churnveda via Razorpay to establish recurring card Autopay for ${currentPlanMonthlyPrice}/month ({billingCycle}) starting {formattedTrialEnd} until cancelled.
+              </span>
+            </label>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => setShowRetryAutopayModal(false)}
+                className="px-4 py-2 border border-gray-300 rounded-xl text-gray-700 font-semibold hover:bg-gray-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isProcessing || !retryConsentAccepted}
+                onClick={handleRetryAutopaySubmit}
+                className="px-4 py-2 bg-blue-900 hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl cursor-pointer"
+              >
+                {isProcessing ? 'Opening Razorpay...' : 'Authorize Card Autopay'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Cancel Trial Modal */}
       {showCancelModal && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -1072,7 +1410,7 @@ export const BillingSettingsView: React.FC<BillingSettingsViewProps> = ({
             <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-red-800 space-y-1 text-[11px]">
               <div className="font-bold">What happens next:</div>
               <ul className="list-disc pl-4 space-y-0.5">
-                <li>No payment method will ever be charged.</li>
+                <li>No recurring subscription charges will occur.</li>
                 <li>Real-time customer risk telemetry will pause at the end of the day.</li>
                 <li>Your customer data will remain safe and exportable.</li>
               </ul>

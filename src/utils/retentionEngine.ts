@@ -1,4 +1,5 @@
 import { Customer, CustomerRetentionAction, HealthPillars, CohortMonthRecord, ChurnReasonStats, ChurnReasonType } from '../types';
+import { isAtRiskScore } from '../config/riskThresholds';
 
 /**
  * Calculates MRR Weight for Action Priority
@@ -92,7 +93,7 @@ export function calculateHealthPillars(customer: Customer): HealthPillars {
     rootCauseDiagnosis = 'Multiple unresolved integration or critical defect tickets blocking customer value realization.';
   } else if (relationshipScore >= 70) {
     rootCauseDiagnosis = 'Primary executive champion has disengaged with no meeting attendance recorded in 30+ days.';
-  } else if (customer.riskScore >= 60) {
+  } else if (isAtRiskScore(customer.riskScore)) {
     rootCauseDiagnosis = 'Combined telemetry signals indicate early silent disengagement ahead of upcoming contract renewal.';
   }
 

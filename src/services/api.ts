@@ -643,6 +643,7 @@ export async function signupUser(payload: {
   phone?: string;
   agreedToTerms: boolean;
   selectedPlan?: string;
+  planEdition?: 'founding' | 'standard';
   billingCycle?: 'monthly' | 'annual';
   isFreeTrial?: boolean;
 }) {
@@ -671,13 +672,32 @@ export async function cancelRazorpaySubscription() {
   return await parseJsonResponse(res, 'Failed to cancel subscription');
 }
 
-export async function upgradePlan(plan: string, email?: string) {
+export async function upgradePlan(plan: string, email?: string, planEdition?: 'founding' | 'standard') {
   const res = await apiFetch('/api/billing/upgrade', {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ plan, email })
+    body: JSON.stringify({ plan, email, planEdition })
   });
   return await parseJsonResponse(res, 'Failed to upgrade plan');
+}
+
+export async function upgradePlanEdition(planEdition: 'founding' | 'standard'): Promise<{
+  success: boolean;
+  planEdition?: 'founding' | 'standard';
+  editionLabel?: string;
+  agreedPriceUsd?: number;
+  requiresMandateReauth?: boolean;
+  requiresPayment?: boolean;
+  limits?: any;
+  message?: string;
+  error?: string;
+}> {
+  const res = await apiFetch('/api/billing/upgrade-edition', {
+    method: 'POST',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ planEdition })
+  });
+  return await parseJsonResponse(res, 'Failed to switch plan edition');
 }
 
 export async function addPaymentMethod(payload: {
@@ -795,6 +815,7 @@ export async function setupWorkspace(payload: {
 export async function setPendingPlan(payload: {
   tier: string;
   billing_cycle: string;
+  planEdition?: 'founding' | 'standard';
 }) {
   const token = getStoredAuthToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
@@ -853,6 +874,8 @@ export async function createRazorpaySubscription(payload: {
   tier: 'starter' | 'growth' | 'pro';
   billing_cycle: 'monthly' | 'annual';
   isFoundingOffer?: boolean;
+  planEdition?: 'founding' | 'standard';
+  consentAccepted?: boolean;
 }): Promise<{
   success: boolean;
   subscriptionId: string;
@@ -860,12 +883,15 @@ export async function createRazorpaySubscription(payload: {
   keyId: string;
   tier: string;
   billing_cycle: string;
+  planEdition?: 'founding' | 'standard';
+  allowed_methods?: string[];
   amountPaise: number;
   amountInr: number;
   amountUsd?: number;
   amountCents?: number;
   formattedAmount?: string;
   status: string;
+  autopay_status?: string;
   error?: string;
 }> {
   const token = getStoredAuthToken();
@@ -1071,9 +1097,19 @@ export async function fetchRazorpayConfig(): Promise<{
   keyId: string;
   currency: string;
   mode: string;
-  plans: Record<string, { monthly: number; annual: number; currency: string; display: string }>;
+  defaultEdition?: 'founding' | 'standard';
+  editions?: Record<string, { id: string; label: string; shortLabel: string; badge: string; description: string }>;
+  foundingEligibility?: {
+    eligible: boolean;
+    enabled: boolean;
+    isExistingFounding: boolean;
+  };
+  plans: Record<string, { monthly: number; annual: number; monthlyEquivalent?: number; currency: string; display: string; displayAnnual?: string }>;
+  foundingPlans?: Record<string, { monthly: number; annual: number; monthlyEquivalent?: number; currency: string; display: string; displayAnnual?: string }>;
 }> {
-  const res = await apiFetch('/api/razorpay/config');
+  const res = await apiFetch('/api/razorpay/config', {
+    headers: getAuthHeaders({ Accept: 'application/json' })
+  });
   return res.json();
 }
 
@@ -1110,6 +1146,7 @@ export async function createRazorpayOrder(payload: {
   customerName?: string;
   customerEmail?: string;
   isFoundingOffer?: boolean;
+  planEdition?: 'founding' | 'standard';
 }): Promise<{
   success: boolean;
   orderId: string;
@@ -1123,6 +1160,7 @@ export async function createRazorpayOrder(payload: {
   keyId: string;
   receipt: string;
   plan: string;
+  planEdition?: 'founding' | 'standard';
   planName?: string;
   billingCycle: string;
   formattedUsd?: string;
@@ -1149,6 +1187,7 @@ export async function verifyRazorpayPayment(payload: {
   currency?: string;
   email?: string;
   isFoundingOffer?: boolean;
+  planEdition?: 'founding' | 'standard';
 }): Promise<{
   success: boolean;
   verified: boolean;
@@ -1157,7 +1196,9 @@ export async function verifyRazorpayPayment(payload: {
   orderId?: string;
   subscriptionId?: string;
   plan?: string;
+  planEdition?: 'founding' | 'standard';
   billingStatus?: string;
+  autopay_status?: string;
   error?: string;
 }> {
   const res = await apiFetch('/api/razorpay/verify-payment', {
@@ -1180,6 +1221,7 @@ export async function verifyRazorpaySubscription(payload: {
   currency?: string;
   email?: string;
   isFoundingOffer?: boolean;
+  planEdition?: 'founding' | 'standard';
 }): Promise<{
   success: boolean;
   verified: boolean;
@@ -1187,7 +1229,10 @@ export async function verifyRazorpaySubscription(payload: {
   subscriptionId?: string;
   paymentId?: string;
   tier?: string;
+  planEdition?: 'founding' | 'standard';
   billingStatus?: string;
+  autopay_status?: string;
+  autopay_authorized?: boolean;
   error?: string;
 }> {
   const res = await apiFetch('/api/razorpay/verify-subscription', {
@@ -1203,22 +1248,32 @@ export async function createTrialVerificationOrder(payload: {
   tier: 'starter' | 'growth' | 'pro';
   billing_cycle: 'monthly' | 'annual';
   isFoundingOffer?: boolean;
+  planEdition?: 'founding' | 'standard';
   currency?: 'USD' | 'INR';
+  consentAccepted?: boolean;
 }): Promise<{
   success: boolean;
   keyId: string;
-  orderId: string;
+  orderId?: string;
+  subscriptionId?: string;
+  planId?: string;
+  authMode?: 'subscription_mandate' | 'one_time_inr';
+  allowed_methods?: string[];
   amount: number;
   amountCents?: number;
   amountUsd?: number;
   currency: string;
+  verification_currency?: string;
   exchange_rate?: number;
   tier: string;
   billing_cycle: string;
+  planEdition?: 'founding' | 'standard';
   plan_name: string;
   formatted_amount: string;
   future_plan_price: number;
   trial_days: number;
+  next_billing_at?: string;
+  mandate_disclosure?: string;
   error?: string;
 }> {
   const token = getStoredAuthToken();
@@ -1236,7 +1291,8 @@ export async function createTrialVerificationOrder(payload: {
 
 export async function verifyTrialPayment(payload: {
   razorpay_payment_id: string;
-  razorpay_order_id: string;
+  razorpay_order_id?: string;
+  razorpay_subscription_id?: string;
   razorpay_signature: string;
 }): Promise<{
   success: boolean;
@@ -1245,7 +1301,17 @@ export async function verifyTrialPayment(payload: {
   trial_started: boolean;
   tier: string;
   billing_cycle: string;
+  plan_edition?: 'founding' | 'standard';
   trial_ends_at: string;
+  payment_captured?: boolean;
+  autopay_authorized?: boolean;
+  autopay_status?: 'not_established' | 'pending' | 'authenticated' | 'active' | 'failed' | 'cancelled' | 'expired';
+  mandate_status?: string;
+  retry_required?: boolean;
+  mandate_id?: string;
+  token_id?: string;
+  payment_method_type?: string;
+  mandate_failure_reason?: string;
   subscription?: any;
   error?: string;
 }> {
@@ -1260,6 +1326,42 @@ export async function verifyTrialPayment(payload: {
     body: JSON.stringify(payload)
   });
   return await parseJsonResponse(res, 'Trial verification payment failed to verify');
+}
+
+export async function retryMandateAuthorization(payload: {
+  tier?: 'starter' | 'growth' | 'pro';
+  billing_cycle?: 'monthly' | 'annual';
+  planEdition?: 'founding' | 'standard';
+  consentAccepted: boolean;
+}): Promise<{
+  success: boolean;
+  keyId: string;
+  subscriptionId: string;
+  planId: string;
+  authMode: 'subscription_mandate';
+  allowed_methods?: string[];
+  tier: string;
+  billing_cycle: string;
+  planEdition?: 'founding' | 'standard';
+  verification_fee_waived?: boolean;
+  amount: number;
+  currency: string;
+  trial_ends_at?: string;
+  mandate_disclosure?: string;
+  message?: string;
+  error?: string;
+}> {
+  const token = getStoredAuthToken();
+  const res = await apiFetch('/api/billing/retry-mandate', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify(payload)
+  });
+  return await parseJsonResponse(res, 'Failed to initiate recurring Autopay retry');
 }
 
 export async function activateSubscription(payload: {
@@ -1287,9 +1389,34 @@ export async function activateSubscription(payload: {
 export async function fetchSubscriptionDetails(): Promise<{
   success: boolean;
   workspaceId: string;
+  tier?: string;
+  planEdition?: 'founding' | 'standard';
+  editionLabel?: string;
+  editionMarketing?: { id: string; label: string; shortLabel: string; badge: string; description: string };
+  agreedPriceUsd?: number;
+  foundingEligibility?: {
+    eligible: boolean;
+    enabled: boolean;
+    isExistingFounding: boolean;
+  };
+  limits?: any;
   subscription: any;
   trialVerification: any;
   currentPlan: any;
+  autopay?: {
+    status: string;
+    authorized: boolean;
+    mandateId?: string;
+    tokenId?: string;
+    paymentMethodType?: string;
+    authorizedAt?: string;
+    nextBillingAt?: string;
+    failureReason?: string;
+    billingFrequency?: string;
+    verificationAmountUsd?: number;
+    futureRecurringAmountUsd?: number;
+    cardOnlyForUsd?: boolean;
+  };
   trialEndBehavior: string;
   plans: any[];
 }> {
@@ -1770,6 +1897,54 @@ export async function submitContactForm(payload: {
   return await parseJsonResponse(res, 'Failed to submit support message');
 }
 
+export interface ServerSessionInfo {
+  id: string;
+  isCurrent: boolean;
+  authProvider: 'session' | 'firebase';
+  createdAt: string;
+  expiresAt: string;
+  workspaceId: string;
+}
+
+export async function fetchActiveSessions(): Promise<{
+  success: boolean;
+  sessions: ServerSessionInfo[];
+  trackingCapabilities?: {
+    deviceMetadataTracked: boolean;
+    ipAddressTracked: boolean;
+    geolocationTracked: boolean;
+  };
+}> {
+  const res = await apiFetch('/api/auth/sessions', {
+    headers: getAuthHeaders()
+  });
+  return parseJsonResponse(res, 'Failed to retrieve active sessions');
+}
+
+export async function revokeServerSession(sessionId: string): Promise<{
+  success: boolean;
+  loggedOutCurrent?: boolean;
+  message: string;
+}> {
+  const res = await apiFetch(`/api/auth/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders()
+  });
+  return parseJsonResponse(res, 'Failed to revoke session');
+}
+
+export async function revokeOtherServerSessions(): Promise<{
+  success: boolean;
+  revokedCount: number;
+  message: string;
+}> {
+  const res = await apiFetch('/api/auth/sessions/revoke-others', {
+    method: 'POST',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' })
+  });
+  return parseJsonResponse(res, 'Failed to revoke other sessions');
+}
+
 export const apiService = {
   fetchHealth,
   fetchCustomers,
@@ -1849,6 +2024,7 @@ export const apiService = {
   cancelTrial,
   cancelRazorpaySubscription,
   upgradePlan,
+  upgradePlanEdition,
   addPaymentMethod,
   fetchPaymentMethods,
   deletePaymentMethod,
@@ -1866,6 +2042,7 @@ export const apiService = {
   verifyRazorpaySubscription,
   createTrialVerificationOrder,
   verifyTrialPayment,
+  retryMandateAuthorization,
   activateSubscription,
   fetchSubscriptionDetails,
   fetchImportHistory,

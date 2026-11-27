@@ -1,4 +1,11 @@
 import { Customer, RiskCategory } from '../types';
+import {
+  getCanonicalRiskCategory,
+  isAtRiskScore,
+  isCriticalRiskScore,
+  isMediumRiskScore,
+  isLowRiskScore
+} from '../config/riskThresholds';
 
 export interface RiskDistribution {
   high: { count: number; percent: number; mrr: number };
@@ -11,7 +18,7 @@ export interface RiskDistribution {
 export interface ROIConfig {
   highRiskSaveRate: number; // e.g. 0.20 (20%)
   mediumRiskSaveRate: number; // e.g. 0.10 (10%)
-  monthlyCost: number; // e.g. 299 (USD)
+  monthlyCost: number; // e.g. 79 (Growth plan USD)
   period: 'monthly' | 'annual';
 }
 
@@ -86,16 +93,14 @@ export function deduplicateCustomers(customers: Customer[]): Customer[] {
 }
 
 /**
- * Determines the risk level category based on risk score:
- * - High: >= 80
- * - Medium: 50–79
- * - Low: < 50
+ * Determines the canonical risk level category based on risk score:
+ * - Critical: >= 86
+ * - High:     61–85
+ * - Medium:   31–60
+ * - Low:      0–30
  */
 export function getRiskLevel(score: number | null): RiskCategory {
-  if (score === null || score === undefined) return 'Low';
-  if (score >= 80) return 'Critical';
-  if (score >= 50) return 'Medium';
-  return 'Low';
+  return getCanonicalRiskCategory(score);
 }
 
 /**
@@ -115,35 +120,46 @@ export function getTotalMRR(customers: Customer[]): number {
 }
 
 /**
- * High-risk customer cohort (risk_score >= 80).
+ * At-risk / high-risk customer cohort (risk_score >= 61, covering High 61–85 and Critical 86–100).
  */
 export function getHighRiskCustomers(customers: Customer[]): Customer[] {
   if (!Array.isArray(customers)) return [];
   return deduplicateCustomers(customers).filter(c => {
     const score = getSafeRiskScore(c);
-    return score !== null && score >= 80;
+    return score !== null && isAtRiskScore(score);
   });
 }
 
 /**
- * Medium-risk customer cohort (risk_score >= 50 and <= 79).
+ * Critical-risk customer cohort (risk_score >= 86).
+ */
+export function getCriticalRiskCustomers(customers: Customer[]): Customer[] {
+  if (!Array.isArray(customers)) return [];
+  return deduplicateCustomers(customers).filter(c => {
+    const score = getSafeRiskScore(c);
+    return score !== null && isCriticalRiskScore(score);
+  });
+}
+
+/**
+ * Medium-risk customer cohort (risk_score 31–60).
  */
 export function getMediumRiskCustomers(customers: Customer[]): Customer[] {
   if (!Array.isArray(customers)) return [];
   return deduplicateCustomers(customers).filter(c => {
     const score = getSafeRiskScore(c);
-    return score !== null && score >= 50 && score < 80;
+    return score !== null && isMediumRiskScore(score);
   });
 }
 
 /**
- * Low-risk customer cohort (risk_score < 50 or unscored).
+ * Low-risk customer cohort (risk_score 0–30 or unscored).
  */
 export function getLowRiskCustomers(customers: Customer[]): Customer[] {
   if (!Array.isArray(customers)) return [];
   return deduplicateCustomers(customers).filter(c => {
     const score = getSafeRiskScore(c);
-    return score === null || score < 50;
+    return score === null || isLowRiskScore(score);
   });
 }
 
@@ -239,17 +255,17 @@ export function getAverageRiskScore(customers: Customer[]): number {
 
 /**
  * Customers Needing Action:
- * All high-risk accounts (score >= 80) plus medium-risk accounts (score 50–79) due for renewal within 30 days.
+ * All at-risk accounts (score >= 61) plus medium-risk accounts (score 31–60) due for renewal within 30 days.
  */
 export function getCustomersNeedingAction(customers: Customer[]): Customer[] {
   if (!Array.isArray(customers)) return [];
   return customers.filter(c => {
     if (c.status === 'saved') return false;
     const score = getSafeRiskScore(c);
-    if (score !== null && score >= 80) return true;
-    
+    if (score !== null && isAtRiskScore(score)) return true;
+
     // Medium risk with upcoming renewal
-    if (score !== null && score >= 50) {
+    if (score !== null && isMediumRiskScore(score)) {
       const renewalDays = c.renewalDaysLeft ?? (c as any).contractRenewalDays;
       if (renewalDays !== undefined && renewalDays <= 30) return true;
       if (c.renewal_date) {
@@ -363,7 +379,7 @@ export function getROIInsights(
   const config: ROIConfig = {
     highRiskSaveRate: customConfig?.highRiskSaveRate ?? 0.20,
     mediumRiskSaveRate: customConfig?.mediumRiskSaveRate ?? 0.10,
-    monthlyCost: customConfig?.monthlyCost ?? 4999,
+    monthlyCost: customConfig?.monthlyCost ?? 79,
     period: customConfig?.period ?? 'monthly'
   };
 

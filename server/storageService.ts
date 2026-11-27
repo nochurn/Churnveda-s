@@ -55,7 +55,9 @@ const DANGEROUS_EXTENSIONS = new Set([
   '.js', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.rb', '.jar', '.war'
 ]);
 
-const LOCAL_STORAGE_ROOT = path.resolve(process.cwd(), 'data', 'storage');
+const LOCAL_STORAGE_ROOT = process.env.CHURNVEDA_DATA_DIR?.trim()
+  ? path.resolve(process.env.CHURNVEDA_DATA_DIR.trim(), 'storage')
+  : path.resolve(process.cwd(), 'data', 'storage');
 const EPHEMERAL_SIGNING_SECRET = crypto.randomBytes(32).toString('hex');
 
 let cachedStorageAvailable: boolean | null = null;

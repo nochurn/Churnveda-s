@@ -705,20 +705,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between gap-3">
               <div>
                 <strong className="text-gray-900 font-bold block">Two-Factor Authentication (2FA)</strong>
-                <span className="text-gray-500 text-[11px]">Extra verification layer for workspace sign-in</span>
+                <span className="text-gray-500 text-[11px]">Workspace TOTP enrollment is pending server schema rollout</span>
               </div>
               <div className="flex items-center gap-2">
-                <span className={`px-2 py-0.5 font-bold text-[11px] rounded-full ${
-                  currentUser?.twoFactorEnabled ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
-                }`}>
-                  {currentUser?.twoFactorEnabled ? 'Enabled' : 'Inactive'}
+                <span className="px-2 py-0.5 font-bold text-[11px] rounded-full bg-amber-100 text-amber-800">
+                  Unavailable
                 </span>
                 <button
                   type="button"
                   onClick={() => onNavigate('security')}
                   className="px-2.5 py-1 bg-white hover:bg-gray-100 border border-gray-200 rounded-lg text-[11px] font-semibold text-blue-900 cursor-pointer"
                 >
-                  Configure
+                  Security Center
                 </button>
               </div>
             </div>

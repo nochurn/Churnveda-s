@@ -20,12 +20,18 @@ import {
 import { authService, validatePasswordRequirements } from '../../services/authService';
 import { apiService, setStoredAuthToken } from '../../services/api';
 import {
-  AUTHORITATIVE_PLANS,
   buildRazorpayOneTimeOptions,
-  buildRazorpaySubscriptionOptions
+  buildRazorpaySubscriptionOptions,
+  getAuthoritativePlan
 } from '../../services/razorpayConfig';
 import { ensureRazorpaySdk } from '../../services/razorpaySdk';
-import { CENTRAL_PRICING } from '../../config/pricing';
+import {
+  CENTRAL_PRICING,
+  getEditionLabel,
+  getEditionMarketing,
+  normalizePlanEdition,
+  PlanEdition
+} from '../../config/pricing';
 
 interface SignupViewProps {
   onNavigate: (view: string, queryParams?: Record<string, string>) => void;
@@ -86,10 +92,12 @@ export const SignupView: React.FC<SignupViewProps> = ({
     const rPlan = routeParams ? routeParams['plan'] : undefined;
     const rPrice = routeParams ? routeParams['price'] : undefined;
     const rBilling = routeParams ? (routeParams['billing'] || routeParams['billing-cycle']) : undefined;
+    const rEdition = routeParams ? (routeParams['edition'] || routeParams['offer']) : undefined;
 
     let pPlan = rPlan || initialPlan;
     let pPrice = rPrice;
     let pBilling = rBilling;
+    let pEdition = rEdition;
 
     if (typeof window !== 'undefined') {
       const searchParams = new URLSearchParams(window.location.search);
@@ -97,6 +105,8 @@ export const SignupView: React.FC<SignupViewProps> = ({
       if (!pPrice && searchParams.get('price')) pPrice = searchParams.get('price');
       if (!pBilling && searchParams.get('billing')) pBilling = searchParams.get('billing');
       if (!pBilling && searchParams.get('billing-cycle')) pBilling = searchParams.get('billing-cycle');
+      if (!pEdition && searchParams.get('edition')) pEdition = searchParams.get('edition') || undefined;
+      if (!pEdition && searchParams.get('offer')) pEdition = searchParams.get('offer') || undefined;
 
       if (window.location.hash && window.location.hash.includes('?')) {
         const hashQuery = window.location.hash.split('?')[1];
@@ -105,23 +115,37 @@ export const SignupView: React.FC<SignupViewProps> = ({
         if (!pPrice && hashParams.get('price')) pPrice = hashParams.get('price');
         if (!pBilling && hashParams.get('billing')) pBilling = hashParams.get('billing');
         if (!pBilling && hashParams.get('billing-cycle')) pBilling = hashParams.get('billing-cycle');
+        if (!pEdition && hashParams.get('edition')) pEdition = hashParams.get('edition') || undefined;
+        if (!pEdition && hashParams.get('offer')) pEdition = hashParams.get('offer') || undefined;
       }
     }
 
     const cleanPlan = (pPlan || 'growth').toLowerCase();
     const validPlan = ['starter', 'growth', 'pro'].includes(cleanPlan) ? cleanPlan : 'growth';
+    const validEdition: PlanEdition = normalizePlanEdition(pEdition || 'standard', 'standard');
 
     let validBilling: 'monthly' | 'annual' = 'monthly';
-    if (pBilling === 'annual' || pPrice === '468' || pPrice === '1428' || pPrice === '4788') {
+    if (
+      pBilling === 'annual' ||
+      pPrice === '190' ||
+      pPrice === '290' ||
+      pPrice === '590' ||
+      pPrice === '790' ||
+      pPrice === '3490' ||
+      pPrice === '468' ||
+      pPrice === '1428' ||
+      pPrice === '4788'
+    ) {
       validBilling = 'annual';
     }
 
-    return { plan: validPlan, billing: validBilling, price: pPrice };
+    return { plan: validPlan, billing: validBilling, price: pPrice, edition: validEdition };
   };
 
   const initialRouteData = extractParams();
   const [selectedPlan, setSelectedPlan] = useState<string>(initialRouteData.plan);
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'annual'>(initialRouteData.billing);
+  const [planEdition, setPlanEdition] = useState<PlanEdition>(initialRouteData.edition);
 
   // Form input fields
   const [name, setName] = useState('');
@@ -173,7 +197,10 @@ export const SignupView: React.FC<SignupViewProps> = ({
     if (updated.billing) {
       setBillingCycle(updated.billing);
     }
-  }, [routeParams ? routeParams['plan'] : undefined, routeParams ? routeParams['price'] : undefined, routeParams ? routeParams['billing'] : undefined, initialPlan]);
+    if (updated.edition) {
+      setPlanEdition(updated.edition);
+    }
+  }, [routeParams ? routeParams['plan'] : undefined, routeParams ? routeParams['price'] : undefined, routeParams ? routeParams['billing'] : undefined, routeParams ? routeParams['edition'] : undefined, initialPlan]);
 
   // Validation and Touched State
   const [touched, setTouched] = useState<Record<string, boolean>>({});
@@ -206,7 +233,15 @@ export const SignupView: React.FC<SignupViewProps> = ({
     agreedToTerms
   );
 
-  const currentPlanConfig = PLAN_CONFIGS[selectedPlan] || PLAN_CONFIGS.growth;
+  const authoritativePlan = getAuthoritativePlan(selectedPlan, planEdition);
+  const currentPlanConfig = {
+    id: (selectedPlan === 'starter' || selectedPlan === 'pro' ? selectedPlan : 'growth') as 'starter' | 'growth' | 'pro',
+    name: authoritativePlan.name,
+    monthlyPrice: authoritativePlan.monthlyPrice,
+    annualPrice: authoritativePlan.annualTotalPrice,
+    annualMonthlyRate: authoritativePlan.annualPrice
+  };
+  const editionMarketing = getEditionMarketing(planEdition);
   const currentPrice = billingCycle === 'annual' ? currentPlanConfig.annualPrice : currentPlanConfig.monthlyPrice;
 
   // Pay $1 & Start Free / Annual Trial
@@ -234,6 +269,7 @@ export const SignupView: React.FC<SignupViewProps> = ({
         phone: phone.trim() || undefined,
         password,
         plan: selectedPlan,
+        planEdition,
         billingCycle: billingCycle as 'monthly' | 'annual'
       });
 
@@ -299,6 +335,7 @@ export const SignupView: React.FC<SignupViewProps> = ({
         phone: phone.trim() || undefined,
         agreedToTerms,
         selectedPlan,
+        planEdition,
         billingCycle,
         isFreeTrial: false
       });
@@ -327,7 +364,9 @@ export const SignupView: React.FC<SignupViewProps> = ({
           plan: normalizedTier,
           billingCycle: 'annual',
           customerName,
-          customerEmail
+          customerEmail,
+          planEdition,
+          isFoundingOffer: planEdition === 'founding'
         });
 
         if (!orderRes.success || !orderRes.orderId) {
@@ -341,7 +380,7 @@ export const SignupView: React.FC<SignupViewProps> = ({
           amountCents: orderRes.amount,
           amount: orderRes.amount,
           currency: orderCurrency,
-          description: `${(AUTHORITATIVE_PLANS[normalizedTier]?.name || normalizedTier).toUpperCase()} Plan (Annual)`,
+          description: `${authoritativePlan.name.toUpperCase()} (${getEditionLabel(planEdition)}) - Annual`,
           customerName,
           customerEmail,
           customerPhone: phone.trim() || undefined,
@@ -355,11 +394,15 @@ export const SignupView: React.FC<SignupViewProps> = ({
                 billingCycle: 'annual',
                 amount: orderRes.amount,
                 currency: orderCurrency,
+                planEdition,
+                isFoundingOffer: planEdition === 'founding',
                 email: customerEmail
               });
 
               if (verifyRes.success) {
-                authService.updateSubscriptionState('active', normalizedTier);
+                authService.updateSubscriptionState('active', normalizedTier, {
+                  planEdition: verifyRes.planEdition || planEdition
+                });
                 authService.clearPendingPlan();
                 onShowToast('Payment verified! Your annual Churnveda subscription is now active.', 'success');
                 onAuthenticated();
@@ -396,7 +439,9 @@ export const SignupView: React.FC<SignupViewProps> = ({
       // 2B. Create server-side recurring Razorpay Subscription for Monthly billing
       const sub = await apiService.createRazorpaySubscription({
         tier: normalizedTier,
-        billing_cycle: 'monthly'
+        billing_cycle: 'monthly',
+        planEdition,
+        consentAccepted: true
       });
 
       if (!sub.success || !sub.subscriptionId) {
@@ -406,10 +451,11 @@ export const SignupView: React.FC<SignupViewProps> = ({
       const options = buildRazorpaySubscriptionOptions({
         keyId: sub.keyId,
         subscriptionId: sub.subscriptionId,
-        planName: (AUTHORITATIVE_PLANS[normalizedTier]?.name || normalizedTier).toUpperCase(),
+        planName: `${authoritativePlan.name.toUpperCase()} (${getEditionLabel(planEdition)})`,
         customerName,
         customerEmail,
         customerPhone: phone.trim() || undefined,
+        cardOnly: true,
         handler: async (response: any) => {
           try {
             const verifyRes = await apiService.verifyRazorpaySubscription({
@@ -418,11 +464,15 @@ export const SignupView: React.FC<SignupViewProps> = ({
               razorpay_signature: response.razorpay_signature,
               tier: normalizedTier,
               billing_cycle: 'monthly',
+              planEdition,
               email: customerEmail
             });
 
             if (verifyRes.success) {
-              authService.updateSubscriptionState('active', normalizedTier);
+              authService.updateSubscriptionState('active', normalizedTier, {
+                planEdition: verifyRes.planEdition || planEdition,
+                autopayStatus: (verifyRes.autopay_status as any) || 'active'
+              });
               authService.clearPendingPlan();
               onShowToast('Subscription verified! Your Churnveda workspace is now active.', 'success');
               onAuthenticated();
@@ -533,12 +583,12 @@ export const SignupView: React.FC<SignupViewProps> = ({
               <div className="flex items-center gap-2">
                 <div className="w-2.5 h-2.5 rounded-full bg-blue-600 animate-pulse" />
                 <span className="font-bold text-blue-950 text-sm">
-                  Selected plan: {(AUTHORITATIVE_PLANS[selectedPlan] || AUTHORITATIVE_PLANS.growth).name}
+                  Selected plan: {authoritativePlan.name} ({getEditionLabel(planEdition)})
                 </span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                  14-Day Free Trial
+                  {editionMarketing.badge}
                 </span>
                 <button
                   type="button"
@@ -556,8 +606,8 @@ export const SignupView: React.FC<SignupViewProps> = ({
                 <span className="text-gray-500 block text-[11px]">Pricing after trial:</span>
                 <strong className="text-gray-900 font-bold text-sm">
                   {billingCycle === 'annual'
-                    ? (AUTHORITATIVE_PLANS[selectedPlan] || AUTHORITATIVE_PLANS.growth).formattedAnnual
-                    : (AUTHORITATIVE_PLANS[selectedPlan] || AUTHORITATIVE_PLANS.growth).formattedMonthly}
+                    ? authoritativePlan.formattedAnnual
+                    : authoritativePlan.formattedMonthly}
                 </strong>
               </div>
               <div>
@@ -681,7 +731,7 @@ export const SignupView: React.FC<SignupViewProps> = ({
                   Selected Plan (Prefilled)
                 </span>
                 <span className="text-sm font-bold text-gray-900">
-                  {currentPlanConfig.name} Tier
+                  {currentPlanConfig.name} ({getEditionLabel(planEdition)})
                 </span>
                 <span className="text-xs text-gray-600 ml-2">
                   ${currentPrice.toLocaleString('en-US')}{billingCycle === 'annual' ? '/year' : '/month'} ({billingCycle === 'annual' ? 'Annual' : 'Monthly'})

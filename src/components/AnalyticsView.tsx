@@ -22,6 +22,12 @@ import {
   getPlanDistribution,
   getPaymentStatusDistribution
 } from '../utils/customerSelectors';
+import {
+  isCriticalRiskScore,
+  isHighRiskScore,
+  isMediumRiskScore,
+  isLowRiskScore
+} from '../config/riskThresholds';
 
 interface AnalyticsViewProps {
   customers: Customer[];
@@ -35,20 +41,11 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ customers, onNavig
   const planDist = getPlanDistribution(customers);
   const paymentDist = getPaymentStatusDistribution(customers);
 
-  // Exact 4 cohorts from live customer dataset
-  const critical = customers.filter(c => (c.risk_score ?? c.riskScore) >= 80);
-  const high = customers.filter(c => {
-    const s = c.risk_score ?? c.riskScore;
-    return s >= 60 && s < 80;
-  });
-  const medium = customers.filter(c => {
-    const s = c.risk_score ?? c.riskScore;
-    return s >= 30 && s < 60;
-  });
-  const low = customers.filter(c => {
-    const s = c.risk_score ?? c.riskScore;
-    return s < 30;
-  });
+  // Exact 4 canonical cohorts from live customer dataset
+  const critical = customers.filter(c => isCriticalRiskScore(c.risk_score ?? c.riskScore));
+  const high = customers.filter(c => isHighRiskScore(c.risk_score ?? c.riskScore));
+  const medium = customers.filter(c => isMediumRiskScore(c.risk_score ?? c.riskScore));
+  const low = customers.filter(c => isLowRiskScore(c.risk_score ?? c.riskScore));
 
   const criticalMrr = Math.round(critical.reduce((sum, c) => sum + (c.mrr || 0), 0));
   const highMrr = Math.round(high.reduce((sum, c) => sum + (c.mrr || 0), 0));
@@ -143,7 +140,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ customers, onNavig
         <div className="bg-white p-4 rounded-xl border border-red-200 shadow-xs flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold uppercase text-red-700">Critical (80-100)</span>
+              <span className="text-xs font-bold uppercase text-red-700">Critical (86-100)</span>
               <Flame className="w-4 h-4 text-red-600" />
             </div>
             <div className="text-2xl font-black text-red-600 font-mono tabular-nums mt-2">
@@ -160,7 +157,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ customers, onNavig
         <div className="bg-white p-4 rounded-xl border border-orange-200 shadow-xs flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold uppercase text-orange-700">High Risk (60-79)</span>
+              <span className="text-xs font-bold uppercase text-orange-700">High Risk (61-85)</span>
               <AlertTriangle className="w-4 h-4 text-orange-600" />
             </div>
             <div className="text-2xl font-black text-orange-600 font-mono tabular-nums mt-2">
@@ -177,7 +174,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ customers, onNavig
         <div className="bg-white p-4 rounded-xl border border-amber-200 shadow-xs flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold uppercase text-amber-800">Medium Risk (30-59)</span>
+              <span className="text-xs font-bold uppercase text-amber-800">Medium Risk (31-60)</span>
               <TrendingDown className="w-4 h-4 text-amber-600" />
             </div>
             <div className="text-2xl font-black text-amber-700 font-mono tabular-nums mt-2">
@@ -194,7 +191,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ customers, onNavig
         <div className="bg-white p-4 rounded-xl border border-emerald-200 shadow-xs flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold uppercase text-emerald-800">Low Risk (&lt; 30)</span>
+              <span className="text-xs font-bold uppercase text-emerald-800">Low Risk (&lt; 31)</span>
               <CheckCircle2 className="w-4 h-4 text-emerald-600" />
             </div>
             <div className="text-2xl font-black text-emerald-700 font-mono tabular-nums mt-2">

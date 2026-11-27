@@ -9,7 +9,7 @@
  * - Wallets (Paytm, PhonePe, Mobikwik, Amazon Pay, Freecharge)
  */
 
-import { CENTRAL_PRICING, FOUNDING_OFFER_CONFIG } from '../config/pricing';
+import { CENTRAL_PRICING, FOUNDING_OFFER_CONFIG, getPlanPricing, PlanEdition } from '../config/pricing';
 
 export { FOUNDING_OFFER_CONFIG };
 
@@ -43,111 +43,71 @@ export const oneTimePaymentMethods: RazorpayPaymentMethodConfig = {
  * Standard required disclosures
  */
 export const ONE_TIME_PAYMENT_DISCLOSURE =
-  'Pay securely via debit/credit card, netbanking, UPI, or wallet in USD.';
+  'One-time payment via debit/credit card, netbanking, UPI, or wallet.';
+
+export const USD_RECURRING_CARD_DISCLOSURE =
+  'USD recurring billing authorizes a Razorpay Subscription mandate on Visa, Mastercard, or Amex cards (UPI AutoPay is not supported for USD recurring billing).';
 
 export const MONTHLY_RECURRING_DISCLOSURE =
-  'Monthly billing charged in USD on a 30-day recurring cycle.';
+  'Monthly billing charged in USD on a 30-day recurring card mandate cycle.';
 
-export const RECURRING_MANDATE_DISCLOSURE = MONTHLY_RECURRING_DISCLOSURE;
+export const RECURRING_MANDATE_DISCLOSURE = USD_RECURRING_CARD_DISCLOSURE;
+
+export interface AuthoritativePlanSummary {
+  name: string;
+  monthlyPrice: number;
+  annualPrice: number;
+  annualTotalPrice: number;
+  monthlyPriceInr: number;
+  annualTotalPriceInr: number;
+  formattedMonthly: string;
+  formattedAnnual: string;
+  formattedMonthlyInr: string;
+  formattedAnnualInr: string;
+  checkoutMonthlyLabel: string;
+  checkoutAnnualLabel: string;
+  checkoutMonthlyLabelInr: string;
+  checkoutAnnualLabelInr: string;
+}
+
+export function getAuthoritativePlan(
+  tier?: string,
+  edition: PlanEdition | string | boolean | null = 'standard'
+): AuthoritativePlanSummary {
+  const p = getPlanPricing(tier, edition);
+  return {
+    name: p.displayName,
+    monthlyPrice: p.monthly.amountUsd,
+    annualPrice: p.annual.monthlyEquivalentUsd,
+    annualTotalPrice: p.annual.totalAmountUsd,
+    monthlyPriceInr: p.monthly.amountInr,
+    annualTotalPriceInr: p.annual.totalAmountInr,
+    formattedMonthly: p.monthly.formatted,
+    formattedAnnual: p.annual.formatted,
+    formattedMonthlyInr: p.monthly.formattedInr,
+    formattedAnnualInr: p.annual.formattedInr,
+    checkoutMonthlyLabel: p.monthly.checkoutLabel,
+    checkoutAnnualLabel: p.annual.checkoutLabel,
+    checkoutMonthlyLabelInr: p.monthly.checkoutLabelInr,
+    checkoutAnnualLabelInr: p.annual.checkoutLabelInr
+  };
+}
 
 /**
- * Authoritative pricing lookup (USD) derived directly from centralized pricing
- * Starter: $49/mo, $468/yr ($39/mo)
- * Growth: $149/mo, $1,428/yr ($119/mo)
- * Enterprise: $349/mo, $3,490/yr ($291/mo)
+ * Authoritative Standard (Regular Pricing) lookup (USD) derived directly from centralized pricing
+ * Starter: $29/mo ($290/yr) | Growth: $79/mo ($790/yr) | Enterprise: $349/mo ($3,490/yr)
+ * Use getAuthoritativePlan(tier, edition) when Founding Member Edition pricing may apply.
  */
-export const AUTHORITATIVE_PLANS: Record<
-  string,
-  {
-    name: string;
-    monthlyPrice: number;
-    annualPrice: number;
-    annualTotalPrice: number;
-    monthlyPriceInr: number;
-    annualTotalPriceInr: number;
-    formattedMonthly: string;
-    formattedAnnual: string;
-    formattedMonthlyInr: string;
-    formattedAnnualInr: string;
-    checkoutMonthlyLabel: string;
-    checkoutAnnualLabel: string;
-    checkoutMonthlyLabelInr: string;
-    checkoutAnnualLabelInr: string;
-  }
-> = {
-  starter: {
-    name: CENTRAL_PRICING.starter.displayName,
-    monthlyPrice: CENTRAL_PRICING.starter.monthly.amountUsd,
-    annualPrice: CENTRAL_PRICING.starter.annual.monthlyEquivalentUsd,
-    annualTotalPrice: CENTRAL_PRICING.starter.annual.totalAmountUsd,
-    monthlyPriceInr: CENTRAL_PRICING.starter.monthly.amountInr,
-    annualTotalPriceInr: CENTRAL_PRICING.starter.annual.totalAmountInr,
-    formattedMonthly: CENTRAL_PRICING.starter.monthly.formatted,
-    formattedAnnual: CENTRAL_PRICING.starter.annual.formatted,
-    formattedMonthlyInr: CENTRAL_PRICING.starter.monthly.formattedInr,
-    formattedAnnualInr: CENTRAL_PRICING.starter.annual.formattedInr,
-    checkoutMonthlyLabel: CENTRAL_PRICING.starter.monthly.checkoutLabel,
-    checkoutAnnualLabel: CENTRAL_PRICING.starter.annual.checkoutLabel,
-    checkoutMonthlyLabelInr: CENTRAL_PRICING.starter.monthly.checkoutLabelInr,
-    checkoutAnnualLabelInr: CENTRAL_PRICING.starter.annual.checkoutLabelInr
-  },
-  growth: {
-    name: CENTRAL_PRICING.growth.displayName,
-    monthlyPrice: CENTRAL_PRICING.growth.monthly.amountUsd,
-    annualPrice: CENTRAL_PRICING.growth.annual.monthlyEquivalentUsd,
-    annualTotalPrice: CENTRAL_PRICING.growth.annual.totalAmountUsd,
-    monthlyPriceInr: CENTRAL_PRICING.growth.monthly.amountInr,
-    annualTotalPriceInr: CENTRAL_PRICING.growth.annual.totalAmountInr,
-    formattedMonthly: CENTRAL_PRICING.growth.monthly.formatted,
-    formattedAnnual: CENTRAL_PRICING.growth.annual.formatted,
-    formattedMonthlyInr: CENTRAL_PRICING.growth.monthly.formattedInr,
-    formattedAnnualInr: CENTRAL_PRICING.growth.annual.formattedInr,
-    checkoutMonthlyLabel: CENTRAL_PRICING.growth.monthly.checkoutLabel,
-    checkoutAnnualLabel: CENTRAL_PRICING.growth.annual.checkoutLabel,
-    checkoutMonthlyLabelInr: CENTRAL_PRICING.growth.monthly.checkoutLabelInr,
-    checkoutAnnualLabelInr: CENTRAL_PRICING.growth.annual.checkoutLabelInr
-  },
-  pro: {
-    name: CENTRAL_PRICING.pro.displayName,
-    monthlyPrice: CENTRAL_PRICING.pro.monthly.amountUsd,
-    annualPrice: CENTRAL_PRICING.pro.annual.monthlyEquivalentUsd,
-    annualTotalPrice: CENTRAL_PRICING.pro.annual.totalAmountUsd,
-    monthlyPriceInr: CENTRAL_PRICING.pro.monthly.amountInr,
-    annualTotalPriceInr: CENTRAL_PRICING.pro.annual.totalAmountInr,
-    formattedMonthly: CENTRAL_PRICING.pro.monthly.formatted,
-    formattedAnnual: CENTRAL_PRICING.pro.annual.formatted,
-    formattedMonthlyInr: CENTRAL_PRICING.pro.monthly.formattedInr,
-    formattedAnnualInr: CENTRAL_PRICING.pro.annual.formattedInr,
-    checkoutMonthlyLabel: CENTRAL_PRICING.pro.monthly.checkoutLabel,
-    checkoutAnnualLabel: CENTRAL_PRICING.pro.annual.checkoutLabel,
-    checkoutMonthlyLabelInr: CENTRAL_PRICING.pro.monthly.checkoutLabelInr,
-    checkoutAnnualLabelInr: CENTRAL_PRICING.pro.annual.checkoutLabelInr
-  },
-  enterprise: {
-    name: CENTRAL_PRICING.pro.displayName,
-    monthlyPrice: CENTRAL_PRICING.pro.monthly.amountUsd,
-    annualPrice: CENTRAL_PRICING.pro.annual.monthlyEquivalentUsd,
-    annualTotalPrice: CENTRAL_PRICING.pro.annual.totalAmountUsd,
-    monthlyPriceInr: CENTRAL_PRICING.pro.monthly.amountInr,
-    annualTotalPriceInr: CENTRAL_PRICING.pro.annual.totalAmountInr,
-    formattedMonthly: CENTRAL_PRICING.pro.monthly.formatted,
-    formattedAnnual: CENTRAL_PRICING.pro.annual.formatted,
-    formattedMonthlyInr: CENTRAL_PRICING.pro.monthly.formattedInr,
-    formattedAnnualInr: CENTRAL_PRICING.pro.annual.formattedInr,
-    checkoutMonthlyLabel: CENTRAL_PRICING.pro.monthly.checkoutLabel,
-    checkoutAnnualLabel: CENTRAL_PRICING.pro.annual.checkoutLabel,
-    checkoutMonthlyLabelInr: CENTRAL_PRICING.pro.monthly.checkoutLabelInr,
-    checkoutAnnualLabelInr: CENTRAL_PRICING.pro.annual.checkoutLabelInr
-  }
+export const AUTHORITATIVE_PLANS: Record<string, AuthoritativePlanSummary> = {
+  starter: getAuthoritativePlan('starter', 'standard'),
+  growth: getAuthoritativePlan('growth', 'standard'),
+  pro: getAuthoritativePlan('pro', 'standard'),
+  enterprise: getAuthoritativePlan('pro', 'standard')
 };
 
 /**
  * Helper to build Razorpay Standard Checkout options for one-time payments
- * ($1 trial verification, Annual plan activation, One-time upgrade payments, Failed-payment retry)
- * Checkout display order:
- * 1. Card
- * 2. Netbanking
- * 3. UPI / Wallet
+ * ($1 verification / INR annual or one-time upgrade checkout)
  */
 export function buildRazorpayOneTimeOptions(params: {
   keyId: string;
@@ -221,8 +181,8 @@ export function buildRazorpayOneTimeOptions(params: {
 }
 
 /**
- * Helper to build Razorpay Checkout options for Recurring Subscriptions (Monthly)
- * Recurring payments require UPI AutoPay or card mandate
+ * Helper to build Razorpay Checkout options for Recurring Subscriptions & Trial Mandates.
+ * USD recurring mandates strictly restrict checkout to Card (`cardOnly: true` by default).
  */
 export function buildRazorpaySubscriptionOptions(params: {
   keyId: string;
@@ -233,6 +193,7 @@ export function buildRazorpaySubscriptionOptions(params: {
   customerName?: string;
   customerEmail?: string;
   customerPhone?: string;
+  cardOnly?: boolean;
   notes?: Record<string, string>;
   handler: (response: {
     razorpay_payment_id: string;
@@ -241,40 +202,50 @@ export function buildRazorpaySubscriptionOptions(params: {
   }) => void;
   onDismiss?: () => void;
 }) {
+  const useCardOnly = params.cardOnly !== false;
   return {
     key: params.keyId,
     subscription_id: params.subscriptionId,
     name: params.name || 'Churnveda',
-    description: params.description || (params.planName ? `${params.planName} Monthly Mandate` : 'Churnveda Monthly Mandate'),
+    description: params.description || (params.planName ? `${params.planName} Recurring Card Mandate` : 'Churnveda Recurring Card Mandate'),
     prefill: {
       name: params.customerName || 'Founder',
       email: params.customerEmail || 'founder@churnveda.com',
       contact: params.customerPhone || ''
     },
     notes: params.notes || {},
-    method: {
-      upi: true,
-      card: true,
-      netbanking: true,
-      wallet: false,
-      emi: false,
-      paylater: false
-    },
+    method: useCardOnly
+      ? {
+          card: true,
+          upi: false,
+          netbanking: false,
+          wallet: false,
+          emi: false,
+          paylater: false
+        }
+      : {
+          card: true,
+          upi: true,
+          netbanking: true,
+          wallet: false,
+          emi: false,
+          paylater: false
+        },
     config: {
       display: {
         blocks: {
           mandate: {
-            name: 'UPI AutoPay & Card Mandate',
-            instruments: [
-              { method: 'upi' },
-              { method: 'card' },
-              { method: 'netbanking' }
-            ]
+            name: useCardOnly
+              ? 'International & Domestic Card Mandate (Visa / Mastercard / Amex)'
+              : 'Card Mandate & UPI AutoPay',
+            instruments: useCardOnly
+              ? [{ method: 'card' }]
+              : [{ method: 'card' }, { method: 'upi' }, { method: 'netbanking' }]
           }
         },
         sequence: ['block.mandate'],
         preferences: {
-          show_default_blocks: true
+          show_default_blocks: !useCardOnly
         }
       }
     },

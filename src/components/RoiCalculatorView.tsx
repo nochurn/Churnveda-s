@@ -17,7 +17,7 @@ import {
   ArrowRight,
   AlertCircle
 } from 'lucide-react';
-import { Customer } from '../types';
+import { Customer, UserProfile } from '../types';
 import { formatCurrency } from '../utils/formatters';
 import {
   getROIInsights,
@@ -28,15 +28,19 @@ import {
   ROIConfig
 } from '../utils/customerSelectors';
 import { generateRoiPdfReport } from '../utils/generatePdfReport';
+import { getPlanPricing } from '../config/pricing';
+import { CHURN_RISK_THRESHOLDS } from '../config/riskThresholds';
 
 interface RoiCalculatorViewProps {
   customers: Customer[];
+  currentUser?: UserProfile | null;
   onShowToast?: (text: string, type?: 'success' | 'info' | 'error') => void;
   onNavigate?: (view: string) => void;
 }
 
 export const RoiCalculatorView: React.FC<RoiCalculatorViewProps> = ({
   customers,
+  currentUser,
   onShowToast,
   onNavigate
 }) => {
@@ -49,10 +53,15 @@ export const RoiCalculatorView: React.FC<RoiCalculatorViewProps> = ({
     return actualSaved.reduce((sum, c) => sum + (c.mrrProtected ?? c.mrr ?? 0), 0);
   }, [actualSaved]);
 
+  const defaultPlanCost = useMemo(() => {
+    const tier = currentUser?.plan || currentUser?.selectedPlan || 'growth';
+    return getPlanPricing(tier).monthly.amountUsd;
+  }, [currentUser?.plan, currentUser?.selectedPlan]);
+
   // Interactive ROI parameters
   const [highRiskSaveRate, setHighRiskSaveRate] = useState<number>(0.20); // 20%
   const [mediumRiskSaveRate, setMediumRiskSaveRate] = useState<number>(0.10); // 10%
-  const [monthlyCost, setMonthlyCost] = useState<number>(299); // $299 / mo USD
+  const [monthlyCost, setMonthlyCost] = useState<number>(defaultPlanCost);
   const [period, setPeriod] = useState<'monthly' | 'annual'>('monthly');
 
   // Compute live ROI insights strictly driven by canonical customer dataset
@@ -244,7 +253,7 @@ export const RoiCalculatorView: React.FC<RoiCalculatorViewProps> = ({
               className="w-full accent-blue-900 cursor-pointer"
             />
             <p className="text-[11px] text-gray-500">
-              Accounts scored &ge; 80 (High Risk pool: {formatCurrency(insights.highRiskMrr)})
+              Accounts scored &ge; {CHURN_RISK_THRESHOLDS.AT_RISK_MIN} (At-Risk pool: {formatCurrency(insights.highRiskMrr)})
             </p>
           </div>
 
@@ -266,7 +275,7 @@ export const RoiCalculatorView: React.FC<RoiCalculatorViewProps> = ({
               className="w-full accent-blue-900 cursor-pointer"
             />
             <p className="text-[11px] text-gray-500">
-              Accounts scored 50-79 (Medium Risk pool: {formatCurrency(insights.mediumRiskMrr)})
+              Accounts scored {CHURN_RISK_THRESHOLDS.MEDIUM_MIN}-{CHURN_RISK_THRESHOLDS.MEDIUM_MAX} (Medium Risk pool: {formatCurrency(insights.mediumRiskMrr)})
             </p>
           </div>
 
@@ -281,7 +290,7 @@ export const RoiCalculatorView: React.FC<RoiCalculatorViewProps> = ({
             <input
               type="number"
               min="0"
-              step="50"
+              step="10"
               value={monthlyCost}
               onChange={(e) => setMonthlyCost(Math.max(0, parseInt(e.target.value, 10) || 0))}
               className="w-full px-3 py-1.5 border border-gray-200 rounded-lg text-xs font-mono font-semibold"

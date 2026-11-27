@@ -101,7 +101,7 @@ export const RoadmapMetricsView: React.FC = () => {
       target: '≥ 30%',
       status: 'On Target',
       statusType: 'success',
-      desc: 'Free trial teams who upgrade to Growth ($299/mo) or Pro ($599/mo) plans.'
+      desc: 'Free trial teams who upgrade to Starter ($29/mo), Growth ($79/mo), or Enterprise ($349/mo) plans.'
     }
   ];
 

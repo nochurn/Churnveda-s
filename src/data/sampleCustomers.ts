@@ -1,10 +1,8 @@
 import { Customer, RiskCategory, RiskFactor, ChurnProbability, RetentionRecommendation } from '../types';
+import { getCanonicalRiskCategory } from '../config/riskThresholds';
 
 export function getCategory(score: number): RiskCategory {
-  if (score >= 86) return 'Critical';
-  if (score >= 61) return 'High';
-  if (score >= 31) return 'Medium';
-  return 'Low';
+  return getCanonicalRiskCategory(score);
 }
 
 export function createDefaultFactors(score: number, lastLoginDays: number, paymentStatus: string, usageTrend: number): RiskFactor[] {

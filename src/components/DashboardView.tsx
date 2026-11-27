@@ -24,6 +24,8 @@ import {
   getROIInsights,
   getRiskDistribution
 } from '../utils/customerSelectors';
+import { CHURN_RISK_THRESHOLDS, isAtRiskScore, isCriticalRiskScore } from '../config/riskThresholds';
+import { getPlanPricing } from '../config/pricing';
 
 interface DashboardViewProps {
   customers: Customer[];
@@ -87,13 +89,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onUndoDelete,
   lastDeletedBatch
 }) => {
+  const currentTier = (currentUser?.plan?.toLowerCase() || currentUser?.selectedPlan || 'growth') as 'starter' | 'growth' | 'pro';
+  const currentCycle = (currentUser?.billingCycle || 'monthly') as 'monthly' | 'annual';
+
   // Aggregate Metrics strictly from canonical dataset
   const totalMrr = getTotalMRR(allCustomers);
   const avgChurnScore = getAverageRiskScore(allCustomers);
-  const atRiskCustomers = allCustomers.filter((c) => (c.risk_score ?? c.riskScore) >= 60 && c.status !== 'saved');
+  const atRiskCustomers = allCustomers.filter((c) => isAtRiskScore(c.risk_score ?? c.riskScore) && c.status !== 'saved');
   const atRiskMrr = getMRRAtRisk(allCustomers);
 
-  const criticalCustomers = allCustomers.filter((c) => (c.risk_score ?? c.riskScore) >= 80 && c.status !== 'saved');
+  const criticalCustomers = allCustomers.filter((c) => isCriticalRiskScore(c.risk_score ?? c.riskScore) && c.status !== 'saved');
   const criticalMrr = getHighRiskMRR(allCustomers);
 
   // Predicted Churn 30 Days MRR Loss
@@ -108,7 +113,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // Saved MRR this month strictly from real saved accounts
   const savedCustomers = allCustomers.filter((c) => c.status === 'saved' || c.outcomeStatus === 'recovered');
   const savedMrr = Math.round(savedCustomers.reduce((acc, c) => acc + (c.mrrProtected ?? c.mrr ?? 0), 0));
-  const subscriptionCost = 299; // Growth plan
+  const subscriptionCost = getPlanPricing(currentTier).monthly.amountUsd;
   const roiMultiplier = savedMrr > 0 ? Math.round((savedMrr / subscriptionCost) * 10) / 10 : 0;
 
   // ROI projection from live model
@@ -123,9 +128,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const isPendingVerification = currentUser?.billingStatus === 'pending_payment';
   const isTrialEnded = currentUser?.billingStatus === 'trial_ended' || currentUser?.billingStatus === 'expired';
   const isTrialing = currentUser?.billingStatus === 'trialing' || (!currentUser?.billingStatus && currentUser?.selectedPlan);
-
-  const currentTier = (currentUser?.plan?.toLowerCase() || currentUser?.selectedPlan || 'growth') as 'starter' | 'growth' | 'pro';
-  const currentCycle = (currentUser?.billingCycle || 'monthly') as 'monthly' | 'annual';
 
   const formattedTrialEndDate = currentUser?.trialEndDate
     ? new Date(currentUser.trialEndDate).toLocaleDateString(undefined, {
@@ -327,7 +329,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span className="text-xs font-semibold text-gray-700">/ 100</span>
             </div>
             <div className="text-xs text-blue-800 mt-1 font-medium">
-              Portfolio Health: <strong>{avgChurnScore < 40 ? 'Healthy' : avgChurnScore < 60 ? 'Moderate' : 'High Alert'}</strong>
+              Portfolio Health: <strong>{avgChurnScore < CHURN_RISK_THRESHOLDS.MEDIUM_MIN ? 'Healthy' : avgChurnScore < CHURN_RISK_THRESHOLDS.AT_RISK_MIN ? 'Moderate' : 'High Alert'}</strong>
             </div>
           </div>
           <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-900 flex items-center justify-center">
@@ -389,7 +391,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </h3>
             <p className="text-xs text-blue-200 leading-relaxed">
               {savedMrr > 0
-                ? `Realized value from ${savedCustomers.length} saved customer account${savedCustomers.length > 1 ? 's' : ''} against your $299/mo subscription. Net ARR protected: ${formatCurrency(savedMrr * 12)} / yr.`
+                ? `Realized value from ${savedCustomers.length} saved customer account${savedCustomers.length > 1 ? 's' : ''} against your ${formatCurrency(subscriptionCost)}/mo subscription. Net ARR protected: ${formatCurrency(savedMrr * 12)} / yr.`
                 : `Based on saving 20% of high-risk & 10% of medium-risk accounts from your active portfolio. Net projected gain: ${formatCurrency(projectedRoi.annualNetGain)} / yr.`}
             </p>
           </div>

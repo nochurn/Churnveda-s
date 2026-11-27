@@ -31,6 +31,7 @@ import { HealthPillarsCard } from './HealthPillarsCard';
 import { generatePlainEnglishRiskExplanation } from '../utils/aiEmployeeEngine';
 import { aiEmployeeService } from '../services/aiEmployeeService';
 import { authService } from '../services/authService';
+import { isAtRiskScore } from '../config/riskThresholds';
 
 interface CustomerDetailModalProps {
   customer: Customer | null;
@@ -97,18 +98,19 @@ export const CustomerDetailModal: React.FC<CustomerDetailModalProps> = ({
       const approver = user?.email || user?.name || 'Authorized Member';
       if (activeMessage) {
         if (customDraft && customDraft !== activeMessage.content) {
-          activeMessage.content = customDraft;
+          await aiEmployeeService.editMessage(activeMessage.id, customDraft);
         }
         await aiEmployeeService.approveMessage(activeMessage.id, approver);
       } else {
-        // Enqueue dynamically
-        const newMsg = await aiEmployeeService.approveMessage(
-          `msg-${selectedChannel}-${customer.id}-${Date.now()}`,
+        await aiEmployeeService.createDraftAndApprove(
+          customer,
+          selectedChannel,
+          draftText,
           approver
         );
       }
     } catch (e) {
-      // handled in service
+      console.warn('[CustomerDetailModal] Approve failed:', e);
     } finally {
       setIsApproving(false);
     }
@@ -181,8 +183,8 @@ export const CustomerDetailModal: React.FC<CustomerDetailModalProps> = ({
           title: `Risk Score Evaluated: ${pt.score}/100`,
           description: `Monthly telemetry assessment during ${pt.month}`,
           date: `2026-${String(i + 1).padStart(2, '0')}-01`,
-          statusBadge: pt.score >= 60 ? 'At Risk' : 'Healthy',
-          badgeColor: pt.score >= 60 ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'
+          statusBadge: isAtRiskScore(pt.score) ? 'At Risk' : 'Healthy',
+          badgeColor: isAtRiskScore(pt.score) ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'
         });
       });
     }

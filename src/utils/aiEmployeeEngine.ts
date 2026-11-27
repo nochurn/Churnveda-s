@@ -1,4 +1,5 @@
 import { Customer, Top5CustomerPriority, AiRetentionActionType, RetentionMessage } from '../types';
+import { getCanonicalRiskCategory } from '../config/riskThresholds';
 
 /**
  * Calculates the exact Top 5 Priority Score based on:
@@ -323,12 +324,13 @@ export function calculateDeterministicRiskScore(customer: Customer): number {
 }
 
 /**
- * Scans all customers, calculates priority scores, and selects the Top 5 customers.
+ * Scans all customers, calculates priority scores, and selects the Top N at-risk priorities (5 Starter / 10 Growth / 25 Enterprise).
  */
 export function identifyTop5Priorities(
   customers: Customer[],
   tone: 'Empathetic' | 'Professional' | 'Direct' = 'Empathetic',
-  existingMessages: RetentionMessage[] = []
+  existingMessages: RetentionMessage[] = [],
+  limit: number = 5
 ): Top5CustomerPriority[] {
   if (!Array.isArray(customers) || customers.length === 0) return [];
 
@@ -362,7 +364,7 @@ export function identifyTop5Priorities(
     }
 
     const riskScore = components.riskScore;
-    const riskLevel = riskScore >= 80 ? 'Critical' : riskScore >= 60 ? 'High' : riskScore >= 30 ? 'Medium' : 'Low';
+    const riskLevel = getCanonicalRiskCategory(riskScore);
 
     return {
       customer,
@@ -387,5 +389,6 @@ export function identifyTop5Priorities(
     return b.revenueAtRisk - a.revenueAtRisk;
   });
 
-  return scored.slice(0, 5);
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 5;
+  return scored.slice(0, safeLimit);
 }

@@ -103,69 +103,9 @@ async function migrate() {
     // 4. Remove any legacy demo admin session token if present
     await pool.query("DELETE FROM sessions WHERE token = 'sess_admin_default'");
 
-    // 5. Seed authoritative billing plans if absent
-    const plansToSeed = [
-      {
-        id: 'plan_tier_starter_monthly',
-        name: 'Churnveda Starter — Monthly',
-        tier: 'starter',
-        billing_cycle: 'monthly',
-        amount_paise: 275600,
-        amount_inr: 2756,
-        currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_STARTER_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_STARTER_MONTHLY || 'plan_U1vm4YhuBfkHU6'
-      },
-      {
-        id: 'plan_tier_starter_annual',
-        name: 'Churnveda Starter — Annual',
-        tier: 'starter',
-        billing_cycle: 'annual',
-        amount_paise: 2756200,
-        amount_inr: 27562,
-        currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_STARTER_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_STARTER_YEARLY || process.env.RAZORPAY_PLAN_STARTER_ANNUAL || 'plan_U1vpfqbMX7PrvO'
-      },
-      {
-        id: 'plan_tier_growth_monthly',
-        name: 'Churnveda Growth — Monthly',
-        tier: 'growth',
-        billing_cycle: 'monthly',
-        amount_paise: 750800,
-        amount_inr: 7508,
-        currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_GROWTH_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_U1vtzGKxsZRAT2'
-      },
-      {
-        id: 'plan_tier_growth_annual',
-        name: 'Churnveda Growth — Annual',
-        tier: 'growth',
-        billing_cycle: 'annual',
-        amount_paise: 7508200,
-        amount_inr: 75082,
-        currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_GROWTH_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_GROWTH_YEARLY || process.env.RAZORPAY_PLAN_GROWTH_ANNUAL || 'plan_U1vvXZFmhM3XK2'
-      },
-      {
-        id: 'plan_tier_pro_monthly',
-        name: 'Churnveda Enterprise — Monthly',
-        tier: 'pro',
-        billing_cycle: 'monthly',
-        amount_paise: 3316900,
-        amount_inr: 33169,
-        currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_ENTERPRISE_MONTHLY_PLAN_ID || process.env.RAZORPAY_PLAN_ENTERPRISE_MONTHLY || process.env.RAZORPAY_PLAN_PRO_MONTHLY || 'plan_U1vwty43aSFOmP'
-      },
-      {
-        id: 'plan_tier_pro_annual',
-        name: 'Churnveda Enterprise — Annual',
-        tier: 'pro',
-        billing_cycle: 'annual',
-        amount_paise: 33169000,
-        amount_inr: 331690,
-        currency: 'USD',
-        razorpay_plan_id: process.env.RAZORPAY_ENTERPRISE_ANNUAL_PLAN_ID || process.env.RAZORPAY_PLAN_ENTERPRISE_YEARLY || process.env.RAZORPAY_PLAN_PRO_ANNUAL || 'plan_U1w0VddfSIKKQG'
-      }
-    ];
+    // 5. Seed authoritative billing plans if absent (Standard, Founding Member Edition, Enterprise)
+    const { buildAuthoritativeBillingPlans } = await import('./billingPlans.ts');
+    const plansToSeed = buildAuthoritativeBillingPlans();
 
     for (const plan of plansToSeed) {
       await pool.query(
@@ -173,6 +113,7 @@ async function migrate() {
           id, name, tier, billing_cycle, amount_paise, amount_inr, currency, razorpay_plan_id, is_active, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NOW(), NOW())
         ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
           amount_paise = EXCLUDED.amount_paise,
           amount_inr = EXCLUDED.amount_inr,
           razorpay_plan_id = EXCLUDED.razorpay_plan_id,
@@ -181,7 +122,7 @@ async function migrate() {
         [plan.id, plan.name, plan.tier, plan.billing_cycle, plan.amount_paise, plan.amount_inr, plan.currency, plan.razorpay_plan_id]
       );
     }
-    console.log('✅ [Churnveda Migration] Seeded/updated 6 authoritative billing plans.');
+    console.log(`✅ [Churnveda Migration] Seeded/updated ${plansToSeed.length} authoritative billing plans.`);
 
     // 6. Safe demo customer seeding: Only if table is empty
     const custCountRes = await pool.query("SELECT COUNT(*) as count FROM customers WHERE workspace_id = 'ws-default'");

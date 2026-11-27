@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { Customer } from '../types';
 import { formatCurrency, getRiskColorClass } from '../utils/formatters';
+import { isCriticalRiskScore, isAtRiskScore, CHURN_RISK_THRESHOLDS } from '../config/riskThresholds';
 
 interface CustomerTableViewProps {
   customers: Customer[];
@@ -291,10 +292,10 @@ export const CustomerTableView: React.FC<CustomerTableViewProps> = ({
               className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-800 focus:outline-none focus:ring-1 focus:ring-blue-900"
             >
               <option value="all">Risk: All Tiers</option>
-              <option value="critical">Critical (80-100)</option>
-              <option value="high">High (60-79)</option>
-              <option value="medium">Medium (30-59)</option>
-              <option value="low">Low (&lt; 30)</option>
+              <option value="critical">Critical (86-100)</option>
+              <option value="high">High (61-85)</option>
+              <option value="medium">Medium (31-60)</option>
+              <option value="low">Low (&lt; 31)</option>
             </select>
           </div>
 
@@ -681,11 +682,11 @@ export const CustomerTableView: React.FC<CustomerTableViewProps> = ({
                   <div className="flex items-center justify-between">
                     <span className="text-gray-600 font-medium">Risk Level:</span>
                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                      (targetCust.riskCategory === 'critical' || (targetCust.riskScore ?? 0) >= 80)
+                      (targetCust.riskCategory === 'Critical' || String(targetCust.riskCategory || '').toLowerCase() === 'critical' || isCriticalRiskScore(targetCust.risk_score ?? targetCust.riskScore))
                         ? 'bg-red-100 text-red-800'
-                        : (targetCust.riskCategory === 'high' || (targetCust.riskScore ?? 0) >= 60)
+                        : (targetCust.riskCategory === 'High' || String(targetCust.riskCategory || '').toLowerCase() === 'high' || isAtRiskScore(targetCust.risk_score ?? targetCust.riskScore))
                         ? 'bg-orange-100 text-orange-800'
-                        : (targetCust.riskCategory === 'medium' || (targetCust.riskScore ?? 0) >= 30)
+                        : (targetCust.riskCategory === 'Medium' || String(targetCust.riskCategory || '').toLowerCase() === 'medium' || (targetCust.risk_score ?? targetCust.riskScore ?? 0) >= CHURN_RISK_THRESHOLDS.MEDIUM_MIN)
                         ? 'bg-amber-100 text-amber-800'
                         : 'bg-emerald-100 text-emerald-800'
                     }`}>

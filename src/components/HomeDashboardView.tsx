@@ -27,6 +27,7 @@ import { fetchOutboundStatus, OutboundStatusResponse } from '../services/api';
 import { ImportCustomerDataModal } from './ImportCustomerDataModal';
 import { generatePlainEnglishRiskExplanation } from '../utils/aiEmployeeEngine';
 import { useCustomerStore } from '../context/CustomerContext';
+import { CHURN_RISK_THRESHOLDS, isAtRiskScore, isCriticalRiskScore } from '../config/riskThresholds';
 
 interface HomeDashboardViewProps {
   customers: Customer[];
@@ -64,7 +65,7 @@ export const HomeDashboardView: React.FC<HomeDashboardViewProps> = ({
 
   // Core KPIs strictly derived from live data (No fake data)
   const customersAtRisk = useMemo(() => {
-    return customers.filter(c => (c.risk_score ?? c.riskScore ?? 0) >= 60 && c.status !== 'saved');
+    return customers.filter(c => isAtRiskScore(c.risk_score ?? c.riskScore) && c.status !== 'saved');
   }, [customers]);
 
   const revenueAtRisk = useMemo(() => {
@@ -253,7 +254,7 @@ export const HomeDashboardView: React.FC<HomeDashboardViewProps> = ({
               {customersAtRisk.length}
             </div>
             <p className="text-[11px] text-gray-500 mt-0.5">
-              Risk score 60+ detected
+              Risk score {CHURN_RISK_THRESHOLDS.AT_RISK_MIN}+ detected
             </p>
           </div>
         </div>
@@ -418,7 +419,7 @@ export const HomeDashboardView: React.FC<HomeDashboardViewProps> = ({
             {top5.map((p, idx) => {
               const cust = p.customer;
               const custName = cust.company_name || cust.name || 'Account';
-              const isCritical = p.riskScore >= 80;
+              const isCritical = isCriticalRiskScore(p.riskScore);
               const reasonText = generatePlainEnglishRiskExplanation(cust);
               const lastLoginDays = cust.lastLoginDays ?? (cust as any).last_login_days_ago ?? 0;
               const openTickets = cust.openTicketsCount ?? cust.supportTickets?.length ?? 0;

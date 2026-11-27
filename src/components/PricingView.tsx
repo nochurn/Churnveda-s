@@ -23,15 +23,25 @@ import { authService } from '../services/authService';
 import { apiService } from '../services/api';
 import { TrialVerificationModal } from './TrialVerificationModal';
 import {
-  AUTHORITATIVE_PLANS,
   ONE_TIME_PAYMENT_DISCLOSURE,
   RECURRING_MANDATE_DISCLOSURE,
   buildRazorpayOneTimeOptions,
-  buildRazorpaySubscriptionOptions
+  buildRazorpaySubscriptionOptions,
+  getAuthoritativePlan
 } from '../services/razorpayConfig';
 import { ensureRazorpaySdk } from '../services/razorpaySdk';
 
-import { CENTRAL_PRICING, FOUNDING_OFFER_CONFIG, FoundingOfferPlan } from '../config/pricing';
+import {
+  FOUNDING_OFFER_CONFIG,
+  FoundingOfferPlan,
+  PlanEdition,
+  getEditionLabel,
+  getEditionMarketing,
+  getEditionPlanFeatures,
+  getFoundationVsStandardComparison,
+  getPlanLimits,
+  getPlanPricing
+} from '../config/pricing';
 
 interface PricingTierConfig {
   id: 'starter' | 'growth' | 'pro';
@@ -51,57 +61,28 @@ interface PricingTierConfig {
   foundingOffer: FoundingOfferPlan;
 }
 
-const PRICING_TIERS_CONFIG: PricingTierConfig[] = [
-  {
-    id: 'starter',
-    name: CENTRAL_PRICING.starter.displayName,
-    monthlyPrice: CENTRAL_PRICING.starter.monthly.amountUsd,
-    annualPrice: CENTRAL_PRICING.starter.annual.monthlyEquivalentUsd,
-    annualTotalPrice: CENTRAL_PRICING.starter.annual.totalAmountUsd,
-    monthlyPriceInr: CENTRAL_PRICING.starter.monthly.amountInr,
-    annualPriceInr: CENTRAL_PRICING.starter.annual.monthlyEquivalentInr,
-    annualTotalPriceInr: CENTRAL_PRICING.starter.annual.totalAmountInr,
-    annualSavingsBadge: CENTRAL_PRICING.starter.annual.savingsBadge,
-    annualSavingsBadgeInr: CENTRAL_PRICING.starter.annual.savingsBadgeInr,
-    customersIncluded: CENTRAL_PRICING.starter.customersIncluded,
-    description: CENTRAL_PRICING.starter.description,
-    features: CENTRAL_PRICING.starter.features,
-    foundingOffer: FOUNDING_OFFER_CONFIG.starter
-  },
-  {
-    id: 'growth',
-    name: CENTRAL_PRICING.growth.displayName,
-    monthlyPrice: CENTRAL_PRICING.growth.monthly.amountUsd,
-    annualPrice: CENTRAL_PRICING.growth.annual.monthlyEquivalentUsd,
-    annualTotalPrice: CENTRAL_PRICING.growth.annual.totalAmountUsd,
-    monthlyPriceInr: CENTRAL_PRICING.growth.monthly.amountInr,
-    annualPriceInr: CENTRAL_PRICING.growth.annual.monthlyEquivalentInr,
-    annualTotalPriceInr: CENTRAL_PRICING.growth.annual.totalAmountInr,
-    annualSavingsBadge: CENTRAL_PRICING.growth.annual.savingsBadge,
-    annualSavingsBadgeInr: CENTRAL_PRICING.growth.annual.savingsBadgeInr,
-    customersIncluded: CENTRAL_PRICING.growth.customersIncluded,
-    description: CENTRAL_PRICING.growth.description,
-    isPopular: true,
-    features: CENTRAL_PRICING.growth.features,
-    foundingOffer: FOUNDING_OFFER_CONFIG.growth
-  },
-  {
-    id: 'pro',
-    name: CENTRAL_PRICING.pro.displayName,
-    monthlyPrice: CENTRAL_PRICING.pro.monthly.amountUsd,
-    annualPrice: CENTRAL_PRICING.pro.annual.monthlyEquivalentUsd,
-    annualTotalPrice: CENTRAL_PRICING.pro.annual.totalAmountUsd,
-    monthlyPriceInr: CENTRAL_PRICING.pro.monthly.amountInr,
-    annualPriceInr: CENTRAL_PRICING.pro.annual.monthlyEquivalentInr,
-    annualTotalPriceInr: CENTRAL_PRICING.pro.annual.totalAmountInr,
-    annualSavingsBadge: CENTRAL_PRICING.pro.annual.savingsBadge,
-    annualSavingsBadgeInr: CENTRAL_PRICING.pro.annual.savingsBadgeInr,
-    customersIncluded: CENTRAL_PRICING.pro.customersIncluded,
-    description: CENTRAL_PRICING.pro.description,
-    features: CENTRAL_PRICING.pro.features,
-    foundingOffer: FOUNDING_OFFER_CONFIG.pro
-  }
-];
+function buildPricingTiersConfig(edition: PlanEdition): PricingTierConfig[] {
+  return (['starter', 'growth', 'pro'] as const).map((tierId) => {
+    const p = getPlanPricing(tierId, edition);
+    return {
+      id: tierId,
+      name: p.displayName,
+      monthlyPrice: p.monthly.amountUsd,
+      annualPrice: p.annual.monthlyEquivalentUsd,
+      annualTotalPrice: p.annual.totalAmountUsd,
+      monthlyPriceInr: p.monthly.amountInr,
+      annualPriceInr: p.annual.monthlyEquivalentInr,
+      annualTotalPriceInr: p.annual.totalAmountInr,
+      annualSavingsBadge: p.annual.savingsBadge,
+      annualSavingsBadgeInr: p.annual.savingsBadgeInr,
+      customersIncluded: p.customersIncluded,
+      description: p.description,
+      isPopular: p.isPopular,
+      features: p.features,
+      foundingOffer: FOUNDING_OFFER_CONFIG[tierId]
+    };
+  });
+}
 
 interface PricingViewProps {
   onSelectPlan?: (tierId: string) => void;
@@ -142,8 +123,18 @@ export const PricingView: React.FC<PricingViewProps> = ({
     } catch {}
   };
 
-  // Offer mode: 'founding' (First 10 Customers Offer) or 'standard' (Standard Pricing)
-  const [offerMode, setOfferMode] = useState<'founding' | 'standard'>('founding');
+  // Edition mode: 'standard' is default for new customers; 'founding' is exclusive to eligible early customers
+  const [offerMode, setOfferMode] = useState<PlanEdition>('standard');
+  const [foundingEligibility, setFoundingEligibility] = useState<{
+    eligible: boolean;
+    enabled: boolean;
+    isExistingFounding: boolean;
+  }>({
+    eligible: false,
+    enabled: false,
+    isExistingFounding: currentUser?.planEdition === 'founding'
+  });
+  const [comparisonTier, setComparisonTier] = useState<'starter' | 'growth'>('starter');
   // Pre-selected plan persists after toggle
   const [selectedPlan, setSelectedPlan] = useState<string>(initialPlan || 'growth');
 
@@ -169,33 +160,39 @@ export const PricingView: React.FC<PricingViewProps> = ({
         setDisplayRate(res.displayRate || `1 USD = ₹${res.rate.toFixed(2)}`);
       }
     }).catch(() => {});
+
+    apiService.fetchRazorpayConfig().then(cfg => {
+      if (cfg?.foundingEligibility) {
+        setFoundingEligibility(cfg.foundingEligibility);
+        const requestedFounding =
+          routeParams?.edition === 'founding' ||
+          routeParams?.offer === 'founding';
+        if (requestedFounding && (cfg.foundingEligibility.eligible || cfg.foundingEligibility.isExistingFounding)) {
+          setOfferMode('founding');
+        } else if (!cfg.foundingEligibility.eligible && !cfg.foundingEligibility.isExistingFounding) {
+          setOfferMode('standard');
+        }
+      }
+    }).catch(() => {});
   }, []);
 
   // Referral link state
   const [copiedReferral, setCopiedReferral] = useState(false);
-  const referralLink = 'https://churnveda.com/ref/nagesh299';
+  const currentUserProfile = authService.getCurrentUser();
+  const referralLink = currentUserProfile?.referralCode
+    ? `https://churnveda.com/ref/${currentUserProfile.referralCode}`
+    : 'https://churnveda.com/signup';
 
   const signupFormRef = useRef<HTMLDivElement>(null);
 
-  // Active tier object based on current selectedPlan
-  const activeTier = PRICING_TIERS_CONFIG.find((t) => t.id === selectedPlan) || PRICING_TIERS_CONFIG[1];
+  const canSelectFounding = foundingEligibility.eligible || foundingEligibility.isExistingFounding;
+  const pricingTiersConfig = buildPricingTiersConfig(offerMode);
 
-  // Whether the founding offer discount applies to the current configuration
-  const isFoundingOfferActive = offerMode === 'founding' && !isAnnual && (selectedPlan === 'starter' || selectedPlan === 'growth');
+  // Active tier object based on current selectedPlan and active edition
+  const activeTier = pricingTiersConfig.find((t) => t.id === selectedPlan) || pricingTiersConfig[1];
 
   // Active price in dollars (for charge / query params)
-  const activeChargePrice = isAnnual
-    ? activeTier.annualTotalPrice
-    : isFoundingOfferActive
-    ? (selectedPlan === 'starter' ? 29 : 79)
-    : activeTier.monthlyPrice;
-
-  // Per month display rate
-  const activeMonthlyRate = isAnnual
-    ? activeTier.annualPrice
-    : isFoundingOfferActive
-    ? (selectedPlan === 'starter' ? 29 : 79)
-    : activeTier.monthlyPrice;
+  const activeChargePrice = isAnnual ? activeTier.annualTotalPrice : activeTier.monthlyPrice;
 
   // Dedicated $1 Verification checkout launcher
   const handleStartTrialVerification = (planId: 'starter' | 'growth' | 'pro') => {
@@ -220,13 +217,8 @@ export const PricingView: React.FC<PricingViewProps> = ({
       onSelectPlan(planId);
     }
 
-    const tier = PRICING_TIERS_CONFIG.find((t) => t.id === planId) || PRICING_TIERS_CONFIG[1];
-    const isPlanFounding = offerMode === 'founding' && !isAnnual && (planId === 'starter' || planId === 'growth');
-    const priceVal = isAnnual
-      ? tier.annualTotalPrice
-      : isPlanFounding
-      ? (planId === 'starter' ? 29 : 79)
-      : tier.monthlyPrice;
+    const tier = pricingTiersConfig.find((t) => t.id === planId) || pricingTiersConfig[1];
+    const priceVal = isAnnual ? tier.annualTotalPrice : tier.monthlyPrice;
     const billingVal = isAnnual ? 'annual' : 'monthly';
 
     // Auto-fill hidden input fields in DOM immediately
@@ -250,34 +242,32 @@ export const PricingView: React.FC<PricingViewProps> = ({
 
   // Direct redirection to /signup?plan=...&price=...
   const handleRedirectToSignup = () => {
-    const isPlanFounding = offerMode === 'founding' && !isAnnual && (selectedPlan === 'starter' || selectedPlan === 'growth');
-    const priceVal = isAnnual
-      ? activeTier.annualTotalPrice
-      : isPlanFounding
-      ? (selectedPlan === 'starter' ? 29 : 79)
-      : activeTier.monthlyPrice;
+    const effectiveEdition: PlanEdition = selectedPlan === 'pro' ? 'standard' : offerMode;
+    const priceVal = isAnnual ? activeTier.annualTotalPrice : activeTier.monthlyPrice;
     const billingVal = isAnnual ? 'annual' : 'monthly';
+    const isPlanFounding = effectiveEdition === 'founding';
     const queryParams: Record<string, string> = {
       plan: selectedPlan,
       price: String(priceVal),
       billing: billingVal,
+      edition: effectiveEdition,
       ...(isPlanFounding ? { offer: 'founding' } : {})
     };
     if (onNavigate) {
       onNavigate('signup', queryParams);
     } else {
-      window.location.hash = `#signup?plan=${selectedPlan}&price=${priceVal}&billing=${billingVal}${isPlanFounding ? '&offer=founding' : ''}`;
+      window.location.hash = `#signup?plan=${selectedPlan}&price=${priceVal}&billing=${billingVal}&edition=${effectiveEdition}${isPlanFounding ? '&offer=founding' : ''}`;
     }
   };
 
-  // Instant checkout via Razorpay (UPI, Netbanking, Cards, Wallets)
+  // Instant checkout via Razorpay
   const handleRazorpayCheckout = async (planId: string) => {
     const selectedCycle: 'monthly' | 'annual' = isAnnual ? 'annual' : 'monthly';
-    const isFoundingEligible = offerMode === 'founding' && !isAnnual && (planId === 'starter' || planId === 'growth');
+    const isFoundingEligible = offerMode === 'founding';
 
     if (!authService.isAuthenticated() && !authService.getCurrentUser()) {
       setSelectedPlan(planId);
-      authService.setPendingPlan({ tier: planId, billingCycle: selectedCycle });
+      authService.setPendingPlan({ tier: planId, billingCycle: selectedCycle, planEdition: offerMode });
       if (onShowToast) {
         onShowToast('Please create an account or sign in to complete your Razorpay checkout.', 'info');
       }
@@ -300,7 +290,8 @@ export const PricingView: React.FC<PricingViewProps> = ({
           billingCycle: 'annual',
           customerName,
           customerEmail,
-          isFoundingOffer: false
+          isFoundingOffer: isFoundingEligible,
+          planEdition: offerMode
         });
 
         if (!orderRes.success) {
@@ -323,7 +314,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
           amountCents: orderRes.amount,
           amount: orderRes.amount,
           currency: orderCurrency,
-          description: `${(AUTHORITATIVE_PLANS[planId]?.name || planId).toUpperCase()} Plan (Annual)`,
+          description: `${getAuthoritativePlan(planId, offerMode).name.toUpperCase()} (${getEditionLabel(offerMode)}) - Annual`,
           customerName,
           customerEmail,
           handler: async (response: any) => {
@@ -336,15 +327,19 @@ export const PricingView: React.FC<PricingViewProps> = ({
                 billingCycle: 'annual',
                 amount: orderRes.amount,
                 currency: orderCurrency,
-                isFoundingOffer: false,
+                isFoundingOffer: isFoundingEligible,
+                planEdition: offerMode,
                 email: customerEmail
               });
 
               if (verifyRes.success) {
-                authService.updateSubscriptionState('active', planId as 'starter' | 'growth' | 'pro');
+                authService.updateSubscriptionState('active', planId as 'starter' | 'growth' | 'pro', {
+                  planEdition: offerMode,
+                  autopayStatus: 'not_established'
+                });
                 authService.clearPendingPlan();
                 if (onShowToast) {
-                  onShowToast(`🎉 Annual Razorpay payment verified! Upgraded to ${planId.toUpperCase()} Plan.`, 'success');
+                  onShowToast(`Annual Razorpay payment verified! Upgraded to ${planId.toUpperCase()} (${getEditionLabel(offerMode)}).`, 'success');
                 }
                 if (onNavigate) onNavigate('dashboard');
               } else {
@@ -372,11 +367,13 @@ export const PricingView: React.FC<PricingViewProps> = ({
         return;
       }
 
-      // Monthly billing uses Recurring Subscription Mandate Flow (UPI AutoPay / Cards)
+      // Monthly billing uses Recurring Subscription Card Mandate Flow
       const subRes = await apiService.createRazorpaySubscription({
         tier: planId as 'starter' | 'growth' | 'pro',
         billing_cycle: 'monthly',
-        isFoundingOffer: isFoundingEligible
+        isFoundingOffer: isFoundingEligible,
+        planEdition: offerMode,
+        consentAccepted: true
       });
 
       if (!subRes.success || !subRes.subscriptionId) {
@@ -395,9 +392,10 @@ export const PricingView: React.FC<PricingViewProps> = ({
       const options = buildRazorpaySubscriptionOptions({
         keyId: subRes.keyId,
         subscriptionId: subRes.subscriptionId,
-        planName: `${(AUTHORITATIVE_PLANS[planId]?.name || planId).toUpperCase()}${isFoundingEligible ? ' (FOUNDING OFFER)' : ''}`,
+        planName: `${getAuthoritativePlan(planId, offerMode).name.toUpperCase()} (${getEditionLabel(offerMode)})`,
         customerName,
         customerEmail,
+        cardOnly: true,
         handler: async (response: any) => {
           try {
             const verifyRes = await apiService.verifyRazorpaySubscription({
@@ -407,14 +405,18 @@ export const PricingView: React.FC<PricingViewProps> = ({
               tier: planId,
               billing_cycle: 'monthly',
               isFoundingOffer: isFoundingEligible,
+              planEdition: offerMode,
               email: customerEmail
             });
 
             if (verifyRes.success) {
-              authService.updateSubscriptionState('active', planId as 'starter' | 'growth' | 'pro');
+              authService.updateSubscriptionState('active', planId as 'starter' | 'growth' | 'pro', {
+                planEdition: verifyRes.planEdition || offerMode,
+                autopayStatus: (verifyRes.autopay_status as any) || 'active'
+              });
               authService.clearPendingPlan();
               if (onShowToast) {
-                onShowToast(`🎉 Monthly recurring subscription activated for ${planId.toUpperCase()} Plan${isFoundingEligible ? ' at Founding Rate' : ''}!`, 'success');
+                onShowToast(`Monthly recurring subscription activated for ${planId.toUpperCase()} (${getEditionLabel(offerMode)})!`, 'success');
               }
               if (onNavigate) onNavigate('dashboard');
             } else {
@@ -464,7 +466,9 @@ export const PricingView: React.FC<PricingViewProps> = ({
         email,
         company,
         password,
-        plan: selectedPlan
+        plan: selectedPlan,
+        planEdition: offerMode,
+        billingCycle: isAnnual ? 'annual' : 'monthly'
       });
       setIsSubmitting(false);
 
@@ -482,7 +486,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
   };
 
   // Submit Pro sales contact
-  const handleSalesContactSubmit = (e: React.FormEvent) => {
+  const handleSalesContactSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !email.trim() || !company.trim()) {
       if (onShowToast) onShowToast('Please complete name, email, and company.', 'error');
@@ -494,17 +498,31 @@ export const PricingView: React.FC<PricingViewProps> = ({
     }
 
     setIsSubmitting(true);
-    setTimeout(() => {
-      setIsSubmitting(false);
-      if (onShowToast) {
-        onShowToast('Sales request received! A Senior Enterprise Architect will reach out within 2 hours.', 'success');
+    try {
+      const res = await apiService.submitContactForm({
+        name: name.trim(),
+        email: email.trim(),
+        company: company.trim(),
+        message: salesNotes.trim() || 'Enterprise Pro Plan demo inquiry',
+        consent: salesConsent
+      });
+      if (res?.success) {
+        if (onShowToast) {
+          onShowToast('Sales request received! A Senior Enterprise Architect will reach out within 2 hours.', 'success');
+        }
+        setName('');
+        setEmail('');
+        setCompany('');
+        setSalesNotes('');
+        setSalesConsent(false);
+      } else {
+        if (onShowToast) onShowToast(res?.error || 'Failed to submit sales inquiry.', 'error');
       }
-      setName('');
-      setEmail('');
-      setCompany('');
-      setSalesNotes('');
-      setSalesConsent(false);
-    }, 600);
+    } catch (err: any) {
+      if (onShowToast) onShowToast(err?.message || 'Failed to submit sales inquiry.', 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleCopyReferral = () => {
@@ -613,53 +631,66 @@ export const PricingView: React.FC<PricingViewProps> = ({
         </p>
       </div>
 
-      {/* FOUNDING CUSTOMER OFFER BANNER (Requirement 2) */}
+      {/* FOUNDING MEMBER EDITION VS STANDARD EDITION SWITCHER BANNER */}
       <div className="max-w-6xl mx-auto px-2 sm:px-4">
         <div className="rounded-2xl bg-gradient-to-r from-slate-950 via-[#1E293B] to-[#1E3A8A] text-white p-6 sm:p-7 shadow-xl border border-blue-900/40 relative overflow-hidden">
           <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-5">
             <div className="space-y-1.5 max-w-2xl">
-              <div className="flex items-center gap-2 text-xs font-semibold text-blue-300">
+              <div className="flex items-center gap-2 text-xs font-semibold text-blue-300 flex-wrap">
                 <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
-                <span className="uppercase tracking-wider font-bold">Limited Founding Customer Offer</span>
-                <span className="text-blue-400">·</span>
-                <span className="text-blue-200">First 10 Paying Customers</span>
+                <span className="uppercase tracking-wider font-bold">
+                  {getEditionMarketing(offerMode).badge}
+                </span>
+                {canSelectFounding && (
+                  <>
+                    <span className="text-blue-400">·</span>
+                    <span className="text-blue-200">Standard vs Founding Member Edition</span>
+                  </>
+                )}
               </div>
               <h2 className="text-xl sm:text-2xl font-black tracking-tight text-white">
-                Founding Customer Offer — Limited to Our First 10 Paying Customers
+                {offerMode === 'founding' && canSelectFounding
+                  ? 'Founding Member Edition — Exclusive Early Customer Pricing'
+                  : 'Standard — Regular Pricing & Full Capacity'}
               </h2>
               <p className="text-xs sm:text-sm text-blue-100/90 leading-relaxed">
-                Be one of the first 10 businesses to use Churnveda. Get exclusive founding-customer pricing while helping shape the future of AI-powered customer retention.
+                {offerMode === 'founding' && canSelectFounding
+                  ? 'Best for early supporters who want founding-member pricing. Starter at $19/mo ($190/yr) and Growth at $59/mo ($590/yr); upgrade to Standard anytime for higher limits.'
+                  : 'Best for businesses that need higher limits and more retention capacity — up to 2.5× customer monitoring, automated daily retention briefs, expanded messaging quotas, and API access.'}
               </p>
             </div>
 
-            {/* Segmented Control for Offer Selection */}
+            {/* Segmented Control for Edition Selection */}
             <div className="flex items-center gap-1.5 p-1 bg-slate-900/90 border border-slate-700/80 rounded-xl shrink-0 self-start md:self-center">
               <button
                 type="button"
-                onClick={() => {
-                  setOfferMode('founding');
-                  setIsAnnual(false);
-                }}
-                className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
-                  offerMode === 'founding' && !isAnnual
-                    ? 'bg-[#1E3A8A] text-white shadow-sm ring-1 ring-blue-400/40'
-                    : 'text-slate-300 hover:text-white'
-                }`}
-              >
-                <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-                <span>Founding 10 Offer</span>
-              </button>
-              <button
-                type="button"
+                id="edition-toggle-standard"
                 onClick={() => setOfferMode('standard')}
-                className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                  offerMode === 'standard' || isAnnual
-                    ? 'bg-white text-slate-900 shadow-sm'
+                className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
+                  offerMode === 'standard'
+                    ? 'bg-emerald-500 text-slate-950 shadow-sm'
                     : 'text-slate-300 hover:text-white'
                 }`}
               >
-                <span>Standard Pricing</span>
+                <Zap className="w-3.5 h-3.5" />
+                <span>Standard</span>
+                <span className="text-[10px] opacity-80">(Regular Pricing)</span>
               </button>
+              {canSelectFounding && (
+                <button
+                  type="button"
+                  id="edition-toggle-founding"
+                  onClick={() => setOfferMode('founding')}
+                  className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
+                    offerMode === 'founding'
+                      ? 'bg-[#1E3A8A] text-white shadow-sm ring-1 ring-blue-400/40'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <span>Founding Member Edition</span>
+                  <span className="text-[10px] opacity-80">(Early Offer)</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -667,11 +698,15 @@ export const PricingView: React.FC<PricingViewProps> = ({
 
       {/* 3 PRICING TIERS SIDE-BY-SIDE */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 max-w-6xl mx-auto items-stretch px-2 sm:px-4">
-        {PRICING_TIERS_CONFIG.map((tier) => {
+        {pricingTiersConfig.map((tier) => {
           const isSelected = selectedPlan === tier.id;
-          const isFoundingEligible = offerMode === 'founding' && !isAnnual && tier.foundingOffer.eligible;
-          const foundingPrice = tier.foundingOffer.foundingMonthlyPrice;
-          const standardMonthly = tier.monthlyPrice;
+          const cardEdition: PlanEdition = tier.id === 'pro' ? 'standard' : offerMode;
+          const editionLimits = getPlanLimits(tier.id, cardEdition);
+          const dynamicFeatures = getEditionPlanFeatures(tier.id, cardEdition);
+          const dynamicCapacityLabel =
+            editionLimits.customers === Infinity
+              ? 'Unlimited customers'
+              : `${editionLimits.customers.toLocaleString()} customers (${getEditionLabel(cardEdition)})`;
 
           return (
             <div
@@ -771,27 +806,31 @@ export const PricingView: React.FC<PricingViewProps> = ({
 
                 {/* Customers capacity */}
                 <p className="text-xs font-semibold text-gray-700 mt-2">
-                  {tier.customersIncluded}
+                  {dynamicCapacityLabel}
                 </p>
 
-                {/* Savings Badge */}
+                {/* Edition / Savings Badge */}
                 <div className="min-h-[26px] mt-1.5">
                   {isAnnual ? (
                     <span className="savings-badge inline-flex items-center text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
                       {currency === 'INR' ? tier.annualSavingsBadgeInr : tier.annualSavingsBadge}
                     </span>
-                  ) : (
+                  ) : cardEdition === 'founding' && tier.foundingOffer.monthlySavingsUsd > 0 ? (
                     <span className="inline-flex items-center text-[11px] font-bold text-blue-900 bg-blue-50 border border-blue-200 px-2.5 py-0.5 rounded-full">
-                      Founding Customer Rate ({currency === 'INR' ? `₹${tier.monthlyPriceInr.toLocaleString('en-IN')}/mo` : `$${tier.monthlyPrice}/mo`})
+                      Exclusive Early Customer Pricing · Save ${tier.foundingOffer.monthlySavingsUsd}/mo
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
+                      Standard · Regular Pricing
                     </span>
                   )}
                 </div>
 
                 <div className="my-5 border-t border-gray-100"></div>
 
-                {/* Feature List */}
+                {/* Dynamic Feature List by Tier + Edition */}
                 <ul className="space-y-3 text-xs text-gray-700">
-                  {tier.features.map((feat, idx) => (
+                  {dynamicFeatures.map((feat, idx) => (
                     <li key={idx} className="flex items-start gap-2.5">
                       <div
                         className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
@@ -837,21 +876,16 @@ export const PricingView: React.FC<PricingViewProps> = ({
                       <span>Contact Sales</span>
                     </>
                   ) : isAnnual ? (
-                    <span>Start annual trial</span>
-                  ) : isFoundingEligible ? (
-                    <>
-                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-                      <span>Claim Founding Offer</span>
-                    </>
+                    <span>Start Annual Trial ({getEditionLabel(offerMode)})</span>
                   ) : (
-                    <span>Start 14-day free trial</span>
+                    <span>Start {getEditionLabel(offerMode)} Trial ($1 USD)</span>
                   )}
                 </button>
 
                 <div className="text-[10px] text-center text-gray-500 mt-2 font-medium">
                   {tier.id === 'pro'
                     ? 'Custom contracts • Dedicated onboarding • SLA'
-                    : `$1 verification charge • 14-day free trial • Cancel anytime`}
+                    : '$1.00 USD card verification & Autopay • 14-day free trial • Cancel anytime'}
                 </div>
                 <div className="text-[10px] text-center text-gray-500 mt-1">
                   {isAnnual ? ONE_TIME_PAYMENT_DISCLOSURE : RECURRING_MANDATE_DISCLOSURE}
@@ -862,11 +896,90 @@ export const PricingView: React.FC<PricingViewProps> = ({
         })}
       </div>
 
-      {/* Offer Explanation Note (Requirement 3) */}
-      <div className="max-w-4xl mx-auto px-4 text-center">
-        <p className="text-xs text-gray-500 leading-relaxed bg-gray-50 border border-gray-200 rounded-xl p-3.5">
-          Founding-customer pricing is available to the first 10 eligible paying customers. The offer and its duration will be confirmed before checkout. Standard pricing applies when the agreed promotional period ends.
-        </p>
+      {/* FOUNDING MEMBER EDITION VS STANDARD SIDE-BY-SIDE COMPARISON TABLE */}
+      <div id="foundation-vs-standard-comparison" className="max-w-6xl mx-auto px-2 sm:px-4">
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="p-6 border-b border-gray-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-gray-50/70">
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-[#1E3A8A]">
+                Side-by-Side Pricing &amp; Entitlement Breakdown
+              </span>
+              <h3 className="text-lg font-black text-gray-900 mt-0.5">
+                Founding Member Edition vs Standard Comparison
+              </h3>
+              <p className="text-xs text-gray-600 mt-0.5">
+                Compare early-founder pricing and entry limits against Standard regular pricing and expanded business capacity.
+              </p>
+            </div>
+            <div className="inline-flex rounded-xl bg-white border border-gray-200 p-1 shrink-0 self-start sm:self-center">
+              <button
+                type="button"
+                onClick={() => setComparisonTier('starter')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  comparisonTier === 'starter'
+                    ? 'bg-[#1E3A8A] text-white'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Starter ($19 vs $29/mo)
+              </button>
+              <button
+                type="button"
+                onClick={() => setComparisonTier('growth')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  comparisonTier === 'growth'
+                    ? 'bg-[#1E3A8A] text-white'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Growth ($59 vs $79/mo)
+              </button>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs divide-y divide-gray-200">
+              <thead className="bg-gray-50 text-gray-700 font-bold uppercase text-[11px] tracking-wider">
+                <tr>
+                  <th className="py-3.5 px-5 w-1/3">Pricing / Capability</th>
+                  <th className="py-3.5 px-5 w-1/3 text-blue-950">
+                    Founding Member Edition ({comparisonTier === 'starter' ? '$19/mo' : '$59/mo'})
+                  </th>
+                  <th className="py-3.5 px-5 w-1/3 text-emerald-900 bg-emerald-50/60">
+                    Standard ({comparisonTier === 'starter' ? '$29/mo' : '$79/mo'})
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                <tr className="bg-blue-50/30">
+                  <td className="py-3 px-5 font-semibold text-gray-800">Monthly Price</td>
+                  <td className="py-3 px-5 font-bold text-blue-950">
+                    {getPlanPricing(comparisonTier, 'founding').monthly.formatted} (Exclusive Early Offer)
+                  </td>
+                  <td className="py-3 px-5 font-bold text-emerald-900 bg-emerald-50/30">
+                    {getPlanPricing(comparisonTier, 'standard').monthly.formatted} (Regular Pricing)
+                  </td>
+                </tr>
+                <tr className="bg-blue-50/30">
+                  <td className="py-3 px-5 font-semibold text-gray-800">Annual Price (10 Months · 2 Months Free)</td>
+                  <td className="py-3 px-5 font-bold text-blue-950">
+                    {getPlanPricing(comparisonTier, 'founding').annual.formatted}
+                  </td>
+                  <td className="py-3 px-5 font-bold text-emerald-900 bg-emerald-50/30">
+                    {getPlanPricing(comparisonTier, 'standard').annual.formatted}
+                  </td>
+                </tr>
+                {getFoundationVsStandardComparison(comparisonTier).map((row) => (
+                  <tr key={row.label} className="hover:bg-gray-50/60">
+                    <td className="py-3 px-5 font-semibold text-gray-800">{row.label}</td>
+                    <td className="py-3 px-5 text-gray-600">{row.foundation}</td>
+                    <td className="py-3 px-5 font-semibold text-emerald-900 bg-emerald-50/30">{row.standard}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       {/* SIGNUP FORM INTEGRATION & CONFIRMATION NOTICE (#signup-form) */}
@@ -877,6 +990,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
       >
         {/* Hidden inputs requested for form integrations */}
         <input type="hidden" id="plan" name="plan" value={selectedPlan} />
+        <input type="hidden" id="plan-edition" name="planEdition" value={offerMode} />
         <input type="hidden" id="price" name="price" value={activeChargePrice} />
         <input type="hidden" id="billing-cycle" name="billing-cycle" value={isAnnual ? 'annual' : 'monthly'} />
         <input type="hidden" id="signup-plan" value={selectedPlan} />
@@ -891,28 +1005,22 @@ export const PricingView: React.FC<PricingViewProps> = ({
             <div>
               <div className="text-xs text-gray-500 font-medium">Selected Configuration</div>
               <div className="text-sm font-bold text-gray-900">
-                You selected: {activeTier.name} Plan —{' '}
+                {activeTier.name} ({getEditionLabel(selectedPlan === 'pro' ? 'standard' : offerMode)}) —{' '}
                 {isAnnual
                   ? `$${activeTier.annualTotalPrice.toLocaleString('en-US')} USD/year`
-                  : isFoundingOfferActive
-                  ? `$${activeChargePrice} USD/month (Founding Customer Price · Regular $${activeTier.monthlyPrice}/mo)`
                   : `$${activeTier.monthlyPrice.toLocaleString('en-US')} USD/month`}
               </div>
               <div className="text-[11px] text-gray-600 font-medium mt-0.5 flex items-center gap-2 flex-wrap">
                 <span>Billing currency: <strong className="text-blue-900">USD</strong></span>
                 <span className="text-gray-400">·</span>
                 <span className="text-gray-500">14-day free trial included</span>
-                {isFoundingOfferActive && (
-                  <>
-                    <span className="text-gray-400">·</span>
-                    <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                      Save ${activeTier.foundingOffer.monthlySavings}/mo
-                    </span>
-                  </>
-                )}
+                <span className="text-gray-400">·</span>
+                <span className="text-blue-900 font-bold bg-blue-100/70 px-2 py-0.5 rounded-full border border-blue-200">
+                  {getEditionLabel(selectedPlan === 'pro' ? 'standard' : offerMode)}
+                </span>
               </div>
               <div className="text-[10px] text-blue-900/80">
-                All subscriptions are billed transparently in USD ($).
+                All recurring subscriptions are billed transparently in USD ($) on a card mandate.
               </div>
             </div>
           </div>
@@ -926,10 +1034,8 @@ export const PricingView: React.FC<PricingViewProps> = ({
               <CreditCard className="w-3.5 h-3.5" />
               <span>
                 {isAnnual
-                  ? 'Start Annual Trial ($1)'
-                  : isFoundingOfferActive
-                  ? 'Claim Founding Offer ($1 Verification)'
-                  : 'Start 14-Day Trial ($1)'}
+                  ? 'Start Annual Trial ($1 USD)'
+                  : `Start ${getEditionLabel(selectedPlan === 'pro' ? 'standard' : offerMode)} ($1 USD)`}
               </span>
             </button>
             <button
@@ -1215,10 +1321,8 @@ export const PricingView: React.FC<PricingViewProps> = ({
                   <CreditCard className="w-4 h-4 text-emerald-300" />
                   <span>
                     {isAnnual
-                      ? 'Start Annual Plan ($1 Verification)'
-                      : isFoundingOfferActive
-                      ? 'Claim Founding Offer ($1 Verification)'
-                      : 'Start 14-Day Trial ($1 Verification)'}
+                      ? `Start ${getEditionLabel(offerMode)} Annual ($1 USD)`
+                      : `Start ${getEditionLabel(offerMode)} Trial ($1 USD)`}
                   </span>
                 </button>
 
@@ -1232,7 +1336,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
                   <span>
                     {isAnnual
                       ? 'Pay Annual via Razorpay (UPI, Cards, Netbanking, Wallets)'
-                      : 'Set up Monthly Mandate (UPI AutoPay / Cards)'}
+                      : 'Authorize USD Card Mandate'}
                   </span>
                 </button>
 
@@ -1248,12 +1352,19 @@ export const PricingView: React.FC<PricingViewProps> = ({
 
               {/* Supported Payment Disclosures */}
               <div className="pt-2 text-[11px] text-gray-600 bg-gray-50 border border-gray-200 rounded-lg p-2.5 space-y-1">
-                <div className="flex items-center gap-3 text-gray-700 font-semibold text-xs">
-                  <span className="flex items-center gap-1"><Smartphone className="w-3.5 h-3.5 text-emerald-600" /> UPI</span>
-                  <span className="flex items-center gap-1"><CreditCard className="w-3.5 h-3.5 text-blue-600" /> Cards</span>
-                  <span className="flex items-center gap-1"><Building2 className="w-3.5 h-3.5 text-indigo-600" /> Netbanking</span>
-                  <span className="flex items-center gap-1"><Wallet className="w-3.5 h-3.5 text-amber-600" /> Wallets</span>
-                </div>
+                {isAnnual ? (
+                  <div className="flex items-center gap-3 text-gray-700 font-semibold text-xs">
+                    <span className="flex items-center gap-1"><Smartphone className="w-3.5 h-3.5 text-emerald-600" /> UPI</span>
+                    <span className="flex items-center gap-1"><CreditCard className="w-3.5 h-3.5 text-blue-600" /> Cards</span>
+                    <span className="flex items-center gap-1"><Building2 className="w-3.5 h-3.5 text-indigo-600" /> Netbanking</span>
+                    <span className="flex items-center gap-1"><Wallet className="w-3.5 h-3.5 text-amber-600" /> Wallets</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-gray-700 font-semibold text-xs">
+                    <CreditCard className="w-3.5 h-3.5 text-blue-600" />
+                    <span>International &amp; Domestic Cards (Visa / Mastercard / Amex)</span>
+                  </div>
+                )}
                 <p>
                   {isAnnual ? ONE_TIME_PAYMENT_DISCLOSURE : RECURRING_MANDATE_DISCLOSURE}
                 </p>
@@ -1329,7 +1440,7 @@ export const PricingView: React.FC<PricingViewProps> = ({
               Refer a SaaS founder, both get 1 month free.
             </h3>
             <p className="text-xs text-blue-200 max-w-md">
-              Share your unique referral link with fellow SaaS founders. When they start a trial, you both receive a full month credit ($149 value).
+              Share your unique referral link with fellow SaaS founders. When they activate a paid plan, you both receive a 1-month credit toward your subscription.
             </p>
           </div>
 
@@ -1344,7 +1455,6 @@ export const PricingView: React.FC<PricingViewProps> = ({
                 {copiedReferral ? 'Copied!' : 'Copy Link'}
               </button>
             </div>
-            <span className="text-[10px] text-blue-300 block text-right">3 founder referrals claimed this quarter</span>
           </div>
         </div>
       </div>
@@ -1436,18 +1546,24 @@ export const PricingView: React.FC<PricingViewProps> = ({
         </div>
       </div>
 
-      {/* Authoritative $1 Trial Verification Checkout Modal */}
+      {/* Authoritative $1 Trial Verification & Autopay Checkout Modal */}
       <TrialVerificationModal
         isOpen={verificationModalOpen}
         onClose={() => setVerificationModalOpen(false)}
         tier={verificationTier}
         billingCycle={isAnnual ? 'annual' : 'monthly'}
-        isFoundingOffer={offerMode === 'founding' && !isAnnual && (verificationTier === 'starter' || verificationTier === 'growth')}
+        planEdition={offerMode}
+        isFoundingOffer={offerMode === 'founding'}
         onSuccess={(result) => {
           if (onShowToast) {
-            onShowToast(`🎉 $1 verification successful! Your 14-day ${result.tier.toUpperCase()} trial has begun.`, 'success');
+            onShowToast(
+              result.autopay_authorized
+                ? `$1.00 USD verification & Autopay authorized! Your 14-day ${result.tier.toUpperCase()} (${getEditionLabel(offerMode)}) trial has begun.`
+                : result.message,
+              result.autopay_authorized ? 'success' : 'info'
+            );
           }
-          if (onNavigate) {
+          if (result.autopay_authorized && onNavigate) {
             onNavigate('dashboard');
           }
         }}

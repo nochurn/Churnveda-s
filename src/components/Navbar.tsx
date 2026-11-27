@@ -356,15 +356,9 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <div className="font-semibold text-sm text-gray-900">{currentUser.name}</div>
                   <div className="text-xs text-gray-600 truncate">{currentUser.email}</div>
                   <div className="mt-1.5 flex items-center gap-1.5">
-                    {currentUser.twoFactorEnabled ? (
-                      <span className="text-[10px] font-semibold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full flex items-center gap-1">
-                        <CheckCircle2 className="w-2.5 h-2.5" /> 2FA Active ({currentUser.twoFactorMethod === 'authenticator' ? 'App' : 'SMS'})
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-semibold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full flex items-center gap-1">
-                        <AlertTriangle className="w-2.5 h-2.5" /> 2FA Inactive
-                      </span>
-                    )}
+                    <span className="text-[10px] font-semibold bg-blue-50 text-blue-900 px-2 py-0.5 rounded-full flex items-center gap-1">
+                      <CheckCircle2 className="w-2.5 h-2.5" /> Server-Verified Session
+                    </span>
                   </div>
                 </div>
 

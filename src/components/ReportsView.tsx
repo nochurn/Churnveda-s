@@ -16,6 +16,7 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { aiEmployeeService } from '../services/aiEmployeeService';
+import { isCriticalRiskScore } from '../config/riskThresholds';
 
 interface ReportsViewProps {
   customers: Customer[];
@@ -204,7 +205,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                         {p.customer.company_name || p.customer.name}
                       </strong>
                       <span className={`px-2 py-0.2 rounded-full font-bold text-[10px] ${
-                        p.riskScore >= 80 ? 'bg-red-100 text-red-800' : 'bg-orange-100 text-orange-800'
+                        isCriticalRiskScore(p.riskScore) ? 'bg-red-100 text-red-800' : 'bg-orange-100 text-orange-800'
                       }`}>
                         Score {p.riskScore}
                       </span>

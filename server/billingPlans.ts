@@ -3,15 +3,21 @@ import type { AuthoritativeBillingPlanRecord } from '../src/config/pricing.ts';
 /**
  * Server-only builder for Razorpay billing plan records.
  * Reads Razorpay plan IDs strictly from server-side environment variables.
+ * Preserves existing Standard ($29/$290, $79/$790) & Enterprise ($349/$3,490) Plan IDs
+ * and reads separate env vars for Founding Member Edition ($19/$190, $59/$590) Plan IDs.
  */
 export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord[] {
   const now = new Date().toISOString();
   const env = process.env;
   return [
+    // =========================================================================
+    // STANDARD EDITION (Regular Pricing — Default Edition)
+    // =========================================================================
     {
       id: 'plan_tier_starter_monthly',
-      name: 'Churnveda Starter — Monthly',
+      name: 'Churnveda Starter (Standard) — Monthly',
       tier: 'starter',
+      plan_edition: 'standard',
       billing_cycle: 'monthly',
       billing_interval: 'monthly',
       amount_usd: 29,
@@ -24,17 +30,18 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       formattedInr: '₹2,756/month',
       checkout_label: '$29 USD / month',
       checkout_label_inr: '₹2,756 INR / month',
-      discountDescription: 'Fixed monthly billing in USD (International) / INR (India)',
+      discountDescription: 'Standard Regular Pricing — Monthly',
       razorpay_plan_id: env.RAZORPAY_STARTER_MONTHLY_PLAN_ID || env.RAZORPAY_PLAN_STARTER_MONTHLY || 'plan_U1vm4YhuBfkHU6',
       is_active: true,
-      is_founding_offer: true,
+      is_founding_offer: false,
       created_at: now,
       updated_at: now
     },
     {
       id: 'plan_tier_starter_annual',
-      name: 'Churnveda Starter — Annual',
+      name: 'Churnveda Starter (Standard) — Annual',
       tier: 'starter',
+      plan_edition: 'standard',
       billing_cycle: 'annual',
       billing_interval: 'annual',
       amount_usd: 290,
@@ -47,17 +54,18 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       formattedInr: '₹27,562/year',
       checkout_label: '$290 USD / year (2 months free)',
       checkout_label_inr: '₹27,562 INR / year (2 months free)',
-      discountDescription: '2 months free — 10 months of monthly founding price',
+      discountDescription: 'Standard Regular Pricing — 2 months free (10 months of monthly price)',
       razorpay_plan_id: env.RAZORPAY_STARTER_ANNUAL_PLAN_ID || env.RAZORPAY_PLAN_STARTER_YEARLY || env.RAZORPAY_PLAN_STARTER_ANNUAL || 'plan_U1vpfqbMX7PrvO',
       is_active: true,
-      is_founding_offer: true,
+      is_founding_offer: false,
       created_at: now,
       updated_at: now
     },
     {
       id: 'plan_tier_growth_monthly',
-      name: 'Churnveda Growth — Monthly',
+      name: 'Churnveda Growth (Standard) — Monthly',
       tier: 'growth',
+      plan_edition: 'standard',
       billing_cycle: 'monthly',
       billing_interval: 'monthly',
       amount_usd: 79,
@@ -70,17 +78,18 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       formattedInr: '₹7,508/month',
       checkout_label: '$79 USD / month',
       checkout_label_inr: '₹7,508 INR / month',
-      discountDescription: 'Fixed monthly billing in USD (International) / INR (India)',
+      discountDescription: 'Standard Regular Pricing — Monthly',
       razorpay_plan_id: env.RAZORPAY_GROWTH_MONTHLY_PLAN_ID || env.RAZORPAY_PLAN_GROWTH_MONTHLY || 'plan_U1vtzGKxsZRAT2',
       is_active: true,
-      is_founding_offer: true,
+      is_founding_offer: false,
       created_at: now,
       updated_at: now
     },
     {
       id: 'plan_tier_growth_annual',
-      name: 'Churnveda Growth — Annual',
+      name: 'Churnveda Growth (Standard) — Annual',
       tier: 'growth',
+      plan_edition: 'standard',
       billing_cycle: 'annual',
       billing_interval: 'annual',
       amount_usd: 790,
@@ -93,17 +102,123 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       formattedInr: '₹75,082/year',
       checkout_label: '$790 USD / year (2 months free)',
       checkout_label_inr: '₹75,082 INR / year (2 months free)',
-      discountDescription: '2 months free — 10 months of monthly founding price',
+      discountDescription: 'Standard Regular Pricing — 2 months free (10 months of monthly price)',
       razorpay_plan_id: env.RAZORPAY_GROWTH_ANNUAL_PLAN_ID || env.RAZORPAY_PLAN_GROWTH_YEARLY || env.RAZORPAY_PLAN_GROWTH_ANNUAL || 'plan_U1vvXZFmhM3XK2',
+      is_active: true,
+      is_founding_offer: false,
+      created_at: now,
+      updated_at: now
+    },
+
+    // =========================================================================
+    // FOUNDING MEMBER EDITION (Exclusive Early Customer Pricing — Capacity Gated)
+    // Never reuse $29/$79 Razorpay Plan IDs for $19/$59 Founding checkouts.
+    // =========================================================================
+    {
+      id: 'plan_tier_starter_founding_monthly',
+      name: 'Churnveda Starter (Founding Member Edition) — Monthly',
+      tier: 'starter',
+      plan_edition: 'founding',
+      billing_cycle: 'monthly',
+      billing_interval: 'monthly',
+      amount_usd: 19,
+      amount_cents: 1900,
+      amount_inr: 1806,
+      amount_paise: 180600,
+      currency: 'USD',
+      currency_inr: 'INR',
+      formatted: '$19/month',
+      formattedInr: '₹1,806/month',
+      checkout_label: '$19 USD / month',
+      checkout_label_inr: '₹1,806 INR / month',
+      discountDescription: 'Founding Member Edition — Exclusive Early Customer Pricing',
+      razorpay_plan_id: (env.RAZORPAY_FOUNDING_STARTER_MONTHLY_PLAN_ID || env.RAZORPAY_PLAN_FOUNDING_STARTER_MONTHLY || '').trim(),
       is_active: true,
       is_founding_offer: true,
       created_at: now,
       updated_at: now
     },
     {
+      id: 'plan_tier_starter_founding_annual',
+      name: 'Churnveda Starter (Founding Member Edition) — Annual',
+      tier: 'starter',
+      plan_edition: 'founding',
+      billing_cycle: 'annual',
+      billing_interval: 'annual',
+      amount_usd: 190,
+      amount_cents: 19000,
+      amount_inr: 18058,
+      amount_paise: 1805800,
+      currency: 'USD',
+      currency_inr: 'INR',
+      formatted: '$190/year',
+      formattedInr: '₹18,058/year',
+      checkout_label: '$190 USD / year (2 months free)',
+      checkout_label_inr: '₹18,058 INR / year (2 months free)',
+      discountDescription: 'Founding Member Edition — 2 months free (10 months of monthly price)',
+      razorpay_plan_id: (env.RAZORPAY_FOUNDING_STARTER_ANNUAL_PLAN_ID || env.RAZORPAY_PLAN_FOUNDING_STARTER_ANNUAL || '').trim(),
+      is_active: true,
+      is_founding_offer: true,
+      created_at: now,
+      updated_at: now
+    },
+    {
+      id: 'plan_tier_growth_founding_monthly',
+      name: 'Churnveda Growth (Founding Member Edition) — Monthly',
+      tier: 'growth',
+      plan_edition: 'founding',
+      billing_cycle: 'monthly',
+      billing_interval: 'monthly',
+      amount_usd: 59,
+      amount_cents: 5900,
+      amount_inr: 5607,
+      amount_paise: 560700,
+      currency: 'USD',
+      currency_inr: 'INR',
+      formatted: '$59/month',
+      formattedInr: '₹5,607/month',
+      checkout_label: '$59 USD / month',
+      checkout_label_inr: '₹5,607 INR / month',
+      discountDescription: 'Founding Member Edition — Exclusive Early Customer Pricing',
+      razorpay_plan_id: (env.RAZORPAY_FOUNDING_GROWTH_MONTHLY_PLAN_ID || env.RAZORPAY_PLAN_FOUNDING_GROWTH_MONTHLY || '').trim(),
+      is_active: true,
+      is_founding_offer: true,
+      created_at: now,
+      updated_at: now
+    },
+    {
+      id: 'plan_tier_growth_founding_annual',
+      name: 'Churnveda Growth (Founding Member Edition) — Annual',
+      tier: 'growth',
+      plan_edition: 'founding',
+      billing_cycle: 'annual',
+      billing_interval: 'annual',
+      amount_usd: 590,
+      amount_cents: 59000,
+      amount_inr: 56073,
+      amount_paise: 5607300,
+      currency: 'USD',
+      currency_inr: 'INR',
+      formatted: '$590/year',
+      formattedInr: '₹56,073/year',
+      checkout_label: '$590 USD / year (2 months free)',
+      checkout_label_inr: '₹56,073 INR / year (2 months free)',
+      discountDescription: 'Founding Member Edition — 2 months free (10 months of monthly price)',
+      razorpay_plan_id: (env.RAZORPAY_FOUNDING_GROWTH_ANNUAL_PLAN_ID || env.RAZORPAY_PLAN_FOUNDING_GROWTH_ANNUAL || '').trim(),
+      is_active: true,
+      is_founding_offer: true,
+      created_at: now,
+      updated_at: now
+    },
+
+    // =========================================================================
+    // ENTERPRISE (Unchanged Pricing)
+    // =========================================================================
+    {
       id: 'plan_tier_pro_monthly',
       name: 'Churnveda Enterprise — Monthly',
       tier: 'pro',
+      plan_edition: 'standard',
       billing_cycle: 'monthly',
       billing_interval: 'monthly',
       amount_usd: 349,
@@ -119,7 +234,7 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       discountDescription: 'Fixed monthly billing in USD (International) / INR (India)',
       razorpay_plan_id: env.RAZORPAY_ENTERPRISE_MONTHLY_PLAN_ID || env.RAZORPAY_PLAN_ENTERPRISE_MONTHLY || env.RAZORPAY_PLAN_PRO_MONTHLY || 'plan_U1vwty43aSFOmP',
       is_active: true,
-      is_founding_offer: true,
+      is_founding_offer: false,
       created_at: now,
       updated_at: now
     },
@@ -127,6 +242,7 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       id: 'plan_tier_pro_annual',
       name: 'Churnveda Enterprise — Annual',
       tier: 'pro',
+      plan_edition: 'standard',
       billing_cycle: 'annual',
       billing_interval: 'annual',
       amount_usd: 3490,
@@ -139,12 +255,13 @@ export function buildAuthoritativeBillingPlans(): AuthoritativeBillingPlanRecord
       formattedInr: '₹331,690/year',
       checkout_label: '$3,490 USD / year (2 months free)',
       checkout_label_inr: '₹331,690 INR / year (2 months free)',
-      discountDescription: '2 months free — 10 months of monthly founding price',
+      discountDescription: '2 months free — 10 months of monthly price',
       razorpay_plan_id: env.RAZORPAY_ENTERPRISE_ANNUAL_PLAN_ID || env.RAZORPAY_PLAN_ENTERPRISE_YEARLY || env.RAZORPAY_PLAN_PRO_ANNUAL || 'plan_U1w0VddfSIKKQG',
       is_active: true,
-      is_founding_offer: true,
+      is_founding_offer: false,
       created_at: now,
       updated_at: now
     }
   ];
 }
+

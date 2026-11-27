@@ -19,7 +19,7 @@ interface ResetPasswordViewProps {
 }
 
 export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({
-  token = 'demo-reset-token',
+  token = '',
   onNavigate,
   onShowToast
 }) => {
@@ -35,6 +35,11 @@ export const ResetPasswordView: React.FC<ResetPasswordViewProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+
+    if (!token || !token.trim()) {
+      setErrorMessage('Invalid or missing password reset token. Please request a new reset link.');
+      return;
+    }
 
     if (!passwordReqs.isValid) {
       setErrorMessage('Password does not meet all security requirements.');

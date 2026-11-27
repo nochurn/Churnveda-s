@@ -360,9 +360,12 @@ export interface UserProfile {
   role: 'Admin' | 'Analyst' | 'Viewer';
   plan: 'Starter' | 'Growth' | 'Pro';
   selectedPlan?: string;
+  planEdition?: 'founding' | 'standard';
+  planEditionLabel?: string;
   billingCycle?: 'monthly' | 'annual';
   planPrice?: number;
   billingStatus?: 'trialing' | 'pending_payment' | 'active' | 'cancelled' | 'trial_expired' | 'halted';
+  autopayStatus?: 'not_established' | 'pending' | 'authenticated' | 'active' | 'failed' | 'cancelled' | 'expired';
   trialStartDate?: string;
   trialEndDate?: string;
   paymentStatus?: 'pending' | 'paid' | 'not_added' | 'failed' | 'active';
@@ -373,6 +376,8 @@ export interface UserProfile {
   paymentMethods?: PaymentMethod[];
   razorpayCustomerId?: string;
   razorpaySubscriptionId?: string;
+  razorpayPlanId?: string;
+  billingPlanId?: string;
   subscriptionStartDate?: string;
   currentPeriodEnd?: string;
   workspaceId?: string;

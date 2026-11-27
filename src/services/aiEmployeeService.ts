@@ -8,6 +8,8 @@ import {
 } from '../types';
 import { identifyTop5Priorities, generatePersonalizedDrafts } from '../utils/aiEmployeeEngine';
 import { apiService } from './api';
+import { getPlanLimits } from '../config/pricing';
+import { CHURN_RISK_THRESHOLDS } from '../config/riskThresholds';
 
 const STORAGE_KEY_SETTINGS = 'churnveda_ai_employee_settings';
 const LEGACY_STORAGE_KEY_SETTINGS = 'nochurn_ai_employee_settings';
@@ -21,6 +23,7 @@ const STORAGE_KEY_LATEST_TOP5 = 'churnveda_ai_employee_latest_top5';
 const LEGACY_STORAGE_KEY_LATEST_TOP5 = 'nochurn_ai_employee_latest_top5';
 
 class AiEmployeeService {
+  private workspaceId: string | null = null;
   private status: AiEmployeeStatus = 'READY';
   private lastErrorMessage: string | null = null;
   private settings: AiEmployeeSettings;
@@ -31,19 +34,57 @@ class AiEmployeeService {
   private listeners: (() => void)[] = [];
 
   constructor() {
+    this.settings = this.getDefaultSettings();
+  }
+
+  private getDefaultSettings(): AiEmployeeSettings {
+    return {
+      dailyScanEnabled: true,
+      scanTime: '09:00',
+      timezone: typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' : 'UTC',
+      messageTone: 'Empathetic',
+      minimumRisk: CHURN_RISK_THRESHOLDS.AT_RISK_MIN,
+      dailyPriorityCount: 5,
+      ownerNotificationEmail: ''
+    };
+  }
+
+  private getScopedKey(baseKey: string): string | null {
+    return this.workspaceId ? `${baseKey}_${this.workspaceId}` : null;
+  }
+
+  public setWorkspaceContext(workspaceId: string | null): void {
+    const normalized = workspaceId?.trim() || null;
+    if (!normalized) {
+      this.clearWorkspaceState();
+      return;
+    }
+    if (this.workspaceId === normalized) return;
+    this.workspaceId = normalized;
+    this.lastErrorMessage = null;
     this.settings = this.loadSettings();
     this.messages = this.loadMessages();
     this.reports = this.loadReports();
     this.latestTop5 = this.loadLatestTop5();
-    this.lastScanAt = typeof window !== 'undefined'
-      ? (localStorage.getItem(STORAGE_KEY_LAST_SCAN) || localStorage.getItem(LEGACY_STORAGE_KEY_LAST_SCAN))
-      : null;
-    if (this.lastScanAt && this.latestTop5.length > 0) {
-      this.status = 'COMPLETED';
-    }
+    const scanKey = this.getScopedKey(STORAGE_KEY_LAST_SCAN);
+    this.lastScanAt = typeof window !== 'undefined' && scanKey ? localStorage.getItem(scanKey) : null;
+    this.status = this.lastScanAt && this.latestTop5.length > 0 ? 'COMPLETED' : 'READY';
+    this.notify();
     if (typeof window !== 'undefined') {
       this.syncOutboundQueue().catch(() => {});
     }
+  }
+
+  public clearWorkspaceState(): void {
+    this.workspaceId = null;
+    this.status = 'READY';
+    this.lastErrorMessage = null;
+    this.settings = this.getDefaultSettings();
+    this.messages = [];
+    this.reports = [];
+    this.latestTop5 = [];
+    this.lastScanAt = null;
+    this.notify();
   }
 
   public subscribe(listener: () => void): () => void {
@@ -58,19 +99,11 @@ class AiEmployeeService {
   }
 
   private loadSettings(): AiEmployeeSettings {
-    const defaultSettings: AiEmployeeSettings = {
-      dailyScanEnabled: true,
-      scanTime: '09:00',
-      timezone: typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' : 'UTC',
-      messageTone: 'Empathetic',
-      minimumRisk: 60,
-      dailyPriorityCount: 5,
-      ownerNotificationEmail: ''
-    };
-
-    if (typeof window !== 'undefined') {
+    const defaultSettings = this.getDefaultSettings();
+    const key = this.getScopedKey(STORAGE_KEY_SETTINGS);
+    if (typeof window !== 'undefined' && key) {
       try {
-        const saved = localStorage.getItem(STORAGE_KEY_SETTINGS);
+        const saved = localStorage.getItem(key);
         if (saved) return { ...defaultSettings, ...JSON.parse(saved) };
       } catch (e) {
         // fallback
@@ -80,15 +113,17 @@ class AiEmployeeService {
   }
 
   private saveSettings(): void {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(this.settings));
+    const key = this.getScopedKey(STORAGE_KEY_SETTINGS);
+    if (typeof window !== 'undefined' && key) {
+      localStorage.setItem(key, JSON.stringify(this.settings));
     }
   }
 
   private loadMessages(): RetentionMessage[] {
-    if (typeof window !== 'undefined') {
+    const key = this.getScopedKey(STORAGE_KEY_MESSAGES);
+    if (typeof window !== 'undefined' && key) {
       try {
-        const saved = localStorage.getItem(STORAGE_KEY_MESSAGES);
+        const saved = localStorage.getItem(key);
         if (saved) return JSON.parse(saved);
       } catch (e) {
         // fallback
@@ -98,15 +133,17 @@ class AiEmployeeService {
   }
 
   private saveMessages(): void {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY_MESSAGES, JSON.stringify(this.messages));
+    const key = this.getScopedKey(STORAGE_KEY_MESSAGES);
+    if (typeof window !== 'undefined' && key) {
+      localStorage.setItem(key, JSON.stringify(this.messages));
     }
   }
 
   private loadReports(): DailyRetentionBrief[] {
-    if (typeof window !== 'undefined') {
+    const key = this.getScopedKey(STORAGE_KEY_REPORTS);
+    if (typeof window !== 'undefined' && key) {
       try {
-        const saved = localStorage.getItem(STORAGE_KEY_REPORTS);
+        const saved = localStorage.getItem(key);
         if (saved) return JSON.parse(saved);
       } catch (e) {
         // fallback
@@ -116,15 +153,17 @@ class AiEmployeeService {
   }
 
   private saveReports(): void {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY_REPORTS, JSON.stringify(this.reports));
+    const key = this.getScopedKey(STORAGE_KEY_REPORTS);
+    if (typeof window !== 'undefined' && key) {
+      localStorage.setItem(key, JSON.stringify(this.reports));
     }
   }
 
   private loadLatestTop5(): Top5CustomerPriority[] {
-    if (typeof window !== 'undefined') {
+    const key = this.getScopedKey(STORAGE_KEY_LATEST_TOP5);
+    if (typeof window !== 'undefined' && key) {
       try {
-        const saved = localStorage.getItem(STORAGE_KEY_LATEST_TOP5);
+        const saved = localStorage.getItem(key);
         if (saved) return JSON.parse(saved);
       } catch (e) {
         // fallback
@@ -134,8 +173,9 @@ class AiEmployeeService {
   }
 
   private saveLatestTop5(): void {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY_LATEST_TOP5, JSON.stringify(this.latestTop5));
+    const key = this.getScopedKey(STORAGE_KEY_LATEST_TOP5);
+    if (typeof window !== 'undefined' && key) {
+      localStorage.setItem(key, JSON.stringify(this.latestTop5));
     }
   }
 
@@ -201,7 +241,7 @@ class AiEmployeeService {
    * 5. Prepares WhatsApp + Email messages in "ready" (Ready for Review) status
    * 6. Builds the Morning Retention Brief
    */
-  public async runScan(customers: Customer[], ownerEmail?: string): Promise<{
+  public async runScan(customers: Customer[], ownerEmail?: string, planTier?: string, planEdition?: string): Promise<{
     top5: Top5CustomerPriority[];
     messages: RetentionMessage[];
     report: DailyRetentionBrief;
@@ -225,8 +265,11 @@ class AiEmployeeService {
     await new Promise(r => setTimeout(r, 600));
 
     try {
-      // 1. Identify Top 5 using priority formula
-      const top5 = identifyTop5Priorities(customers, this.settings.messageTone, this.messages);
+      // 1. Identify Top N at-risk priorities based on plan tier & edition
+      const planLimit = planTier
+        ? getPlanLimits(planTier, planEdition).topAtRiskCustomers
+        : (this.settings.dailyPriorityCount || 5);
+      const top5 = identifyTop5Priorities(customers, this.settings.messageTone, this.messages, planLimit);
 
       // 2. Prepare drafts in "ready" (Ready for Review) status
       const now = new Date().toISOString();
@@ -284,7 +327,7 @@ class AiEmployeeService {
       this.saveLatestTop5();
 
       // 4. Calculate brief metrics strictly from actual data (Requirement 8)
-      const atRiskList = customers.filter(c => (c.risk_score ?? c.riskScore ?? 0) >= (this.settings.minimumRisk || 60));
+      const atRiskList = customers.filter(c => (c.risk_score ?? c.riskScore ?? 0) >= (this.settings.minimumRisk || CHURN_RISK_THRESHOLDS.AT_RISK_MIN));
       const revenueAtRisk = atRiskList.reduce((acc, c) => acc + (c.mrr || 0), 0);
       const readyCount = this.messages.filter(m => m.status === 'ready').length;
       const queuedCount = this.messages.filter(m => m.status === 'queued').length;
@@ -400,6 +443,35 @@ class AiEmployeeService {
     }
 
     return this.messages[idx];
+  }
+
+  public async createDraftAndApprove(
+    customer: Customer,
+    channel: 'whatsapp' | 'email',
+    content: string,
+    approverEmail: string = 'Authorized Team Member',
+    subject?: string
+  ): Promise<RetentionMessage> {
+    const newMsg: RetentionMessage = {
+      id: `msg-${channel}-${customer.id}-${Date.now()}`,
+      customerId: customer.id,
+      customerName: customer.name || customer.company_name || 'Customer',
+      companyName: customer.company_name,
+      customerEmail: customer.email,
+      customerPhone: customer.phone,
+      channel,
+      subject: channel === 'email' ? (subject || `Quick check-in from ${customer.plan || 'Customer'} Success`) : undefined,
+      content,
+      reason: customer.recommendedAction || `Churn risk score ${customer.riskScore}/100`,
+      status: 'ready',
+      createdAt: new Date().toISOString(),
+      mrrProtected: customer.mrr,
+      deliveryStatus: 'not_connected'
+    };
+    this.messages.unshift(newMsg);
+    this.saveMessages();
+    this.notify();
+    return this.approveMessage(newMsg.id, approverEmail);
   }
 
   /**

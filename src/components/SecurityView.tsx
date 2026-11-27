@@ -23,7 +23,6 @@ import {
   Shield,
   Search
 } from 'lucide-react';
-import QRCode from 'qrcode';
 import { authService } from '../services/authService';
 import { fetchAdminAuditLogs, exportCustomers, exportAccountData, requestAccountDeletion } from '../services/api';
 import { UserProfile, UserSession } from '../types';
@@ -51,24 +50,12 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
 
   const [activeTab, setActiveTab] = useState<'2fa' | 'sessions' | 'governance' | 'audit'>(initialTab);
 
-  // User & 2FA State
-  const [user, setUser] = useState<UserProfile | null>(() => authService.getCurrentUser());
-  const [twoFactorEnabled, setTwoFactorEnabled] = useState(user?.twoFactorEnabled ?? false);
-  const [twoFactorMethod, setTwoFactorMethod] = useState<'sms' | 'authenticator'>(
-    user?.twoFactorMethod ?? 'sms'
-  );
+  // User & 2FA State (2FA requires server-side enrollment & schema migration — never fake localStorage state)
+  const [user] = useState<UserProfile | null>(() => authService.getCurrentUser());
 
-  // Setup Wizard State
-  const [setupMode, setSetupMode] = useState<'none' | 'sms' | 'authenticator'>('none');
-  const [smsPhone, setSmsPhone] = useState(user?.phone || '+1 (415) 890-2144');
-  const [verificationCode, setVerificationCode] = useState('');
-  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
-  const manualAuthenticatorKey = user?.twoFactorSecret || 'JBSWY3DPEHPK3PXP';
-  const [copiedKey, setCopiedKey] = useState(false);
-  const [copiedCodes, setCopiedCodes] = useState(false);
-
-  // Sessions State
-  const [sessions, setSessions] = useState<UserSession[]>(() => authService.getSessions());
+  // Sessions State (strictly server-verified via GET /api/auth/sessions)
+  const [sessions, setSessions] = useState<UserSession[]>([]);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   const [refreshCountdown, setRefreshCountdown] = useState(60);
   const [sessionToRevoke, setSessionToRevoke] = useState<UserSession | null>(null);
   const [showRevokeAllModal, setShowRevokeAllModal] = useState(false);
@@ -85,12 +72,26 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
   const [auditLogsError, setAuditLogsError] = useState<string | null>(null);
   const [auditFilter, setAuditFilter] = useState('');
 
+  const loadServerSessions = async () => {
+    setIsLoadingSessions(true);
+    try {
+      const serverSessions = await authService.fetchServerSessions();
+      setSessions(serverSessions);
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  };
+
+  useEffect(() => {
+    loadServerSessions();
+  }, []);
+
   // Auto-refresh sessions every 60 seconds
   useEffect(() => {
     const timer = setInterval(() => {
       setRefreshCountdown((prev) => {
         if (prev <= 1) {
-          setSessions(authService.getSessions());
+          loadServerSessions();
           return 60;
         }
         return prev - 1;
@@ -100,116 +101,27 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  // Generate real QR code when setup mode changes
-  useEffect(() => {
-    if (setupMode === 'authenticator') {
-      const email = user?.email || 'nageshsharat@gmail.com';
-      const otpauthUrl = `otpauth://totp/Churnveda:${email}?secret=${manualAuthenticatorKey}&issuer=Churnveda`;
-      QRCode.toDataURL(otpauthUrl, { width: 180, margin: 1 })
-        .then((url) => setQrCodeDataUrl(url))
-        .catch((err) => console.error('QR code generation failed:', err));
-    }
-  }, [setupMode, user?.email, manualAuthenticatorKey]);
-
-  const handleStartSetup = (method: 'sms' | 'authenticator') => {
-    setSetupMode(method);
-    setVerificationCode('');
-    if (method === 'sms') {
-      const res = authService.enableSmsTwoFactor(smsPhone);
-      showToast(res.message, 'info');
-    }
-  };
-
-  const handleCompleteSetup = () => {
-    if (!verificationCode.trim()) {
-      showToast('Please enter the 6-digit code.', 'error');
-      return;
-    }
-
-    const res = authService.verifyAndActivateTwoFactor(
-      setupMode as 'sms' | 'authenticator',
-      verificationCode,
-      setupMode === 'sms' ? smsPhone : undefined
-    );
-
-    if (res.success) {
-      setUser(authService.getCurrentUser());
-      setTwoFactorEnabled(true);
-      setTwoFactorMethod(setupMode as 'sms' | 'authenticator');
-      setSetupMode('none');
-      showToast(res.message, 'success');
-    } else {
-      showToast(res.message, 'error');
-    }
-  };
-
-  const handleDisable2FA = () => {
-    const res = authService.disableTwoFactor();
-    if (res.success) {
-      setUser(authService.getCurrentUser());
-      setTwoFactorEnabled(false);
-      showToast(res.message, 'info');
-    }
-  };
-
-  const handleCopyCodes = () => {
-    if (!user?.backupCodes) return;
-    navigator.clipboard.writeText(user.backupCodes.join('\n'));
-    setCopiedCodes(true);
-    showToast('10 Backup codes copied to clipboard.', 'success');
-    setTimeout(() => setCopiedCodes(false), 2000);
-  };
-
-  const handleDownloadCodes = () => {
-    if (!user?.backupCodes) return;
-    const content =
-      `CHURNVEDA - EMERGENCY BACKUP CODES\n` +
-      `Account: ${user.email}\n` +
-      `Generated: ${new Date().toLocaleDateString()}\n\n` +
-      `Keep these 10 single-use codes in a secure password vault.\n` +
-      `Each code can be used once if you lose access to your 2FA device.\n\n` +
-      user.backupCodes.map((c, i) => `${i + 1}. ${c}`).join('\n') +
-      `\n\nSupport: sharatbuchanalli4@gmail.com | +91 96202 62041`;
-
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `churnveda_backup_codes_${user.email.split('@')[0]}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    showToast('Backup codes text file downloaded.', 'success');
-  };
-
-  const handleRegenerateCodes = () => {
-    const res = authService.regenerateBackupCodes();
-    if (res.success) {
-      setUser(authService.getCurrentUser());
-      showToast('New set of 10 backup codes generated.', 'success');
-    }
-  };
-
-  const handleRevokeSingleSession = () => {
+  const handleRevokeSingleSession = async () => {
     if (!sessionToRevoke) return;
-    const res = authService.revokeSession(sessionToRevoke.id);
-    setSessions(authService.getSessions());
+    const wasCurrent = sessionToRevoke.isCurrent;
+    const res = await authService.revokeSession(sessionToRevoke.id);
     setSessionToRevoke(null);
+    await loadServerSessions();
 
-    if (sessionToRevoke.isCurrent) {
+    if (wasCurrent) {
       showToast(res.message, 'info');
       if (onLoggedOut) onLoggedOut();
       if (onNavigate) onNavigate('login');
     } else {
-      showToast(res.message, 'success');
+      showToast(res.message, res.success ? 'success' : 'error');
     }
   };
 
-  const handleRevokeAllOtherSessions = () => {
-    const res = authService.revokeAllOtherSessions();
+  const handleRevokeAllOtherSessions = async () => {
+    const res = await authService.revokeAllOtherSessions();
     setSessions(authService.getSessions());
     setShowRevokeAllModal(false);
-    showToast(res.message, 'success');
+    showToast(res.message, res.success ? 'success' : 'error');
   };
 
   const loadAuditLogs = async () => {
@@ -400,259 +312,35 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
           <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-100">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-900 flex items-center justify-center">
+                <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-800 flex items-center justify-center">
                   <Smartphone className="w-5 h-5" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-bold text-gray-900">Two-Factor Authentication (2FA) Status</h2>
+                  <h2 className="text-sm font-bold text-gray-900">Two-Factor Authentication (2FA)</h2>
                   <p className="text-xs text-gray-600 mt-0.5">
-                    Requires a secondary security code upon signing in from unrecognized browsers.
+                    Server-enforced multi-factor verification status for your Churnveda account.
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                {twoFactorEnabled ? (
-                  <button
-                    type="button"
-                    onClick={handleDisable2FA}
-                    className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-lg text-xs font-bold transition-colors"
-                  >
-                    Disable 2FA
-                  </button>
-                ) : (
-                  <span className="text-xs text-gray-400">Currently Disabled</span>
-                )}
-              </div>
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 text-amber-900 border border-amber-200 rounded-full text-xs font-bold self-start sm:self-auto">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
+                <span>Unavailable (Server Rollout Pending)</span>
+              </span>
             </div>
 
-            {/* Methods Selection Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Method 1: SMS 2FA */}
-              <div
-                className={`p-4 rounded-xl border transition-all ${
-                  twoFactorEnabled && twoFactorMethod === 'sms'
-                    ? 'border-blue-900 bg-blue-50/40'
-                    : 'border-gray-200 bg-white'
-                }`}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="space-y-1">
-                    <span className="font-bold text-gray-900 text-xs flex items-center gap-1.5">
-                      <Smartphone className="w-4 h-4 text-blue-900" />
-                      SMS Verification
-                    </span>
-                    <p className="text-[11px] text-gray-600">
-                      Receive a 6-digit code via carrier SMS ({user?.phone || smsPhone}).
-                    </p>
-                  </div>
-                  {twoFactorEnabled && twoFactorMethod === 'sms' ? (
-                    <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
-                      Active
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => handleStartSetup('sms')}
-                      className="text-xs font-bold text-blue-900 hover:underline"
-                    >
-                      Configure
-                    </button>
-                  )}
-                </div>
+            <div className="p-4 bg-amber-50/70 border border-amber-200 rounded-xl text-xs text-amber-950 space-y-2 leading-relaxed">
+              <div className="font-bold flex items-center gap-2">
+                <Lock className="w-4 h-4 text-amber-800 shrink-0" />
+                <span>Workspace-level TOTP / SMS 2FA is not yet enabled on the server</span>
               </div>
-
-              {/* Method 2: Authenticator App */}
-              <div
-                className={`p-4 rounded-xl border transition-all ${
-                  twoFactorEnabled && twoFactorMethod === 'authenticator'
-                    ? 'border-blue-900 bg-blue-50/40'
-                    : 'border-gray-200 bg-white'
-                }`}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="space-y-1">
-                    <span className="font-bold text-gray-900 text-xs flex items-center gap-1.5">
-                      <QrCode className="w-4 h-4 text-blue-900" />
-                      Authenticator App (TOTP)
-                    </span>
-                    <p className="text-[11px] text-gray-600">
-                      Google Authenticator, Authy, 1Password, or Microsoft Authenticator.
-                    </p>
-                  </div>
-                  {twoFactorEnabled && twoFactorMethod === 'authenticator' ? (
-                    <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
-                      Active
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => handleStartSetup('authenticator')}
-                      className="text-xs font-bold text-blue-900 hover:underline"
-                    >
-                      Configure
-                    </button>
-                  )}
-                </div>
-              </div>
+              <p className="text-amber-900">
+                To prevent misleading client-only protection, local 2FA toggles and unverified 6-digit prompts are disabled. Your account authentication remains protected by server-verified Firebase ID tokens, scrypt password hashing, and rate-limited sessions.
+              </p>
+              <p className="text-[11px] text-amber-800">
+                Enabling server-enforced TOTP 2FA requires a database schema migration for encrypted TOTP secrets and hashed backup codes. For accounts signing in with Google, multi-factor verification configured on your Google account applies automatically during Google Sign-In.
+              </p>
             </div>
-
-            {/* SETUP WIZARD (if user clicked configure) */}
-            {setupMode !== 'none' && (
-              <div className="p-4 bg-gray-50 border border-blue-200 rounded-xl space-y-4 animate-in fade-in">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-bold text-gray-900">
-                    Set up {setupMode === 'sms' ? 'SMS Verification' : 'Authenticator App'}
-                  </h4>
-                  <button
-                    type="button"
-                    onClick={() => setSetupMode('none')}
-                    className="text-xs text-gray-500 hover:text-gray-800"
-                  >
-                    Cancel
-                  </button>
-                </div>
-
-                {setupMode === 'sms' ? (
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Mobile Phone Number</label>
-                      <input
-                        type="tel"
-                        value={smsPhone}
-                        onChange={(e) => setSmsPhone(e.target.value)}
-                        placeholder="+1 (415) 555-0199"
-                        className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-xs"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleStartSetup('sms')}
-                      className="px-3 py-1.5 bg-blue-900 text-white rounded-lg text-xs font-bold hover:bg-blue-800"
-                    >
-                      Send 6-Digit Code
-                    </button>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
-                    <div className="text-center p-3 bg-white border border-gray-200 rounded-xl flex flex-col items-center justify-center">
-                      {qrCodeDataUrl ? (
-                        <img
-                          src={qrCodeDataUrl}
-                          alt="Two-factor authentication setup QR code for authenticator apps"
-                          width="144"
-                          height="144"
-                          decoding="async"
-                          className="w-36 h-36 rounded-lg"
-                        />
-                      ) : (
-                        <div className="w-36 h-36 bg-gray-100 flex items-center justify-center text-xs text-gray-400">
-                          Generating QR...
-                        </div>
-                      )}
-                      <span className="text-[10px] text-gray-500 mt-1">Scan with Google Authenticator</span>
-                    </div>
-
-                    <div className="space-y-2 text-xs">
-                      <span className="text-gray-600 block">Or enter manual secret key:</span>
-                      <div className="flex items-center gap-2">
-                        <code className="p-2 bg-white border border-gray-200 rounded-lg font-mono text-xs font-bold text-blue-950 flex-1">
-                          {manualAuthenticatorKey}
-                        </code>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            navigator.clipboard.writeText(manualAuthenticatorKey);
-                            setCopiedKey(true);
-                            setTimeout(() => setCopiedKey(false), 2000);
-                          }}
-                          className="px-2.5 py-2 border border-gray-200 rounded-lg bg-white hover:bg-gray-50 text-gray-700"
-                        >
-                          {copiedKey ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Verification Code Entry */}
-                <div className="pt-2 border-t border-gray-200 flex items-center gap-3">
-                  <input
-                    type="text"
-                    maxLength={6}
-                    value={verificationCode}
-                    onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, ''))}
-                    placeholder="Enter 6-digit code"
-                    className="w-44 px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs font-mono tracking-widest text-center"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleCompleteSetup}
-                    className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold transition-colors"
-                  >
-                    Verify & Activate 2FA
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* BACKUP CODES SECTION */}
-          <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
-                  <Key className="w-4 h-4 text-blue-900" />
-                  Single-Use Emergency Backup Codes
-                </h3>
-                <p className="text-xs text-gray-600 mt-0.5">
-                  10 emergency codes if you temporarily lose access to your phone or authenticator app.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleCopyCodes}
-                  className="px-2.5 py-1.5 border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50 flex items-center gap-1.5 transition-colors"
-                >
-                  {copiedCodes ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedCodes ? 'Copied' : 'Copy All'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleDownloadCodes}
-                  className="px-2.5 py-1.5 border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50 flex items-center gap-1.5 transition-colors"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Download .txt</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleRegenerateCodes}
-                  className="px-2.5 py-1.5 border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50 flex items-center gap-1.5 transition-colors"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Regenerate</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2">
-              {(user?.backupCodes || []).map((code, index) => (
-                <div
-                  key={index}
-                  className="p-2 bg-gray-50 border border-gray-200 rounded-lg text-center font-mono font-bold text-xs text-gray-800"
-                >
-                  {code}
-                </div>
-              ))}
-            </div>
-            <p className="text-[11px] text-gray-500">
-              Note: Each code is strictly single-use. Once entered on the login screen, it will be automatically invalidated.
-            </p>
           </div>
         </div>
       )}
@@ -665,10 +353,10 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
                   <Laptop className="w-4 h-4 text-blue-900" />
-                  Active Devices & Login Sessions
+                  Server-Verified Login Sessions
                 </h3>
                 <p className="text-xs text-gray-600 mt-0.5">
-                  Devices currently signed into this Churnveda instance. Auto-refreshes every 60 seconds.
+                  Active sessions verified directly from the Churnveda backend database and authentication provider.
                 </p>
               </div>
 
@@ -681,20 +369,21 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setSessions(authService.getSessions());
+                    loadServerSessions();
                     setRefreshCountdown(60);
-                    showToast('Session list refreshed.', 'info');
+                    showToast('Server session list refreshed.', 'info');
                   }}
                   className="p-1.5 border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-600"
                   title="Refresh Sessions"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" />
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`} />
                 </button>
 
                 <button
                   type="button"
                   onClick={() => setShowRevokeAllModal(true)}
-                  className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+                  disabled={sessions.length === 0}
+                  className="px-3 py-1.5 bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-700 border border-red-200 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
                 >
                   <LogOut className="w-3.5 h-3.5" />
                   <span>Revoke All Other Sessions</span>
@@ -707,10 +396,11 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
               <table className="w-full text-left border border-gray-200 rounded-xl text-xs overflow-hidden">
                 <thead className="bg-gray-50 text-gray-700 font-semibold border-b border-gray-200">
                   <tr>
-                    <th className="p-3">Device & Browser</th>
-                    <th className="p-3">Location</th>
-                    <th className="p-3">IP Address</th>
-                    <th className="p-3">Last Active</th>
+                    <th className="p-3">Session</th>
+                    <th className="p-3">Auth Provider</th>
+                    <th className="p-3">Session ID</th>
+                    <th className="p-3">Created</th>
+                    <th className="p-3">Status</th>
                     <th className="p-3 text-right">Action</th>
                   </tr>
                 </thead>
@@ -728,8 +418,11 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
                           )}
                         </div>
                       </td>
-                      <td className="p-3 text-gray-600">{sess.location}</td>
-                      <td className="p-3 font-mono text-[11px] text-gray-500">{sess.ip}</td>
+                      <td className="p-3 text-gray-600">{sess.browser || 'Server Token'}</td>
+                      <td className="p-3 font-mono text-[11px] text-gray-500">{sess.id}</td>
+                      <td className="p-3 text-gray-600">
+                        {sess.createdAt ? new Date(sess.createdAt).toLocaleString() : 'Active'}
+                      </td>
                       <td className="p-3 text-gray-600">{sess.lastActive}</td>
                       <td className="p-3 text-right">
                         <button
@@ -746,6 +439,13 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
                       </td>
                     </tr>
                   ))}
+                  {sessions.length === 0 && !isLoadingSessions && (
+                    <tr>
+                      <td colSpan={6} className="p-6 text-center text-gray-500 text-xs">
+                        No active server sessions found. Sign in to view your current verified session.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -753,8 +453,8 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
             <div className="p-3 bg-gray-50 rounded-xl border border-gray-200 text-[11px] text-gray-600 flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
               <span>
-                Sessions automatically expire after 30 days of inactivity. If you suspect unauthorized access, click{' '}
-                <strong>Revoke All Other Sessions</strong> and change your master password.
+                Only verified server session records are shown (IP/city metadata is not stored in the current session table). Clicking{' '}
+                <strong>Revoke All Other Sessions</strong> invalidates all other server tokens and revokes Firebase refresh tokens.
               </span>
             </div>
           </div>

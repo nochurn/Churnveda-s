@@ -34,6 +34,7 @@ export interface DbUser {
   phone?: string;
   email_verified: boolean;
   selected_plan: string;
+  plan_edition?: 'founding' | 'standard';
   billing_status: string;
   workspace_id: string;
   role: string;
@@ -74,13 +75,18 @@ export interface DbTrialVerification {
   user_id: string;
   email: string;
   tier: 'starter' | 'growth' | 'pro';
+  plan_edition?: 'founding' | 'standard';
   billing_cycle: 'monthly' | 'annual';
   billing_plan_id: string;
   razorpay_plan_id: string;
   razorpay_order_id: string;
+  razorpay_subscription_id?: string;
   amount_paise: number;
   currency: string;
   status: 'pending' | 'verified' | 'failed';
+  autopay_status?: 'not_established' | 'pending' | 'authenticated' | 'active' | 'failed' | 'cancelled' | 'expired';
+  mandate_failure_reason?: string;
+  consent_accepted_at?: string;
   payment_id?: string;
   verified_at?: string;
   created_at: string;
@@ -93,11 +99,23 @@ export interface DbSubscription {
   user_id: string;
   email: string;
   tier: 'starter' | 'growth' | 'pro';
+  plan_edition?: 'founding' | 'standard';
   billing_cycle: 'monthly' | 'annual';
   billing_plan_id: string;
   razorpay_plan_id: string;
   razorpay_subscription_id?: string;
+  razorpay_mandate_id?: string;
+  razorpay_token_id?: string;
   status: 'pending' | 'trialing' | 'active' | 'halted' | 'cancelled' | 'past_due' | 'trial_expired';
+  autopay_status?: 'not_established' | 'pending' | 'authenticated' | 'active' | 'failed' | 'cancelled' | 'expired';
+  payment_method_type?: string;
+  billing_frequency?: 'monthly' | 'annual';
+  next_billing_at?: string;
+  mandate_authorized_at?: string;
+  mandate_failure_reason?: string;
+  verification_amount_cents?: number;
+  verification_currency?: string;
+  consent_accepted_at?: string;
   trial_started_at?: string;
   trial_ends_at?: string;
   payment_verification_status: 'pending' | 'verified' | 'failed';
@@ -237,7 +255,9 @@ export function getDatabaseStatusInfo(): {
 }
 
 // Ensure persistent data directory exists
-const dataDir = path.resolve(process.cwd(), 'data');
+const dataDir = process.env.CHURNVEDA_DATA_DIR?.trim()
+  ? path.resolve(process.env.CHURNVEDA_DATA_DIR.trim())
+  : path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(dataDir)) {
   try {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -1122,6 +1142,26 @@ export async function runPostgresMigrations(pool: Pool) {
       );
       CREATE INDEX IF NOT EXISTS idx_outbound_log_ws_cust ON outbound_messages_log(workspace_id, customer_id, channel, sent_at);
 
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_edition TEXT DEFAULT 'founding';
+      ALTER TABLE trial_verifications ADD COLUMN IF NOT EXISTS plan_edition TEXT DEFAULT 'founding';
+      ALTER TABLE trial_verifications ADD COLUMN IF NOT EXISTS razorpay_subscription_id TEXT;
+      ALTER TABLE trial_verifications ADD COLUMN IF NOT EXISTS autopay_status TEXT DEFAULT 'not_established';
+      ALTER TABLE trial_verifications ADD COLUMN IF NOT EXISTS mandate_failure_reason TEXT;
+      ALTER TABLE trial_verifications ADD COLUMN IF NOT EXISTS consent_accepted_at TEXT;
+
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS plan_edition TEXT DEFAULT 'founding';
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS autopay_status TEXT DEFAULT 'not_established';
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS razorpay_mandate_id TEXT;
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS razorpay_token_id TEXT;
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS payment_method_type TEXT;
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS billing_frequency TEXT;
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS next_billing_at TIMESTAMPTZ;
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS mandate_authorized_at TIMESTAMPTZ;
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS mandate_failure_reason TEXT;
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS verification_amount_cents INTEGER;
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS verification_currency TEXT;
+      ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS consent_accepted_at TIMESTAMPTZ;
+
       -- Enable Row-Level Security (RLS) across all private tables if not already enabled
       DO $$
       DECLARE tbl text;
@@ -1431,6 +1471,32 @@ function runSqliteMigrations(db: DatabaseSync) {
       created_at TEXT NOT NULL
     );
   `);
+
+  const ensureSqliteCol = (table: string, col: string, def: string) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === col)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def};`);
+    }
+  };
+  ensureSqliteCol('users', 'plan_edition', "TEXT DEFAULT 'founding'");
+  ensureSqliteCol('trial_verifications', 'plan_edition', "TEXT DEFAULT 'founding'");
+  ensureSqliteCol('trial_verifications', 'razorpay_subscription_id', 'TEXT');
+  ensureSqliteCol('trial_verifications', 'autopay_status', "TEXT DEFAULT 'not_established'");
+  ensureSqliteCol('trial_verifications', 'mandate_failure_reason', 'TEXT');
+  ensureSqliteCol('trial_verifications', 'consent_accepted_at', 'TEXT');
+
+  ensureSqliteCol('subscriptions', 'plan_edition', "TEXT DEFAULT 'founding'");
+  ensureSqliteCol('subscriptions', 'autopay_status', "TEXT DEFAULT 'not_established'");
+  ensureSqliteCol('subscriptions', 'razorpay_mandate_id', 'TEXT');
+  ensureSqliteCol('subscriptions', 'razorpay_token_id', 'TEXT');
+  ensureSqliteCol('subscriptions', 'payment_method_type', 'TEXT');
+  ensureSqliteCol('subscriptions', 'billing_frequency', 'TEXT');
+  ensureSqliteCol('subscriptions', 'next_billing_at', 'TEXT');
+  ensureSqliteCol('subscriptions', 'mandate_authorized_at', 'TEXT');
+  ensureSqliteCol('subscriptions', 'mandate_failure_reason', 'TEXT');
+  ensureSqliteCol('subscriptions', 'verification_amount_cents', 'INTEGER');
+  ensureSqliteCol('subscriptions', 'verification_currency', 'TEXT');
+  ensureSqliteCol('subscriptions', 'consent_accepted_at', 'TEXT');
 }
 
 // ----------------------------------------------------------------------------
@@ -1570,9 +1636,9 @@ export const db = {
         const query = `
           INSERT INTO users (
             id, full_name, company_name, email, password_hash, phone, email_verified,
-            selected_plan, billing_status, workspace_id, role, razorpay_subscription_id,
+            selected_plan, plan_edition, billing_status, workspace_id, role, razorpay_subscription_id,
             razorpay_plan_id, billing_plan_id, trial_ends_at, created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
           ON CONFLICT (id) DO UPDATE SET
             full_name = EXCLUDED.full_name,
             company_name = EXCLUDED.company_name,
@@ -1581,6 +1647,7 @@ export const db = {
             phone = EXCLUDED.phone,
             email_verified = EXCLUDED.email_verified,
             selected_plan = EXCLUDED.selected_plan,
+            plan_edition = COALESCE(EXCLUDED.plan_edition, users.plan_edition),
             billing_status = EXCLUDED.billing_status,
             workspace_id = EXCLUDED.workspace_id,
             role = EXCLUDED.role,
@@ -1594,6 +1661,7 @@ export const db = {
         const res = await pgPool.query(query, [
           targetUserId, user.full_name, user.company_name, cleanEmail,
           user.password_hash || existingByEmail?.password_hash || '', user.phone || null, user.email_verified, user.selected_plan,
+          user.plan_edition || existingByEmail?.plan_edition || 'standard',
           user.billing_status, targetWorkspaceId, user.role || 'Admin',
           user.razorpay_subscription_id || null, user.razorpay_plan_id || null,
           user.billing_plan_id || null, user.trial_ends_at || null, user.created_at, user.updated_at
@@ -1604,9 +1672,9 @@ export const db = {
       const stmt = sqliteDb!.prepare(`
         INSERT INTO users (
           id, full_name, company_name, email, password_hash, phone, email_verified,
-          selected_plan, billing_status, workspace_id, role, razorpay_subscription_id,
+          selected_plan, plan_edition, billing_status, workspace_id, role, razorpay_subscription_id,
           razorpay_plan_id, billing_plan_id, trial_ends_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (id) DO UPDATE SET
           full_name = excluded.full_name,
           company_name = excluded.company_name,
@@ -1615,6 +1683,7 @@ export const db = {
           phone = excluded.phone,
           email_verified = excluded.email_verified,
           selected_plan = excluded.selected_plan,
+          plan_edition = COALESCE(excluded.plan_edition, users.plan_edition),
           billing_status = excluded.billing_status,
           workspace_id = excluded.workspace_id,
           role = excluded.role,
@@ -1627,6 +1696,7 @@ export const db = {
       stmt.run(
         targetUserId, user.full_name, user.company_name, cleanEmail,
         user.password_hash || existingByEmail?.password_hash || '', user.phone || null, user.email_verified ? 1 : 0, user.selected_plan,
+        user.plan_edition || existingByEmail?.plan_edition || 'standard',
         user.billing_status, targetWorkspaceId, user.role || 'Admin',
         user.razorpay_subscription_id || null, user.razorpay_plan_id || null,
         user.billing_plan_id || null, user.trial_ends_at || null, user.created_at, user.updated_at
@@ -1671,6 +1741,7 @@ export const db = {
       updates: {
         role?: 'Admin' | 'Analyst' | 'Viewer';
         selected_plan?: string;
+        plan_edition?: 'founding' | 'standard';
         billing_status?: string;
         billing_plan_id?: string | null;
         razorpay_plan_id?: string | null;
@@ -1683,15 +1754,17 @@ export const db = {
           `UPDATE users SET
             role = COALESCE($1, role),
             selected_plan = COALESCE($2, selected_plan),
-            billing_status = COALESCE($3, billing_status),
-            billing_plan_id = COALESCE($4, billing_plan_id),
-            razorpay_plan_id = COALESCE($5, razorpay_plan_id),
-            updated_at = $6
-          WHERE id = $7
+            plan_edition = COALESCE($3, plan_edition),
+            billing_status = COALESCE($4, billing_status),
+            billing_plan_id = COALESCE($5, billing_plan_id),
+            razorpay_plan_id = COALESCE($6, razorpay_plan_id),
+            updated_at = $7
+          WHERE id = $8
           RETURNING *`,
           [
             updates.role ?? null,
             updates.selected_plan ?? null,
+            updates.plan_edition ?? null,
             updates.billing_status ?? null,
             updates.billing_plan_id ?? null,
             updates.razorpay_plan_id ?? null,
@@ -1705,6 +1778,7 @@ export const db = {
         `UPDATE users SET
           role = COALESCE(?, role),
           selected_plan = COALESCE(?, selected_plan),
+          plan_edition = COALESCE(?, plan_edition),
           billing_status = COALESCE(?, billing_status),
           billing_plan_id = COALESCE(?, billing_plan_id),
           razorpay_plan_id = COALESCE(?, razorpay_plan_id),
@@ -1713,6 +1787,7 @@ export const db = {
       ).run(
         updates.role ?? null,
         updates.selected_plan ?? null,
+        updates.plan_edition ?? null,
         updates.billing_status ?? null,
         updates.billing_plan_id ?? null,
         updates.razorpay_plan_id ?? null,
@@ -1762,6 +1837,36 @@ export const db = {
         return;
       }
       sqliteDb!.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+    },
+
+    async listByUserId(userId: string): Promise<DbSession[]> {
+      if (!databaseInitialized) await initDatabase();
+      const now = Date.now();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query(
+          'SELECT token, user_id, email, workspace_id, expires_at, created_at FROM sessions WHERE user_id = $1 AND expires_at > $2 ORDER BY created_at DESC',
+          [userId, now]
+        );
+        return res.rows as DbSession[];
+      }
+      const stmt = sqliteDb!.prepare(
+        'SELECT token, user_id, email, workspace_id, expires_at, created_at FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC'
+      );
+      return stmt.all(userId, now) as unknown as DbSession[];
+    },
+
+    async deleteOthersByUserId(userId: string, keepToken?: string): Promise<number> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = keepToken
+          ? await pgPool.query('DELETE FROM sessions WHERE user_id = $1 AND token <> $2', [userId, keepToken])
+          : await pgPool.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+        return res.rowCount || 0;
+      }
+      const info = keepToken
+        ? sqliteDb!.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(userId, keepToken)
+        : sqliteDb!.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+      return Number(info.changes || 0);
     },
 
     async deleteByUserId(userId: string): Promise<void> {
@@ -2230,15 +2335,27 @@ export const db = {
     }
   },
 
-  // Trial Verifications (₹1 Razorpay Verification Orders)
+  // Trial Verifications ($1 USD Card Verification & Mandate Setup)
   trialVerifications: {
     async getByOrderId(orderId: string): Promise<DbTrialVerification | null> {
       if (!databaseInitialized) await initDatabase();
       if (isPostgresActive && pgPool) {
-        const res = await pgPool.query('SELECT * FROM trial_verifications WHERE razorpay_order_id = $1', [orderId]);
+        const res = await pgPool.query(
+          'SELECT * FROM trial_verifications WHERE razorpay_order_id = $1 OR razorpay_subscription_id = $1 LIMIT 1',
+          [orderId]
+        );
         return res.rows[0] || null;
       }
-      return (sqliteDb!.prepare('SELECT * FROM trial_verifications WHERE razorpay_order_id = ?').get(orderId) as unknown as DbTrialVerification) || null;
+      return (sqliteDb!.prepare('SELECT * FROM trial_verifications WHERE razorpay_order_id = ? OR razorpay_subscription_id = ? LIMIT 1').get(orderId, orderId) as unknown as DbTrialVerification) || null;
+    },
+
+    async getBySubscriptionId(subId: string): Promise<DbTrialVerification | null> {
+      if (!databaseInitialized) await initDatabase();
+      if (isPostgresActive && pgPool) {
+        const res = await pgPool.query('SELECT * FROM trial_verifications WHERE razorpay_subscription_id = $1 LIMIT 1', [subId]);
+        return res.rows[0] || null;
+      }
+      return (sqliteDb!.prepare('SELECT * FROM trial_verifications WHERE razorpay_subscription_id = ? LIMIT 1').get(subId) as unknown as DbTrialVerification) || null;
     },
 
     async getByWorkspace(workspaceId: string): Promise<DbTrialVerification[]> {
@@ -2255,12 +2372,18 @@ export const db = {
       if (isPostgresActive && pgPool) {
         const query = `
           INSERT INTO trial_verifications (
-            id, workspace_id, user_id, email, tier, billing_cycle,
-            billing_plan_id, razorpay_plan_id, razorpay_order_id, amount_paise,
-            currency, status, payment_id, verified_at, created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            id, workspace_id, user_id, email, tier, plan_edition, billing_cycle,
+            billing_plan_id, razorpay_plan_id, razorpay_order_id, razorpay_subscription_id, amount_paise,
+            currency, status, autopay_status, mandate_failure_reason, consent_accepted_at,
+            payment_id, verified_at, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
           ON CONFLICT (razorpay_order_id) DO UPDATE SET
             status = EXCLUDED.status,
+            plan_edition = COALESCE(EXCLUDED.plan_edition, trial_verifications.plan_edition),
+            razorpay_subscription_id = COALESCE(EXCLUDED.razorpay_subscription_id, trial_verifications.razorpay_subscription_id),
+            autopay_status = COALESCE(EXCLUDED.autopay_status, trial_verifications.autopay_status),
+            mandate_failure_reason = EXCLUDED.mandate_failure_reason,
+            consent_accepted_at = COALESCE(EXCLUDED.consent_accepted_at, trial_verifications.consent_accepted_at),
             payment_id = EXCLUDED.payment_id,
             verified_at = EXCLUDED.verified_at,
             updated_at = EXCLUDED.updated_at
@@ -2268,29 +2391,37 @@ export const db = {
         `;
         const res = await pgPool.query(query, [
           tv.id, tv.workspace_id, tv.user_id, tv.email.toLowerCase().trim(),
-          tv.tier, tv.billing_cycle, tv.billing_plan_id, tv.razorpay_plan_id,
-          tv.razorpay_order_id, tv.amount_paise, tv.currency || 'INR',
-          tv.status, tv.payment_id || null, tv.verified_at || null, tv.created_at, tv.updated_at
+          tv.tier, tv.plan_edition || 'standard', tv.billing_cycle, tv.billing_plan_id, tv.razorpay_plan_id,
+          tv.razorpay_order_id, tv.razorpay_subscription_id || null, tv.amount_paise, tv.currency || 'USD',
+          tv.status, tv.autopay_status || 'not_established', tv.mandate_failure_reason || null, tv.consent_accepted_at || null,
+          tv.payment_id || null, tv.verified_at || null, tv.created_at, tv.updated_at
         ]);
         return res.rows[0];
       }
 
       sqliteDb!.prepare(`
         INSERT INTO trial_verifications (
-          id, workspace_id, user_id, email, tier, billing_cycle,
-          billing_plan_id, razorpay_plan_id, razorpay_order_id, amount_paise,
-          currency, status, payment_id, verified_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, workspace_id, user_id, email, tier, plan_edition, billing_cycle,
+          billing_plan_id, razorpay_plan_id, razorpay_order_id, razorpay_subscription_id, amount_paise,
+          currency, status, autopay_status, mandate_failure_reason, consent_accepted_at,
+          payment_id, verified_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (razorpay_order_id) DO UPDATE SET
           status = excluded.status,
+          plan_edition = COALESCE(excluded.plan_edition, trial_verifications.plan_edition),
+          razorpay_subscription_id = COALESCE(excluded.razorpay_subscription_id, trial_verifications.razorpay_subscription_id),
+          autopay_status = COALESCE(excluded.autopay_status, trial_verifications.autopay_status),
+          mandate_failure_reason = excluded.mandate_failure_reason,
+          consent_accepted_at = COALESCE(excluded.consent_accepted_at, trial_verifications.consent_accepted_at),
           payment_id = excluded.payment_id,
           verified_at = excluded.verified_at,
           updated_at = excluded.updated_at;
       `).run(
         tv.id, tv.workspace_id, tv.user_id, tv.email.toLowerCase().trim(),
-        tv.tier, tv.billing_cycle, tv.billing_plan_id, tv.razorpay_plan_id,
-        tv.razorpay_order_id, tv.amount_paise, tv.currency || 'INR',
-        tv.status, tv.payment_id || null, tv.verified_at || null, tv.created_at, tv.updated_at
+        tv.tier, tv.plan_edition || 'standard', tv.billing_cycle, tv.billing_plan_id, tv.razorpay_plan_id,
+        tv.razorpay_order_id, tv.razorpay_subscription_id || null, tv.amount_paise, tv.currency || 'USD',
+        tv.status, tv.autopay_status || 'not_established', tv.mandate_failure_reason || null, tv.consent_accepted_at || null,
+        tv.payment_id || null, tv.verified_at || null, tv.created_at, tv.updated_at
       );
       return tv;
     },
@@ -2330,19 +2461,45 @@ export const db = {
       if (isPostgresActive && pgPool) {
         const query = `
           INSERT INTO subscriptions (
-            id, workspace_id, user_id, email, tier, billing_cycle,
+            id, workspace_id, user_id, email, tier, plan_edition, billing_cycle,
             billing_plan_id, razorpay_plan_id, razorpay_subscription_id,
-            status, trial_started_at, trial_ends_at, payment_verification_status,
+            razorpay_mandate_id, razorpay_token_id,
+            status, autopay_status, payment_method_type, billing_frequency,
+            next_billing_at, mandate_authorized_at, mandate_failure_reason,
+            verification_amount_cents, verification_currency, consent_accepted_at,
+            trial_started_at, trial_ends_at, payment_verification_status,
             razorpay_verification_order_id, razorpay_verification_payment_id,
             created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10,
+            $11, $12,
+            $13, $14, $15, $16,
+            $17, $18, $19,
+            $20, $21, $22,
+            $23, $24, $25,
+            $26, $27,
+            $28, $29
+          )
           ON CONFLICT (workspace_id) DO UPDATE SET
             tier = EXCLUDED.tier,
+            plan_edition = COALESCE(EXCLUDED.plan_edition, subscriptions.plan_edition),
             billing_cycle = EXCLUDED.billing_cycle,
             billing_plan_id = EXCLUDED.billing_plan_id,
             razorpay_plan_id = EXCLUDED.razorpay_plan_id,
             razorpay_subscription_id = COALESCE(EXCLUDED.razorpay_subscription_id, subscriptions.razorpay_subscription_id),
+            razorpay_mandate_id = COALESCE(EXCLUDED.razorpay_mandate_id, subscriptions.razorpay_mandate_id),
+            razorpay_token_id = COALESCE(EXCLUDED.razorpay_token_id, subscriptions.razorpay_token_id),
             status = EXCLUDED.status,
+            autopay_status = COALESCE(EXCLUDED.autopay_status, subscriptions.autopay_status),
+            payment_method_type = COALESCE(EXCLUDED.payment_method_type, subscriptions.payment_method_type),
+            billing_frequency = COALESCE(EXCLUDED.billing_frequency, subscriptions.billing_frequency),
+            next_billing_at = COALESCE(EXCLUDED.next_billing_at, subscriptions.next_billing_at),
+            mandate_authorized_at = COALESCE(EXCLUDED.mandate_authorized_at, subscriptions.mandate_authorized_at),
+            mandate_failure_reason = EXCLUDED.mandate_failure_reason,
+            verification_amount_cents = COALESCE(EXCLUDED.verification_amount_cents, subscriptions.verification_amount_cents),
+            verification_currency = COALESCE(EXCLUDED.verification_currency, subscriptions.verification_currency),
+            consent_accepted_at = COALESCE(EXCLUDED.consent_accepted_at, subscriptions.consent_accepted_at),
             trial_started_at = COALESCE(EXCLUDED.trial_started_at, subscriptions.trial_started_at),
             trial_ends_at = COALESCE(EXCLUDED.trial_ends_at, subscriptions.trial_ends_at),
             payment_verification_status = EXCLUDED.payment_verification_status,
@@ -2353,9 +2510,13 @@ export const db = {
         `;
         const res = await pgPool.query(query, [
           sub.id, sub.workspace_id, sub.user_id, sub.email.toLowerCase().trim(),
-          sub.tier, sub.billing_cycle, sub.billing_plan_id, sub.razorpay_plan_id,
-          sub.razorpay_subscription_id || null, sub.status, sub.trial_started_at || null,
-          sub.trial_ends_at || null, sub.payment_verification_status,
+          sub.tier, sub.plan_edition || 'standard', sub.billing_cycle,
+          sub.billing_plan_id, sub.razorpay_plan_id, sub.razorpay_subscription_id || null,
+          sub.razorpay_mandate_id || null, sub.razorpay_token_id || null,
+          sub.status, sub.autopay_status || 'not_established', sub.payment_method_type || null, sub.billing_frequency || sub.billing_cycle,
+          sub.next_billing_at || null, sub.mandate_authorized_at || null, sub.mandate_failure_reason || null,
+          sub.verification_amount_cents ?? null, sub.verification_currency || null, sub.consent_accepted_at || null,
+          sub.trial_started_at || null, sub.trial_ends_at || null, sub.payment_verification_status,
           sub.razorpay_verification_order_id || null, sub.razorpay_verification_payment_id || null,
           sub.created_at, sub.updated_at
         ]);
@@ -2364,19 +2525,35 @@ export const db = {
 
       sqliteDb!.prepare(`
         INSERT INTO subscriptions (
-          id, workspace_id, user_id, email, tier, billing_cycle,
+          id, workspace_id, user_id, email, tier, plan_edition, billing_cycle,
           billing_plan_id, razorpay_plan_id, razorpay_subscription_id,
-          status, trial_started_at, trial_ends_at, payment_verification_status,
+          razorpay_mandate_id, razorpay_token_id,
+          status, autopay_status, payment_method_type, billing_frequency,
+          next_billing_at, mandate_authorized_at, mandate_failure_reason,
+          verification_amount_cents, verification_currency, consent_accepted_at,
+          trial_started_at, trial_ends_at, payment_verification_status,
           razorpay_verification_order_id, razorpay_verification_payment_id,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (workspace_id) DO UPDATE SET
           tier = excluded.tier,
+          plan_edition = COALESCE(excluded.plan_edition, subscriptions.plan_edition),
           billing_cycle = excluded.billing_cycle,
           billing_plan_id = excluded.billing_plan_id,
           razorpay_plan_id = excluded.razorpay_plan_id,
           razorpay_subscription_id = COALESCE(excluded.razorpay_subscription_id, subscriptions.razorpay_subscription_id),
+          razorpay_mandate_id = COALESCE(excluded.razorpay_mandate_id, subscriptions.razorpay_mandate_id),
+          razorpay_token_id = COALESCE(excluded.razorpay_token_id, subscriptions.razorpay_token_id),
           status = excluded.status,
+          autopay_status = COALESCE(excluded.autopay_status, subscriptions.autopay_status),
+          payment_method_type = COALESCE(excluded.payment_method_type, subscriptions.payment_method_type),
+          billing_frequency = COALESCE(excluded.billing_frequency, subscriptions.billing_frequency),
+          next_billing_at = COALESCE(excluded.next_billing_at, subscriptions.next_billing_at),
+          mandate_authorized_at = COALESCE(excluded.mandate_authorized_at, subscriptions.mandate_authorized_at),
+          mandate_failure_reason = excluded.mandate_failure_reason,
+          verification_amount_cents = COALESCE(excluded.verification_amount_cents, subscriptions.verification_amount_cents),
+          verification_currency = COALESCE(excluded.verification_currency, subscriptions.verification_currency),
+          consent_accepted_at = COALESCE(excluded.consent_accepted_at, subscriptions.consent_accepted_at),
           trial_started_at = COALESCE(excluded.trial_started_at, subscriptions.trial_started_at),
           trial_ends_at = COALESCE(excluded.trial_ends_at, subscriptions.trial_ends_at),
           payment_verification_status = excluded.payment_verification_status,
@@ -2385,9 +2562,13 @@ export const db = {
           updated_at = excluded.updated_at;
       `).run(
         sub.id, sub.workspace_id, sub.user_id, sub.email.toLowerCase().trim(),
-        sub.tier, sub.billing_cycle, sub.billing_plan_id, sub.razorpay_plan_id,
-        sub.razorpay_subscription_id || null, sub.status, sub.trial_started_at || null,
-        sub.trial_ends_at || null, sub.payment_verification_status,
+        sub.tier, sub.plan_edition || 'standard', sub.billing_cycle,
+        sub.billing_plan_id, sub.razorpay_plan_id, sub.razorpay_subscription_id || null,
+        sub.razorpay_mandate_id || null, sub.razorpay_token_id || null,
+        sub.status, sub.autopay_status || 'not_established', sub.payment_method_type || null, sub.billing_frequency || sub.billing_cycle,
+        sub.next_billing_at || null, sub.mandate_authorized_at || null, sub.mandate_failure_reason || null,
+        sub.verification_amount_cents ?? null, sub.verification_currency || null, sub.consent_accepted_at || null,
+        sub.trial_started_at || null, sub.trial_ends_at || null, sub.payment_verification_status,
         sub.razorpay_verification_order_id || null, sub.razorpay_verification_payment_id || null,
         sub.created_at, sub.updated_at
       );

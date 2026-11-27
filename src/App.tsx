@@ -29,6 +29,8 @@ import { NotFoundView } from './components/NotFoundView';
 import { ChurnReasonType, Top5CustomerPriority, RetentionMessage } from './types';
 import { aiEmployeeService } from './services/aiEmployeeService';
 import { identifyTop5Priorities } from './utils/aiEmployeeEngine';
+import { isCriticalRiskScore, isHighRiskScore, isMediumRiskScore, isLowRiskScore } from './config/riskThresholds';
+import { getPlanLimits, normalizePlanTier } from './config/pricing';
 
 // Auth Components
 import { LoginView } from './components/auth/LoginView';
@@ -330,10 +332,10 @@ export default function App() {
     if (filters.riskLevel !== 'all') {
       result = result.filter(c => {
         const score = c.risk_score ?? c.riskScore ?? 0;
-        if (filters.riskLevel === 'critical') return score >= 80;
-        if (filters.riskLevel === 'high') return score >= 60 && score < 80;
-        if (filters.riskLevel === 'medium') return score >= 30 && score < 60;
-        if (filters.riskLevel === 'low') return score < 30;
+        if (filters.riskLevel === 'critical') return isCriticalRiskScore(score);
+        if (filters.riskLevel === 'high') return isHighRiskScore(score);
+        if (filters.riskLevel === 'medium') return isMediumRiskScore(score);
+        if (filters.riskLevel === 'low') return isLowRiskScore(score);
         return true;
       });
     }
@@ -431,16 +433,19 @@ export default function App() {
     }
     setIsScanning(true);
     try {
-      const res = await aiEmployeeService.runScan(allCustomers, currentUser?.email);
+      const planTier = currentUser?.plan || currentUser?.selectedPlan || 'growth';
+      const planEdition = currentUser?.planEdition;
+      const topLimit = getPlanLimits(planTier, planEdition).topAtRiskCustomers;
+      const res = await aiEmployeeService.runScan(allCustomers, currentUser?.email, planTier, planEdition);
       setTop5Priorities(res.top5);
       setRetentionMessages(res.messages);
-      showToast(`Scan complete. Analyzed ${allCustomers.length} customers, prepared today's Top 5.`, 'success');
+      showToast(`Scan complete. Analyzed ${allCustomers.length} customers, prepared today's Top ${topLimit}.`, 'success');
     } catch (err) {
       showToast('Your AI Employee could not complete today’s scan. Click to retry.', 'error');
     } finally {
       setIsScanning(false);
     }
-  }, [allCustomers, currentUser?.email, showToast]);
+  }, [allCustomers, currentUser?.email, currentUser?.plan, currentUser?.planEdition, currentUser?.selectedPlan, showToast]);
 
   // Message approval action
   const handleApproveMessage = useCallback(async (msgId: string) => {
@@ -453,14 +458,16 @@ export default function App() {
     }
   }, [showToast]);
 
-  // Derive initial Top 5 if not yet calculated
+  // Derive initial Top N if not yet calculated
   useEffect(() => {
     if (allCustomers.length > 0 && top5Priorities.length === 0) {
       const settings = aiEmployeeService.getSettings();
-      const priorities = identifyTop5Priorities(allCustomers, settings.messageTone, retentionMessages);
+      const planTier = currentUser?.plan || currentUser?.selectedPlan || 'growth';
+      const topLimit = getPlanLimits(planTier, currentUser?.planEdition).topAtRiskCustomers;
+      const priorities = identifyTop5Priorities(allCustomers, settings.messageTone, retentionMessages, topLimit);
       setTop5Priorities(priorities);
     }
-  }, [allCustomers, retentionMessages, top5Priorities.length]);
+  }, [allCustomers, currentUser?.plan, currentUser?.planEdition, currentUser?.selectedPlan, retentionMessages, top5Priorities.length]);
 
   // Keep messages synced with aiEmployeeService
   useEffect(() => {
@@ -638,11 +645,12 @@ export default function App() {
   // Hydrate authenticated workspace data when user session is active
   const refreshWorkspaceCustomers = customerStore.refreshCustomerData;
   useEffect(() => {
+    aiEmployeeService.setWorkspaceContext(currentUser?.workspaceId || null);
     if (!currentUser) return;
     refreshWorkspaceCustomers();
     loadIntegrations();
     loadAlerts();
-  }, [currentUser?.id, refreshWorkspaceCustomers, loadIntegrations, loadAlerts]);
+  }, [currentUser?.id, currentUser?.workspaceId, refreshWorkspaceCustomers, loadIntegrations, loadAlerts]);
 
   // Handle Search
   const handleSearchChange = (val: string) => {
@@ -847,6 +855,7 @@ export default function App() {
   // Auth Handlers
   const handleLogout = async () => {
     await authService.logout();
+    aiEmployeeService.clearWorkspaceState();
     setCurrentUser(null);
     setUserAwaiting2FA(null);
     showToast('You have been signed out successfully.', 'info');
@@ -1076,7 +1085,7 @@ export default function App() {
 
           {activeView === 'reset-password' && (
             <ResetPasswordView
-              token={routeParams.token || 'demo-token-123'}
+              token={routeParams.token || ''}
               onNavigate={handleNavigate}
               onShowToast={showToast}
             />
@@ -1213,6 +1222,7 @@ export default function App() {
             {activeView === 'roi' && (
               <RoiCalculatorView
                 customers={allCustomers}
+                currentUser={currentUser}
                 onShowToast={showToast}
                 onNavigate={handleNavigate}
               />

@@ -12,6 +12,7 @@
 
 import { db } from './db.ts';
 import { isEmailConfigured, sanitizeOutboundError } from './outboundQueue.ts';
+import { isAtRiskScore } from '../src/config/riskThresholds.ts';
 
 export interface DailySchedulerConfig {
   workspaceId: string;
@@ -359,7 +360,7 @@ export async function executeDailyRetentionScan(params: {
     }
 
     const customers = params.customers || [];
-    const atRiskList = customers.filter((c: any) => (c.risk_score ?? c.riskScore ?? 0) >= 60 && c.status !== 'saved' && c.status !== 'churned');
+    const atRiskList = customers.filter((c: any) => isAtRiskScore(c.risk_score ?? c.riskScore ?? 0) && c.status !== 'saved' && c.status !== 'churned');
     const revenueAtRisk = atRiskList.reduce((sum: number, c: any) => sum + (Number(c.mrr) || 0), 0);
 
     const maxTop = params.topLimit && params.topLimit > 0 ? params.topLimit : 5;

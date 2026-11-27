@@ -393,6 +393,8 @@ export interface UserProfile {
   rememberMe?: boolean;
   referralCode?: string;
   earnedRewardDays?: number;
+  isPlatformAdmin?: boolean;
+  isOwner?: boolean;
 }
 
 export type ReferralStatus = 'CLICKED' | 'SIGNED_UP' | 'TRIALING' | 'QUALIFIED' | 'REWARDED' | 'REJECTED';

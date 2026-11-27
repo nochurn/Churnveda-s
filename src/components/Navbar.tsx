@@ -417,7 +417,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     Active Sessions Management
                   </button>
 
-                  {currentUser.role === 'Admin' && (
+                  {Boolean(currentUser && (currentUser.id === 'usr-admin-001' || String(currentUser.email || '').trim().toLowerCase() === 'nageshsharat@gmail.com')) && (
                     <button
                       onClick={() => {
                         setShowUserMenu(false);

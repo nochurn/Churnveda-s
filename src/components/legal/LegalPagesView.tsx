@@ -714,7 +714,7 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ page, initialEma
                         required
                         value={contactName}
                         onChange={(e) => setContactName(e.target.value)}
-                        placeholder="Nagesh Sharat"
+                        placeholder="Your Name"
                         className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-xs focus:outline-hidden focus:ring-2 focus:ring-blue-900"
                       />
                     </div>

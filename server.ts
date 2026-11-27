@@ -851,6 +851,22 @@ export function validatePasswordComplexity(password: string) {
   };
 }
 
+const PLATFORM_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'nageshsharat@gmail.com').trim().toLowerCase();
+const PLATFORM_ADMIN_UID = (process.env.ADMIN_UID || 'usr-admin-001').trim();
+const PLATFORM_ADMIN_NAME = process.env.ADMIN_NAME?.trim() || 'Nagesh Sharat';
+
+export function isPlatformAdminUser(user?: DbUser | { id?: string; email?: string } | null): boolean {
+  if (!user) return false;
+  const email = String(user.email || '').trim().toLowerCase();
+  const uid = String(user.id || '').trim();
+  return (
+    uid === 'usr-admin-001' ||
+    (Boolean(PLATFORM_ADMIN_UID) && uid === PLATFORM_ADMIN_UID) ||
+    email === PLATFORM_ADMIN_EMAIL ||
+    email === 'nageshsharat@gmail.com'
+  );
+}
+
 // Bootstrap Admin User (uses explicit ADMIN_BOOTSTRAP_PASSWORD or unguessable random secret; signs in via Google Firebase Auth)
 const defaultSalt = crypto.randomBytes(16).toString('hex');
 const bootstrapPass = process.env.ADMIN_BOOTSTRAP_PASSWORD?.trim() || crypto.randomBytes(32).toString('hex');
@@ -860,9 +876,9 @@ const defaultPasswordCombined = `${defaultSalt}:${defaultHash}`;
 const usersDatabase: DbUser[] = [
   {
     id: 'usr-admin-001',
-    full_name: 'Nagesh Sharat',
+    full_name: PLATFORM_ADMIN_NAME,
     company_name: 'AcquiredSaaS Inc',
-    email: 'nageshsharat@gmail.com',
+    email: PLATFORM_ADMIN_EMAIL,
     password_hash: defaultPasswordCombined,
     phone: '+1 (415) 890-2144',
     email_verified: true,
@@ -1420,7 +1436,7 @@ async function requireAuth(req: express.Request, res: express.Response, next: ex
 /**
  * Mandatory Server-Verified Admin Role Middleware (Area 5, 7)
  */
-async function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+async function requireWorkspaceAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
   await requireAuth(req, res, async () => {
     const user = (req as any).user as DbUser;
     const workspaceId = (req as any).workspaceId as string;
@@ -1429,7 +1445,7 @@ async function requireAdmin(req: express.Request, res: express.Response, next: e
     const isWsAdmin = await db.workspaceMembers.hasRole(workspaceId, user.id, ['owner', 'admin']);
     const isWsOwner = (await db.workspaces.getById(workspaceId))?.owner_id === user.id;
 
-    if (!isSysAdmin && !isWsAdmin && !isWsOwner) {
+    if (!isSysAdmin && !isWsAdmin && !isWsOwner && !isPlatformAdminUser(user)) {
       return res.status(403).json({
         success: false,
         error: 'Access denied: Administrator privileges required.',
@@ -4426,7 +4442,7 @@ app.post('/api/auth/setup-workspace', async (req, res) => {
       earned_reward_days: 0,
       created_at: nowIso,
       updated_at: nowIso,
-      role: 'Admin'
+      role: isPlatformAdminUser({ id: userId, email: userEmail } as any) ? 'Admin' : 'Analyst'
     };
     usersDatabase.push(dbUser);
   } else {
@@ -4787,7 +4803,7 @@ app.post('/api/auth/signup', authRateLimiter, async (req, res) => {
     earned_reward_days: 0,
     created_at: trialStartDate,
     updated_at: trialStartDate,
-    role: 'Admin'
+    role: isPlatformAdminUser({ id: userId, email: cleanEmail } as any) ? 'Admin' : 'Analyst'
   };
 
   usersDatabase.push(newUser);
@@ -5056,8 +5072,9 @@ app.post('/api/auth/login', authRateLimiter, async (req, res) => {
     name: user.full_name,
     email: user.email,
     company: user.company_name,
-    phone: user.phone,
-    role: user.role,
+    role: isPlatformAdminUser(user) ? 'Admin' : (user.role && user.role !== 'Admin' ? user.role : 'Analyst'),
+    isOwner: isPlatformAdminUser(user),
+    isPlatformAdmin: isPlatformAdminUser(user),
     plan: (user.selected_plan.charAt(0).toUpperCase() + user.selected_plan.slice(1)) as any,
     selectedPlan: user.selected_plan,
     planEdition: normalizePlanEdition(user.plan_edition),
@@ -5122,8 +5139,9 @@ app.get('/api/auth/me', async (req, res) => {
     name: fullName,
     email: email,
     company: companyName,
-    phone: user?.phone,
-    role: user?.role || 'Admin',
+    role: isPlatformAdminUser(user) ? 'Admin' : (user?.role && user.role !== 'Admin' ? user.role : 'Analyst'),
+    isOwner: isPlatformAdminUser(user),
+    isPlatformAdmin: isPlatformAdminUser(user),
     plan: (plan.charAt(0).toUpperCase() + plan.slice(1)) as any,
     selectedPlan: plan,
     planEdition,
@@ -10020,7 +10038,7 @@ app.all([
 });
 
 // 17D. Admin Audit Logs Endpoint (Area 5, 7)
-app.get('/api/admin/audit-logs', requireAdmin, async (req, res) => {
+app.get('/api/admin/audit-logs', requirePlatformAdmin, async (req, res) => {
   try {
     const workspaceId = (req as any).workspaceId as string;
     const fbCtx = getFirebaseCtx(req);
@@ -10133,24 +10151,14 @@ function escapeHtml(str: string): string {
 }
 
 // 17E. Workspace & Platform Admin Console Endpoints (Strictly RBAC + Tenant Isolated)
-const PLATFORM_ADMIN_EMAIL = 'nageshsharat@gmail.com';
-
-function isPlatformAdminUser(user?: DbUser | null): boolean {
-  if (!user) return false;
-  return (
-    user.id === 'usr-admin-001' ||
-    String(user.email || '').trim().toLowerCase() === PLATFORM_ADMIN_EMAIL
-  );
-}
-
 async function requirePlatformAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
   await requireAuth(req, res, async () => {
     const authUser = (req as any).user as DbUser | undefined;
     if (!isPlatformAdminUser(authUser)) {
       return res.status(403).json({
         success: false,
-        error: 'Access denied: Platform administrator privileges required.',
-        code: 'PLATFORM_FORBIDDEN'
+        error: 'Access denied: Application owner privileges required.',
+        code: 'FORBIDDEN'
       });
     }
     next();
@@ -10175,7 +10183,7 @@ function sanitizeAdminUser(u: any) {
   };
 }
 
-app.get('/api/admin/overview', requireAdmin, async (req, res) => {
+app.get('/api/admin/overview', requirePlatformAdmin, async (req, res) => {
   try {
     const authUser = (req as any).user as DbUser;
     const workspaceId = (req as any).workspaceId as string;
@@ -10338,7 +10346,7 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/admin/members', requireAdmin, async (req, res) => {
+app.post('/api/admin/members', requireWorkspaceAdmin, async (req, res) => {
   try {
     const authUser = (req as any).user as DbUser;
     const workspaceId = (req as any).workspaceId as string;
@@ -10424,7 +10432,7 @@ app.post('/api/admin/members', requireAdmin, async (req, res) => {
   }
 });
 
-app.patch('/api/admin/members/:userId', requireAdmin, async (req, res) => {
+app.patch('/api/admin/members/:userId', requireWorkspaceAdmin, async (req, res) => {
   try {
     const authUser = (req as any).user as DbUser;
     const workspaceId = (req as any).workspaceId as string;
@@ -10478,7 +10486,7 @@ app.patch('/api/admin/members/:userId', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/api/admin/members/:userId', requireAdmin, async (req, res) => {
+app.delete('/api/admin/members/:userId', requireWorkspaceAdmin, async (req, res) => {
   try {
     const authUser = (req as any).user as DbUser;
     const workspaceId = (req as any).workspaceId as string;
@@ -10529,7 +10537,7 @@ app.delete('/api/admin/members/:userId', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/api/admin/storage/file', requireAdmin, async (req, res) => {
+app.delete('/api/admin/storage/file', requirePlatformAdmin, async (req, res) => {
   try {
     const authUser = (req as any).user as DbUser;
     const workspaceId = (req as any).workspaceId as string;

@@ -88,7 +88,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Settings,
       badge: null
     },
-    ...((!user || user.role === 'Admin')
+    ...(Boolean(user && (user.id === 'usr-admin-001' || String(user.email || '').trim().toLowerCase() === 'nageshsharat@gmail.com'))
       ? [
           {
             id: 'admin',

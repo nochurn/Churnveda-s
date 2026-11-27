@@ -118,9 +118,13 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
   >({});
 
   const loadWorkspaceOverview = useCallback(async (isSilent = false) => {
-    if (!currentUser) {
+    const isOwner = Boolean(
+      currentUser &&
+      (currentUser.id === 'usr-admin-001' || String(currentUser.email || '').trim().toLowerCase() === 'nageshsharat@gmail.com')
+    );
+    if (!currentUser || !isOwner) {
       setLoading(false);
-      setAccessDeniedMessage('Please sign in with an administrator account to open the Admin Panel.');
+      setAccessDeniedMessage('Access denied: Application owner privileges required.');
       return;
     }
 

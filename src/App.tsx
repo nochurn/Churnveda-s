@@ -1153,7 +1153,7 @@ export default function App() {
                 { id: 'reports', label: 'Reports' },
                 { id: 'billing', label: 'Billing' },
                 { id: 'settings', label: 'Settings' },
-                ...((!currentUser || currentUser.role === 'Admin') ? [{ id: 'admin', label: 'Admin' }] : [])
+                ...(currentUser && (currentUser.id === 'usr-admin-001' || String(currentUser.email || '').trim().toLowerCase() === 'nageshsharat@gmail.com') ? [{ id: 'admin', label: 'Admin' }] : [])
               ].map((tab) => (
                 <button
                   key={tab.id}
